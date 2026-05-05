@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Runtime / local app data
+/data/
+electron-app/data/
+*.log
+
+# Backups / temp
+*.bak
+*.bak-*
+*.pre-*.bak
+*.tmp
+
+# Electron packaged runtime binaries (do not commit)
+electron.exe
+*.dll
+*.pak
+*.bin
+*.dat
+*.asar
+locales/
+resources/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/

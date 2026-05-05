@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+ <head>
+    <title>SLYA - MUD</title>
+    <link rel="stylesheet" href="roboto.css">
+    <style>
+	html { webkit-font-smoothing: antialiased; box-sizing: border-box; text-size-adjust: 100%; }
+    table, body { font-family:Roboto,sans-serif; font-weight:inherit; font-size:inherit; font-size:12px; font-weight:bold; letter-spacing: 0.00938em; } 
+    *, ::before, ::after { box-sizing: inherit; } 
+    body { margin:0; padding:0; background-color:black; color:white; font-size:18px; line-height:1.5;  }
+    </style>
+ </head>
+ <body>
+
+<script>
+
+const urlParams = new URLSearchParams(window.location.search);
+const version = urlParams.get('version');
+window.GM_info = { script: { version: version } };
+
+</script>
+
+	<div style="position:absolute;top:50vh;left:0px;text-align:center;width:100%;z-index:-1;font-size:120%;" id="wait"><script>if(version) { document.write('Loading SLYA - MUD v'+version); setTimeout('document.getElementById("wait").remove();', 8000); } else document.write('Loading the latest SLYA - MUD version from GitHub'); </script> ... please wait.</div>
+	<div style="position:absolute;right:5px;top:0;">
+		<button class="assist-btn" onclick="window.electronAPI.openDevTools()">Console</button>
+		<button class="assist-btn" onclick="window.electronAPI.openUpdate()">Update</button>
+		<button class="assist-btn" onclick="window.location.reload()">Reload</button>
+	</div>	
+	
+<script>
+     
+if(version)
+{
+	let rawSettingsData = localStorage.getItem('globalSettings');
+	if(!rawSettingsData) rawSettingsData = '{}';
+	const globalSettings = JSON.parse(rawSettingsData);
+
+	if(!globalSettings.mySecretKey)
+	{
+		document.write('<div style="position:absolute;top:36vh;left:0px;text-align:center;width:100%;z-index:-1;font-size:90%;color:#ffb;">This SLYA - MUD standalone version needs your wallet key to sign transactions.<br>Click on "Tools->Settings->Advanced->My Secret Key" and follow the instructions.<br>After you have saved the key, use the top-right "Reload" button.</div>');
+	}
+}
+
+</script>
+<script src="GM.js" type="text/javascript"></script>
+<script src="index.iife.min.js" type="text/javascript"></script>
+<script src="anchor-browserified.js" type="text/javascript"></script>
+<script src="buffer-browserified.js" type="text/javascript"></script>
+<script src="bs58-browserified.js" type="text/javascript"></script>
+<script src="SLY_Assistant.user.js" type="text/javascript"></script>
+
+  </body>
+</html>

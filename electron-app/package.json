@@ -1,0 +1,10 @@
+{
+  "name": "SLYA Standalone",
+  "version": "1.0.0",
+  "description": "SLYA",
+  "main": "main.js",
+  "author": "Swift42",
+  "devDependencies": {
+    "electron": "23.1.3"
+  }
+}
