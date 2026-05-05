@@ -91,11 +91,19 @@ else
   ipcMain.on('openDevTools', function() { win.openDevTools() })
   ipcMain.on('openUpdate', async function() {
 	let originalVersion = 'unknown'
-	let aepVersion = 'unknown'
-	try { originalVersion = (await fetchSLYA(ORIGINAL_UPDATE_URL)).version } catch (error) { originalVersion = 'unavailable' }
-	try { aepVersion = (await fetchSLYA(AEP_UPDATE_URL)).version } catch (error) { aepVersion = 'unavailable' }
+	let viktorVersion = 'unknown'
+	let currentSource = 'Local/custom'
+	let originalLatest = null
+	let viktorLatest = null
+	try { originalLatest = await fetchSLYA(ORIGINAL_UPDATE_URL); originalVersion = originalLatest.version } catch (error) { originalVersion = 'unavailable' }
+	try { viktorLatest = await fetchSLYA(AEP_UPDATE_URL); viktorVersion = viktorLatest.version } catch (error) { viktorVersion = 'unavailable' }
+	try {
+		const currentFile = fs.readFileSync("app/SLY_Assistant.user.js").toString()
+		if (viktorLatest && currentFile === viktorLatest.file) currentSource = 'Viktor'
+		else if (originalLatest && currentFile === originalLatest.file) currentSource = 'Swift'
+	} catch (error) {}
 	  
-	win.webContents.send('update', '<div style="position:absolute;left:50%;margin-left:-230px;top:30vh;width:460px;text-align:center;background-color:white;padding:10px;color:black">UPDATE<br>Current version: '+version+'<br><button onClick="window.electronAPI.updateToLatestSwift()">Update to original Swift latest: '+originalVersion+'</button><br><button onClick="window.electronAPI.updateToLatestAep()">Update to AEP latest: '+aepVersion+'</button><br><small>(The app will automatically restart after the update)</small><br><button onClick="document.getElementById(\'updateOverlay\').remove()">Cancel</button><br></div>');
+	win.webContents.send('update', '<div style="position:absolute;left:50%;margin-left:-230px;top:30vh;width:460px;text-align:center;background-color:white;padding:10px;color:black">UPDATE<br>Current version '+currentSource+': '+version+'<br><button onClick="window.electronAPI.updateToLatestSwift()">Update to Swift latest: '+originalVersion+'</button><br><button onClick="window.electronAPI.updateToLatestAep()">Update to Viktor latest: '+viktorVersion+'</button><br><small>(The app will automatically restart after the update)</small><br><button onClick="document.getElementById(\'updateOverlay\').remove()">Cancel</button><br></div>');
   })
   ipcMain.on('updateToLatestSwift', async function() {
 	version = await updateSLYA(ORIGINAL_UPDATE_URL);
@@ -104,7 +112,7 @@ else
   })
   ipcMain.on('updateToLatestAep', async function() {
 	version = await updateSLYA(AEP_UPDATE_URL);
-	win.webContents.send('update', '<div style="position:absolute;left:50%;margin-left:-200px;top:40vh;width:400px;text-align:center;background-color:#eee;color:black">AEP CODE UPDATED<br>Restarting ...<br></div>');
+	win.webContents.send('update', '<div style="position:absolute;left:50%;margin-left:-200px;top:40vh;width:400px;text-align:center;background-color:#eee;color:black">VIKTOR CODE UPDATED<br>Restarting ...<br></div>');
 	setTimeout(function() { win.loadFile('app/index.html', { query: { version: version } } ) } , 2000 )
   })
 
