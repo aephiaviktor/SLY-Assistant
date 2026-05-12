@@ -5790,7 +5790,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		cLog(1,`${FleetTimeStamp(fleet.label)} Undock ${assignment} Startup`);
 
-		if(assignment == 'Transport' || assignment == 'Mine') {
+		if(assignment == 'Transport' || assignment == 'Supply Chain' || assignment == 'Mine') {
 			const fleetAcctInfo = await solanaReadConnection.getAccountInfo(fleet.publicKey);
 			const [fleetState, extra] = getFleetState(fleetAcctInfo, fleet);
 			if (fleetState === 'StarbaseLoadingBay') {
@@ -7116,9 +7116,122 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return { amountLoaded, transaction };
 	}
 
+	function transportSubwarpPrefToMoveType(subwarpPref) {
+		return subwarpPref == 1 ? 'subwarp' : (subwarpPref == 2 ? 'warpsubwarp' : (subwarpPref == 3 ? 'warp-subwarp-warp' : 'warp'));
+	}
+
+	function transportMoveTypeToSubwarpPref(moveType) {
+		if(moveType == 'subwarp') return 1;
+		if(moveType == 'warpsubwarp') return 2;
+		if(moveType == 'warp-subwarp-warp') return 3;
+		return 0;
+	}
+
+	function cloneTransportManifest(manifest) {
+		return manifest.map(entry => ({...entry}));
+	}
+
+	function getTransportPlusTargetCount(fleetParsedData, target1Coord = '') {
+		const savedCount = parseInt(fleetParsedData && fleetParsedData.transportPlusTargetCount);
+		if(savedCount > 0) return savedCount;
+
+		if(fleetParsedData && Array.isArray(fleetParsedData.transportPlusTargets) && fleetParsedData.transportPlusTargets.length > 0) {
+			return fleetParsedData.transportPlusTargets.length;
+		}
+
+		if(fleetParsedData && fleetParsedData.transportPlusTarget2) return 2;
+		return target1Coord ? 2 : 1;
+	}
+
+	function getTransportPlusTargets(fleetParsedData, target1Coord = '', targetCount = null) {
+		let targets = fleetParsedData && Array.isArray(fleetParsedData.transportPlusTargets) ? fleetParsedData.transportPlusTargets.slice() : [];
+		if(targets.length < 1 && target1Coord) targets.push(target1Coord);
+		if(targets.length < 2 && fleetParsedData && fleetParsedData.transportPlusTarget2) targets.push(fleetParsedData.transportPlusTarget2);
+		if(target1Coord) {
+			if(targets.length < 1) targets.push(target1Coord);
+			else targets[0] = target1Coord;
+		}
+
+		if(targetCount !== null) {
+			while(targets.length < targetCount) targets.push('');
+			targets = targets.slice(0, targetCount);
+			if(target1Coord && targets.length > 0) targets[0] = target1Coord;
+		}
+
+		return targets;
+	}
+
+	function getTransportPlusRoutes(fleetParsedData, routeCount = 3) {
+		const savedRoutes = fleetParsedData && Array.isArray(fleetParsedData.transportPlusRoutes) ? fleetParsedData.transportPlusRoutes : [];
+		const routes = [];
+		for(let routeIndex=0; routeIndex<routeCount; routeIndex++) {
+			const savedRoute = savedRoutes[routeIndex] || {};
+			const routeSubwarpPref = typeof savedRoute.subwarpPref != 'undefined' ? savedRoute.subwarpPref : transportMoveTypeToSubwarpPref(savedRoute.moveType);
+			const savedManifest = Array.isArray(savedRoute.manifest) ? savedRoute.manifest : [];
+			const manifest = [];
+			for(let manifestIndex=0; manifestIndex<4; manifestIndex++) {
+				const savedEntry = savedManifest[manifestIndex] || {};
+				manifest.push({
+					res: savedEntry.res || '',
+					amt: savedEntry.amt || 0,
+					crew: savedEntry.crew || 0
+				});
+			}
+			routes.push({
+				subwarpPref: routeSubwarpPref || 0,
+				moveType: savedRoute.moveType || transportSubwarpPrefToMoveType(routeSubwarpPref || 0),
+				manifest: manifest
+			});
+		}
+		return routes;
+	}
+
+	function getTransportPlusRouteIndex(fleetParsedData, routeCount = null) {
+		const savedRouteIndex = parseInt(fleetParsedData && fleetParsedData.transportPlusRouteIndex);
+		if(isNaN(savedRouteIndex) || savedRouteIndex < 0) return null;
+		if(routeCount !== null && savedRouteIndex >= routeCount) return null;
+		return savedRouteIndex;
+	}
+
+	function validateTransportLegFuel(fleet, sourceCoords, destCoords, moveType, roundTrip = true) {
+		if (
+			isNaN(Number(sourceCoords[0])) || isNaN(Number(sourceCoords[1])) ||
+			isNaN(Number(destCoords[0])) || isNaN(Number(destCoords[1]))
+		) {
+			return { valid: false, moveType: moveType };
+		}
+		let effectiveMoveType = moveType;
+		const warpCost = calcWarpFuelReq(fleet, sourceCoords, destCoords, moveType == 'warpsubwarp');
+		if (warpCost > fleet.fuelCapacity) {
+			const subwarpCost = calculateSubwarpFuelBurn(fleet, calculateMovementDistance(sourceCoords, destCoords));
+			if (subwarpCost * (roundTrip ? 2 : 1) > fleet.fuelCapacity) {
+				return { valid: false, moveType: effectiveMoveType };
+			}
+			effectiveMoveType = 'subwarp';
+		}
+		return { valid: true, moveType: effectiveMoveType };
+	}
+
+	async function persistFleetTransportRouteState(i, moveType, moveTarget, transportPlusRouteIndex = null) {
+		const fleetPK = userFleets[i].publicKey.toString();
+		const fleetParsedData = JSON.parse(await GM.getValue(fleetPK, '{}'));
+		fleetParsedData.moveType = moveType;
+		fleetParsedData.subwarpPref = transportMoveTypeToSubwarpPref(moveType);
+		fleetParsedData.moveTarget = moveTarget;
+		if(transportPlusRouteIndex !== null && !isNaN(transportPlusRouteIndex)) fleetParsedData.transportPlusRouteIndex = transportPlusRouteIndex;
+		await GM.setValue(fleetPK, JSON.stringify(fleetParsedData));
+
+		userFleets[i].moveType = moveType;
+		userFleets[i].moveTarget = moveTarget;
+		if(transportPlusRouteIndex !== null && !isNaN(transportPlusRouteIndex)) userFleets[i].transportPlusRouteIndex = transportPlusRouteIndex;
+	}
+
 	async function addAssistInput(fleet) {
 			let fleetSavedData = await GM.getValue(fleet.publicKey.toString(), '{}');
 			let fleetParsedData = JSON.parse(fleetSavedData);
+			let transportPlusTargetCount = getTransportPlusTargetCount(fleetParsedData, fleetParsedData && fleetParsedData.dest ? fleetParsedData.dest : '');
+			let transportPlusTargetValues = getTransportPlusTargets(fleetParsedData, fleetParsedData && fleetParsedData.dest ? fleetParsedData.dest : '', transportPlusTargetCount);
+			let transportPlusRoutes = getTransportPlusRoutes(fleetParsedData, transportPlusTargetCount + 1);
 			let fleetRow = document.createElement('tr');
 			fleetRow.classList.add('assist-fleet-row');
 			fleetRow.setAttribute('pk', fleet.publicKey.toString());
@@ -7128,7 +7241,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let fleetLabelTd = document.createElement('td');
 			fleetLabelTd.appendChild(fleetLabel);
 
-			let assistAssignments = ['','Scan','Mine','Transport'];
+			let assistAssignments = ['','Scan','Mine','Transport','Supply Chain'];
 			let assignmentOptionsStr = '';
 			let fleetAssignment = document.createElement('select');
 			assistAssignments.forEach( function(assignment) {assignmentOptionsStr += '<option value="' + assignment + '">' + assignment + '</option>';});
@@ -7190,6 +7303,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
    			*/
 			let fleetSubwarpPref = document.createElement('select');
 			fleetSubwarpPref.style.width = '85px';
+			fleetSubwarpPref.style.display = fleetParsedData && fleetParsedData.assignment == 'Supply Chain' ? 'none' : 'inline-block';
 			fleetSubwarpPref.innerHTML = '<option value="0">Warp</option><option value="1">Subwarp</option><option value="2">Warp(SB) / Subwarp</option><option value="3">Warp, Subwarp, Warp, ...</option>';
 			if(fleetParsedData) { if(fleetParsedData.subwarpPref == 'false') fleetParsedData.subwarpPref=0; if(fleetParsedData.subwarpPref == 'true') fleetParsedData.subwarpPref=1; } // compatibility to old version
 			fleetSubwarpPref.value = fleetParsedData && fleetParsedData.subwarpPref ? fleetParsedData.subwarpPref : 0;
@@ -7454,6 +7568,108 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const transportResources = [''].concat(cargoItems.map((r) => r.name));
 			let transportOptStr = '';
 			transportResources.forEach( function(resource) {transportOptStr += '<option value="' + resource + '">' + resource + '</option>';});
+			const createTransportResourceDiv = (savedEntry, includeCrew = false) => {
+				let transportResource = document.createElement('select');
+				transportResource.innerHTML = transportOptStr;
+				let transportResourceToken = savedEntry && savedEntry.res ? cargoItems.find(r => r.token == savedEntry.res) : '';
+				transportResource.value = transportResourceToken && transportResourceToken.name ? transportResourceToken.name : '';
+				let transportResourcePerc = document.createElement('input');
+				transportResourcePerc.setAttribute('type', 'text');
+				transportResourcePerc.placeholder = '0';
+				transportResourcePerc.style.width = '60px';
+				transportResourcePerc.value = savedEntry && savedEntry.amt ? savedEntry.amt : '';
+				let transportResourceDiv = document.createElement('div');
+				transportResourceDiv.classList.add('transport-resource-entry');
+				transportResourceDiv.appendChild(transportResource);
+				transportResourceDiv.appendChild(transportResourcePerc);
+				if(includeCrew) {
+					let transportResourceCrewBlock = document.createElement('div');
+					transportResourceCrewBlock.style.display = 'inline-block';
+					let transportResourceCrewText = document.createElement('span');
+					transportResourceCrewText.innerHTML = 'Crew:';
+					let transportResourceCrew = document.createElement('input');
+					transportResourceCrew.setAttribute('type', 'text');
+					transportResourceCrew.placeholder = '0';
+					transportResourceCrew.style.width = '50px';
+					transportResourceCrew.value = savedEntry && savedEntry.crew ? savedEntry.crew : '';
+					transportResourceCrewBlock.appendChild(transportResourceCrewText);
+					transportResourceCrewBlock.appendChild(transportResourceCrew);
+					transportResourceDiv.appendChild(transportResourceCrewBlock);
+				}
+				return transportResourceDiv;
+			};
+			const padTransportPlusIndex = (index) => String(index).padStart(2, '0');
+			const getTransportPlusRouteLabel = (routeIndex, targetCount) => {
+				if(routeIndex === 0) return `Starbase -> Target ${padTransportPlusIndex(1)}`;
+				if(routeIndex === targetCount) return `Target ${padTransportPlusIndex(targetCount)} -> Starbase`;
+				return `Target ${padTransportPlusIndex(routeIndex)} -> Target ${padTransportPlusIndex(routeIndex + 1)}`;
+			};
+			const createTransportPlusTargetSelect = (targetValue) => {
+				let transportPlusTarget = document.createElement('select');
+				transportPlusTarget.classList.add('transport-plus-target-select');
+				transportPlusTarget.style.width = '80px';
+				transportPlusTarget.appendChild(document.createElement('option'));
+				validTargets.forEach(target => {
+					let transportPlusTargetOption = document.createElement('option');
+					transportPlusTargetOption.value = target.x + ',' + target.y;
+					transportPlusTargetOption.innerHTML = target.name + '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[' + target.x + ',' + target.y + ']';
+					if(transportPlusTargetOption.value == targetValue) transportPlusTargetOption.setAttribute('selected', 'selected');
+					transportPlusTarget.appendChild(transportPlusTargetOption);
+				});
+				return transportPlusTarget;
+			};
+			const readTransportPlusRouteBlock = (routeElem) => {
+				let routeSubwarpPref = parseInt(routeElem.querySelector('.transport-plus-movetype').value) || 0;
+				let manifest = Array.from(routeElem.querySelectorAll('.transport-resource-entry')).map((entryElem, entryIndex) => {
+					let resourceName = entryElem.children[0].value;
+					let resourceToken = resourceName !== '' ? cargoItems.find(r => r.name == resourceName).token : '';
+					let resourceAmt = parseIntKMG(entryElem.children[1].value) || 0;
+					let crewAmt = entryIndex == 0 && entryElem.children[2] ? parseIntKMG(entryElem.children[2].children[1].value) || 0 : 0;
+					return { res: resourceToken, amt: resourceAmt, crew: crewAmt };
+				});
+				return {
+					subwarpPref: routeSubwarpPref,
+					moveType: transportSubwarpPrefToMoveType(routeSubwarpPref),
+					manifest: manifest
+				};
+			};
+			const createTransportPlusRoute = (routeIndex, targetCount) => {
+				const routeData = transportPlusRoutes[routeIndex] || { subwarpPref: 0, manifest: [] };
+				let routeWrapper = document.createElement('div');
+				routeWrapper.classList.add('assist-transport-plus-route');
+				routeWrapper.setAttribute('data-route-index', String(routeIndex + 1));
+
+				let routeHeader = document.createElement('div');
+				routeHeader.classList.add('transport-plus-route-header');
+
+				let routeLabel = document.createElement('strong');
+				routeLabel.innerHTML = `Route ${padTransportPlusIndex(routeIndex + 1)}:`;
+				let routeDirection = document.createElement('span');
+				routeDirection.innerHTML = getTransportPlusRouteLabel(routeIndex, targetCount);
+
+				let routeMoveTypeLabel = document.createElement('span');
+				routeMoveTypeLabel.innerHTML = 'Warp/Subwarp:';
+				let routeMoveType = document.createElement('select');
+				routeMoveType.classList.add('transport-plus-movetype');
+				routeMoveType.style.width = '110px';
+				routeMoveType.innerHTML = '<option value="0">Warp</option><option value="1">Subwarp</option><option value="2">Warp(SB) / Subwarp</option><option value="3">Warp, Subwarp, Warp, ...</option>';
+				routeMoveType.value = routeData.subwarpPref || 0;
+
+				routeHeader.appendChild(routeLabel);
+				routeHeader.appendChild(routeDirection);
+				routeHeader.appendChild(routeMoveTypeLabel);
+				routeHeader.appendChild(routeMoveType);
+
+				let routeManifest = document.createElement('div');
+				routeManifest.classList.add('transport-plus-route-manifest');
+				for(let manifestIndex=0; manifestIndex<4; manifestIndex++) {
+					routeManifest.appendChild(createTransportResourceDiv(routeData.manifest[manifestIndex], manifestIndex == 0));
+				}
+
+				routeWrapper.appendChild(routeHeader);
+				routeWrapper.appendChild(routeManifest);
+				return routeWrapper;
+			};
 			let transportResource1 = document.createElement('select');
 			transportResource1.innerHTML = transportOptStr;
 			let transportResource1Token = fleetParsedData && fleetParsedData.transportResource1 && fleetParsedData.transportResource1 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportResource1) : '';
@@ -7624,6 +7840,93 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			transportRow.appendChild(transportTd);
 			targetElem.appendChild(transportRow);
 
+			let transportPlusRow = document.createElement('tr');
+			transportPlusRow.classList.add('assist-transport-plus-row');
+			transportPlusRow.style.display = fleetParsedData && fleetParsedData.assignment == 'Supply Chain' ? 'table-row' : 'none';
+			fleetParsedData && fleetParsedData.assignment == 'Supply Chain' && fleetRow.classList.add('show-top-border');
+			let transportPlusTd = document.createElement('td');
+			transportPlusTd.setAttribute('colspan', '8');
+
+			let transportPlusLocationWrapper = document.createElement('div');
+			transportPlusLocationWrapper.classList.add('transport-plus-locations');
+			let transportPlusTargetCountLabel = document.createElement('span');
+			transportPlusTargetCountLabel.innerHTML = 'Targets:';
+			let transportPlusTargetCountInput = document.createElement('input');
+			transportPlusTargetCountInput.classList.add('transport-plus-target-count');
+			transportPlusTargetCountInput.setAttribute('type', 'number');
+			transportPlusTargetCountInput.setAttribute('min', '1');
+			transportPlusTargetCountInput.setAttribute('max', '20');
+			transportPlusTargetCountInput.style.width = '45px';
+			transportPlusTargetCountInput.value = transportPlusTargetCount;
+			let transportPlusTargetNote = document.createElement('span');
+			transportPlusTargetNote.innerHTML = 'Target 01 uses the main Target field above.';
+			transportPlusLocationWrapper.appendChild(transportPlusTargetCountLabel);
+			transportPlusLocationWrapper.appendChild(transportPlusTargetCountInput);
+			transportPlusLocationWrapper.appendChild(transportPlusTargetNote);
+
+			let transportPlusTargetsWrapper = document.createElement('div');
+			transportPlusTargetsWrapper.classList.add('transport-plus-targets');
+
+			let transportPlusRoutesWrapper = document.createElement('div');
+			transportPlusRoutesWrapper.classList.add('transport-plus-routes');
+
+			const syncTransportPlusEditorState = () => {
+				transportPlusTargetValues[0] = fleetDestCoordSelect.value || transportPlusTargetValues[0] || '';
+				transportPlusTargetsWrapper.querySelectorAll('.transport-plus-target-select').forEach((selectElem, targetIndex) => {
+					transportPlusTargetValues[targetIndex + 1] = selectElem.value;
+				});
+				const currentRouteElems = transportPlusRoutesWrapper.querySelectorAll('.assist-transport-plus-route');
+				if(currentRouteElems.length > 0) {
+					transportPlusRoutes = Array.from(currentRouteElems).map(readTransportPlusRouteBlock);
+				}
+			};
+
+			const normalizeTransportPlusEditorState = () => {
+				transportPlusTargetCount = Math.max(1, Math.min(20, parseInt(transportPlusTargetCount) || 1));
+				transportPlusTargetValues = getTransportPlusTargets({ transportPlusTargets: transportPlusTargetValues }, fleetDestCoordSelect.value || transportPlusTargetValues[0] || '', transportPlusTargetCount);
+				transportPlusRoutes = getTransportPlusRoutes({ transportPlusRoutes: transportPlusRoutes }, transportPlusTargetCount + 1);
+			};
+
+			const renderTransportPlusConfig = () => {
+				normalizeTransportPlusEditorState();
+
+				transportPlusTargetsWrapper.replaceChildren();
+				for(let targetIndex=1; targetIndex<transportPlusTargetCount; targetIndex++) {
+					let transportPlusTargetWrapper = document.createElement('div');
+					transportPlusTargetWrapper.classList.add('transport-plus-target');
+					let transportPlusTargetLabel = document.createElement('span');
+					transportPlusTargetLabel.innerHTML = `Target ${padTransportPlusIndex(targetIndex + 1)}:`;
+					let transportPlusTargetSelect = createTransportPlusTargetSelect(transportPlusTargetValues[targetIndex]);
+					transportPlusTargetWrapper.appendChild(transportPlusTargetLabel);
+					transportPlusTargetWrapper.appendChild(transportPlusTargetSelect);
+					transportPlusTargetsWrapper.appendChild(transportPlusTargetWrapper);
+				}
+
+				transportPlusRoutesWrapper.replaceChildren();
+				for(let routeIndex=0; routeIndex<transportPlusTargetCount + 1; routeIndex++) {
+					transportPlusRoutesWrapper.appendChild(createTransportPlusRoute(routeIndex, transportPlusTargetCount));
+				}
+
+				transportPlusRow.querySelectorAll('.transport-resource-entry select').forEach(selectElem => {
+					selectElem.onchange = handleTransportResourceChange;
+					selectElem.dispatchEvent(new Event("change"));
+				});
+			};
+
+			transportPlusTargetCountInput.onchange = function() {
+				syncTransportPlusEditorState();
+				transportPlusTargetCount = this.value;
+				renderTransportPlusConfig();
+				transportPlusTargetCountInput.value = transportPlusTargetCount;
+			};
+
+			transportPlusTd.appendChild(transportPlusLocationWrapper);
+			transportPlusTd.appendChild(transportPlusTargetsWrapper);
+			transportPlusTd.appendChild(transportPlusRoutesWrapper);
+			transportPlusRow.appendChild(transportPlusTd);
+			targetElem.appendChild(transportPlusRow);
+			renderTransportPlusConfig();
+
 			let padRow = document.createElement('tr');
 			padRow.classList.add('assist-pad-row');
 			padRow.style.display = fleetParsedData && fleetParsedData.assignment ? 'table-row' : 'none';
@@ -7633,11 +7936,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			padRow.appendChild(padRowTd);
 			targetElem.appendChild(padRow);
 
-			transportResource1.onchange = transportResource2.onchange = transportResource3.onchange = transportResource4.onchange = transportSBResource1.onchange = transportSBResource2.onchange = transportSBResource3.onchange = transportSBResource4.onchange =
-			function() {
+			function handleTransportResourceChange() {
 				if(this.value=='') this.style.backgroundColor='white';
 				else this.style.backgroundColor='#fff0d0';
 			}
+			transportResource1.onchange = transportResource2.onchange = transportResource3.onchange = transportResource4.onchange = transportSBResource1.onchange = transportSBResource2.onchange = transportSBResource3.onchange = transportSBResource4.onchange = handleTransportResourceChange;
 			transportResource1.dispatchEvent(new Event("change"));
 			transportResource2.dispatchEvent(new Event("change"));
 			transportResource3.dispatchEvent(new Event("change"));
@@ -7646,6 +7949,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			transportSBResource2.dispatchEvent(new Event("change"));
 			transportSBResource3.dispatchEvent(new Event("change"));
 			transportSBResource4.dispatchEvent(new Event("change"));
+			transportPlusRow.querySelectorAll('.transport-resource-entry select').forEach(selectElem => {
+				selectElem.onchange = handleTransportResourceChange;
+				selectElem.dispatchEvent(new Event("change"));
+			});
 
 			fleetAssignment.onchange = function() {
 					if (fleetAssignment.value == 'Scan') {
@@ -7653,37 +7960,56 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 							scanRow2.style.display = 'table-row';
 							mineRow.style.display = 'none';
 							transportRow.style.display = 'none';
+							transportPlusRow.style.display = 'none';
 							padRow.style.display = 'table-row';
 							fleetRow.classList.add('show-top-border');
 							fleetDestCoord.style.display = 'inline-block';
 							fleetDestCoordSelect.style.display = 'none';
+							fleetSubwarpPref.style.display = 'inline-block';
 					} else if (fleetAssignment.value == 'Mine') {
 							mineRow.style.display = 'table-row';
 							scanRow.style.display = 'none';
 							scanRow2.style.display = 'none';
 							transportRow.style.display = 'none';
+							transportPlusRow.style.display = 'none';
 							padRow.style.display = 'table-row';
 							fleetRow.classList.add('show-top-border');
 							fleetDestCoord.style.display = 'none';
 							fleetDestCoordSelect.style.display = 'inline-block';
+							fleetSubwarpPref.style.display = 'inline-block';
 					} else if (fleetAssignment.value == 'Transport') {
 							transportRow.style.display = 'table-row';
 							scanRow.style.display = 'none';
 							scanRow2.style.display = 'none';
 							mineRow.style.display = 'none';
+							transportPlusRow.style.display = 'none';
 							padRow.style.display = 'table-row';
 							fleetRow.classList.add('show-top-border');
 							fleetDestCoord.style.display = 'none';
 							fleetDestCoordSelect.style.display = 'inline-block';
+							fleetSubwarpPref.style.display = 'inline-block';
+					} else if (fleetAssignment.value == 'Supply Chain') {
+							transportPlusRow.style.display = 'table-row';
+							transportRow.style.display = 'none';
+							scanRow.style.display = 'none';
+							scanRow2.style.display = 'none';
+							mineRow.style.display = 'none';
+							padRow.style.display = 'table-row';
+							fleetRow.classList.add('show-top-border');
+							fleetDestCoord.style.display = 'none';
+							fleetDestCoordSelect.style.display = 'inline-block';
+							fleetSubwarpPref.style.display = 'none';
 					} else {
 							scanRow.style.display = 'none';
 							scanRow2.style.display = 'none';
 							mineRow.style.display = 'none';
 							transportRow.style.display = 'none';
+							transportPlusRow.style.display = 'none';
 							padRow.style.display = 'none';
 							fleetRow.classList.remove('show-top-border');
 							fleetDestCoord.style.display = 'none';
 							fleetDestCoordSelect.style.display = 'inline-block';
+							fleetSubwarpPref.style.display = 'inline-block';
 					}
 			};
 
@@ -8109,12 +8435,13 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		let scanRows2 = document.querySelectorAll('#assistModal .assist-scan2-row');
 		let mineRows = document.querySelectorAll('#assistModal .assist-mine-row');
 		let transportRows = document.querySelectorAll('#assistModal .assist-transport-row > td');
+		let transportPlusRows = document.querySelectorAll('#assistModal .assist-transport-plus-row > td');
 		let errElem = document.querySelectorAll('#assist-modal-error');
 		let errBool = false;
 
 		for (let [i, row] of fleetRows.entries()) {
 
-			const inputError = (msg, innerHtml, type) => {
+			const inputError = (msg, innerHtml, type, extraElems = []) => {
 				// type 1: Distance exceeds fuel capacity
 				// type 2: Identical starbase/target sectors
 				cLog(1, msg);
@@ -8122,6 +8449,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				row.children[2].children[1].style.border = '2px solid red';
 				row.children[3].firstChild.style.border = '2px solid red';
 				if(type==1) row.children[7].firstChild.style.border = '2px solid red';
+				extraElems.forEach(elem => elem && (elem.style.border = '2px solid red'));
 				errElem[0].innerHTML = innerHtml;
 				errBool = true;
 				rowErrBool = true;
@@ -8143,26 +8471,84 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let subwarpPref = parseInt(row.children[4].firstChild.value) || 0;
 			let userFleetIndex = userFleets.findIndex(item => {return item.publicKey == fleetPK});
 			//let moveType = subwarpPref == true ? 'subwarp' : 'warp';
-			let moveType = subwarpPref == 1 ? 'subwarp' : (subwarpPref == 2 ? 'warpsubwarp' : (subwarpPref == 3 ? 'warp-subwarp-warp' : 'warp') );
+			let moveType = transportSubwarpPrefToMoveType(subwarpPref);
 
 			const destCoords = ConvertCoords(fleetDestCoord);
 			const starbaseCoords = ConvertCoords(fleetStarbaseCoord);
+			let transportPlusTargetCount = Math.max(1, Math.min(20, parseInt(transportPlusRows[i].querySelector('.transport-plus-target-count').value) || 1));
+			let transportPlusTargetValues = [fleetDestCoord];
+			transportPlusRows[i].querySelectorAll('.transport-plus-target-select').forEach((selectElem, targetIndex) => {
+				transportPlusTargetValues[targetIndex + 1] = selectElem.value;
+			});
+			transportPlusTargetValues = getTransportPlusTargets({ transportPlusTargets: transportPlusTargetValues }, fleetDestCoord, transportPlusTargetCount);
+			let transportPlusRouteElems = transportPlusRows[i].querySelectorAll('.assist-transport-plus-route');
+			let transportPlusRoutes = Array.from(transportPlusRouteElems).map(routeElem => {
+				let routeSubwarpPref = parseInt(routeElem.querySelector('.transport-plus-movetype').value) || 0;
+				let manifest = Array.from(routeElem.querySelectorAll('.transport-resource-entry')).map((entryElem, entryIndex) => {
+					let resourceName = entryElem.children[0].value;
+					let resourceToken = resourceName !== '' ? cargoItems.find(r => r.name == resourceName).token : '';
+					let resourceAmt = parseIntKMG(entryElem.children[1].value) || 0;
+					let crewAmt = entryIndex == 0 && entryElem.children[2] ? parseIntKMG(entryElem.children[2].children[1].value) || 0 : 0;
+					return { res: resourceToken, amt: resourceAmt, crew: crewAmt };
+				});
+				return {
+					subwarpPref: routeSubwarpPref,
+					moveType: transportSubwarpPrefToMoveType(routeSubwarpPref),
+					manifest: manifest
+				};
+			});
+			transportPlusRoutes = getTransportPlusRoutes({ transportPlusRoutes: transportPlusRoutes }, transportPlusTargetValues.length + 1);
+			const transportPlusTargetCoords = transportPlusTargetValues.map(coord => ConvertCoords(coord));
 
-			if(fleetAssignment !== '') {
-				//let warpCost = calculateWarpFuelBurn(userFleets[userFleetIndex], moveDist);
-				let warpCost = calcWarpFuelReq(userFleets[userFleetIndex], starbaseCoords, destCoords, moveType == 'warpsubwarp' );
-				if (warpCost > userFleets[userFleetIndex].fuelCapacity) {
-					let subwarpCost = calculateSubwarpFuelBurn(userFleets[userFleetIndex], calculateMovementDistance(starbaseCoords, destCoords));
-					if (subwarpCost * 2 > userFleets[userFleetIndex].fuelCapacity) {
-						inputError('ERROR: Fleet will not have enough fuel to return to starbase', 'ERROR: Distance exceeds fuel capacity', 1);
-					} else {
-						moveType = 'subwarp';
-					}
+			if(fleetAssignment !== '' && fleetAssignment !== 'Supply Chain') {
+				const moveTypeValidation = validateTransportLegFuel(userFleets[userFleetIndex], starbaseCoords, destCoords, moveType, true);
+				if (!moveTypeValidation.valid) {
+					inputError('ERROR: Fleet will not have enough fuel to return to starbase', 'ERROR: Distance exceeds fuel capacity', 1);
+				} else {
+					moveType = moveTypeValidation.moveType;
 				}
 			}
 
 			if(fleetAssignment === 'Transport' && starbaseCoords[0]==destCoords[0] && starbaseCoords[1]==destCoords[1]) {
 				inputError('ERROR: Starbase and target sectors are identical.', 'ERROR: Identical starbase/target sectors', 2);
+			}
+			if(fleetAssignment === 'Supply Chain') {
+				const extraTargetElems = Array.from(transportPlusRows[i].querySelectorAll('.transport-plus-target-select'));
+				if(transportPlusTargetValues.some(coord => !coord)) {
+					inputError('ERROR: Supply Chain is missing one or more targets.', 'ERROR: Missing Supply Chain target', 2, extraTargetElems);
+				}
+				const transportPlusStops = [fleetStarbaseCoord].concat(transportPlusTargetValues).concat([fleetStarbaseCoord]);
+				const hasConsecutiveDuplicateTransportPlusLocation = transportPlusStops.some((coord, coordIndex) => coordIndex > 0 && coord && coord === transportPlusStops[coordIndex - 1]);
+				if(hasConsecutiveDuplicateTransportPlusLocation) {
+					inputError('ERROR: Consecutive Supply Chain locations must be different.', 'ERROR: Consecutive Supply Chain sectors are identical', 2, extraTargetElems);
+				}
+
+				let routeChecks = [
+					{ source: starbaseCoords, dest: transportPlusTargetCoords[0], roundTrip: true, route: transportPlusRoutes[0] }
+				];
+				for(let routeIndex=1; routeIndex<transportPlusTargetCoords.length; routeIndex++) {
+					routeChecks.push({
+						source: transportPlusTargetCoords[routeIndex - 1],
+						dest: transportPlusTargetCoords[routeIndex],
+						roundTrip: false,
+						route: transportPlusRoutes[routeIndex]
+					});
+				}
+				routeChecks.push({
+					source: transportPlusTargetCoords[transportPlusTargetCoords.length - 1],
+					dest: starbaseCoords,
+					roundTrip: false,
+					route: transportPlusRoutes[transportPlusTargetCoords.length]
+				});
+				for(const routeCheck of routeChecks) {
+					const validation = validateTransportLegFuel(userFleets[userFleetIndex], routeCheck.source, routeCheck.dest, routeCheck.route.moveType, routeCheck.roundTrip);
+					if(!validation.valid) {
+						inputError('ERROR: Supply Chain route exceeds fuel capacity', 'ERROR: Distance exceeds fuel capacity', 1, extraTargetElems);
+						break;
+					}
+					routeCheck.route.moveType = validation.moveType;
+					routeCheck.route.subwarpPref = transportMoveTypeToSubwarpPref(validation.moveType);
+				}
 			}
 
 			let scanMin = parseInt(scanRows[i].children[1].children[0].children[1].value) || 0;
@@ -8218,6 +8604,20 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				let fleetSavedData = await GM.getValue(fleetPK, '{}');
 				let fleetParsedData = JSON.parse(fleetSavedData);
 				let fleetMoveTarget = fleetParsedData && fleetParsedData.moveTarget ? fleetParsedData.moveTarget : '';
+				let fleetTransportPlusRouteIndex = getTransportPlusRouteIndex(fleetParsedData, transportPlusRoutes.length);
+				if(fleetAssignment !== 'Supply Chain') fleetTransportPlusRouteIndex = null;
+				if(fleetAssignment === 'Supply Chain') {
+					let activeTransportPlusRouteIndex = fleetTransportPlusRouteIndex;
+					if(activeTransportPlusRouteIndex === null) {
+						activeTransportPlusRouteIndex = transportPlusRoutes.findIndex((route, routeIndex) => {
+							const expectedDestCoords = routeIndex < transportPlusTargetValues.length ? transportPlusTargetCoords[routeIndex] : starbaseCoords;
+							return CoordsEqual(ConvertCoords(fleetMoveTarget), expectedDestCoords);
+						});
+					}
+					const activeTransportPlusRoute = activeTransportPlusRouteIndex !== null && activeTransportPlusRouteIndex > -1 ? transportPlusRoutes[activeTransportPlusRouteIndex] : transportPlusRoutes[0];
+					subwarpPref = activeTransportPlusRoute.subwarpPref;
+					moveType = activeTransportPlusRoute.moveType;
+				}
 				let scanBlock = buildScanBlock(destCoords[0], destCoords[1], scanPattern, scanPatternLength);
 
 				let fleetScanEnd = fleetParsedData && fleetParsedData.scanEnd ? fleetParsedData.scanEnd : 0;
@@ -8250,6 +8650,11 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					transportSBResource3Perc: transportSBResource3Perc,
 					transportSBResource4: transportSBResource4,
 					transportSBResource4Perc: transportSBResource4Perc,
+					transportPlusTargetCount: transportPlusTargetCount,
+					transportPlusTarget2: transportPlusTargetValues[1] || '',
+					transportPlusTargets: transportPlusTargetValues,
+					transportPlusRoutes: transportPlusRoutes,
+					transportPlusRouteIndex: fleetTransportPlusRouteIndex,
 					scanBlock: scanBlock,
 					scanMin: scanMin,
 					scanMin2: scanMin2,
@@ -8270,6 +8675,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				userFleets[userFleetIndex].mineResource = fleetMineResource;
 				userFleets[userFleetIndex].destCoord = fleetDestCoord;
 				userFleets[userFleetIndex].starbaseCoord = fleetStarbaseCoord;
+				userFleets[userFleetIndex].transportPlusTarget2 = transportPlusTargetValues[1] || '';
+				userFleets[userFleetIndex].transportPlusTargets = transportPlusTargetValues;
+				userFleets[userFleetIndex].transportPlusRouteIndex = fleetTransportPlusRouteIndex;
 				userFleets[userFleetIndex].moveType = moveType;
 				userFleets[userFleetIndex].scanBlock = scanBlock;
 				userFleets[userFleetIndex].scanMin = scanMin;
@@ -8704,6 +9112,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			document.querySelectorAll('#assistModal .assist-mine-row').forEach(e => e.remove());
 			document.querySelectorAll('#assistModal .assist-pad-row').forEach(e => e.remove());
 			document.querySelectorAll('#assistModal .assist-transport-row').forEach(e => e.remove());
+			document.querySelectorAll('#assistModal .assist-transport-plus-row').forEach(e => e.remove());
             document.querySelectorAll('#assistModal .assist-craft-row').forEach(e => e.remove());
 			for (let fleet of userFleets) addAssistInput(fleet);
             for (let i=1; i < globalSettings.craftingJobs+1; i++) addCraftingInput(i);
@@ -10297,6 +10706,205 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
         }
     }
 
+	function getTransportPlusLegs(fleetParsedData, starbaseCoord, target1Coord) {
+		const transportPlusTargets = getTransportPlusTargets(fleetParsedData, target1Coord);
+		if(transportPlusTargets.length < 1) return [];
+		const transportPlusRoutes = getTransportPlusRoutes(fleetParsedData, transportPlusTargets.length + 1);
+		const transportPlusLegs = [];
+
+		for(let routeIndex=0; routeIndex<transportPlusRoutes.length; routeIndex++) {
+			const sourceCoord = routeIndex === 0 ? starbaseCoord : transportPlusTargets[routeIndex - 1];
+			const destCoord = routeIndex < transportPlusTargets.length ? transportPlusTargets[routeIndex] : starbaseCoord;
+			const previousRouteIndex = routeIndex === 0 ? transportPlusRoutes.length - 1 : routeIndex - 1;
+			transportPlusLegs.push({
+				routeIndex: routeIndex,
+				sourceCoord: sourceCoord,
+				destCoord: destCoord,
+				currentManifest: cloneTransportManifest(transportPlusRoutes[previousRouteIndex].manifest),
+				destinationManifest: cloneTransportManifest(transportPlusRoutes[routeIndex].manifest),
+				moveType: transportPlusRoutes[routeIndex].moveType,
+				roundTrip: routeIndex === 0
+			});
+		}
+
+		return transportPlusLegs;
+	}
+
+	async function handleTransportStop(i, sourceCoord, destCoord, currentManifest, destinationManifest, moveType, roundTrip, routeIndex = null) {
+		const sourceCoords = ConvertCoords(sourceCoord);
+		const destCoords = ConvertCoords(destCoord);
+		userFleets[i].moveType = moveType;
+		userFleets[i].resupplying = true;
+
+		let sourceCargoManifest = cloneTransportManifest(currentManifest);
+		let destinationCargoManifest = cloneTransportManifest(destinationManifest);
+		const hasSourceManifest = hasTransportManifest(sourceCargoManifest);
+		const hasDestinationManifest = hasTransportManifest(destinationCargoManifest);
+
+		let checkCargoResult = await checkCargo(sourceCargoManifest, destinationCargoManifest, userFleets[i]);
+		sourceCargoManifest = checkCargoResult.currentManifest;
+		destinationCargoManifest = checkCargoResult.destinationManifest;
+
+		let needToUnloadCrew = 0;
+		if((sourceCargoManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && (userFleets[i].crewCount - userFleets[i].requiredCrew > 0)) {
+			needToUnloadCrew = userFleets[i].crewCount - userFleets[i].requiredCrew;
+		}
+		let needToLoadCrew = 0;
+		if((destinationCargoManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && ((userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount - needToUnloadCrew) > 0)) {
+			needToLoadCrew = Math.min(userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount, destinationCargoManifest[0].crew);
+		}
+		if(sourceCargoManifest[0].crew > 0 || destinationCargoManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
+
+		const fuelData = await getFleetFuelData(userFleets[i], sourceCoords, destCoords, roundTrip);
+		const fuelEntry = destinationCargoManifest.find(e => e.res === sageGameAcct.account.mints.fuel.toString()) || {amt: 0};
+		const totalFuel = fuelData.fuelNeeded + fuelEntry.amt;
+		let fuelToAdd = Math.min(fuelData.capacity, totalFuel) - fuelData.amount;
+		if(fuelToAdd > 0 && globalSettings.transportFuel100 && roundTrip && fuelToAdd < fuelData.capacity - fuelData.amount) fuelToAdd = fuelData.capacity - fuelData.amount;
+
+		cLog(3,`${FleetTimeStamp(userFleets[i].label)} Fuel needed`, fuelData.fuelNeeded, '/ fuel found', fuelData.amount, '/ fuel to add', fuelToAdd, '/ needToLoad', checkCargoResult.needToLoad, '/ needToUnload', checkCargoResult.needToUnload, '/ needToLoadCrew', needToLoadCrew, '/ needToUnloadCrew', needToUnloadCrew);
+
+		if (checkCargoResult.needToLoad || checkCargoResult.needToUnload || fuelToAdd > 0 || needToLoadCrew > 0 || needToUnloadCrew > 0) {
+			let transportLoadUnloadSingleTx=globalSettings.transportLoadUnloadSingleTx;
+			let transactions = [];
+			let unloadedAmountInTransaction = 0;
+
+			let resp = await execDock(userFleets[i], sourceCoord, transportLoadUnloadSingleTx);
+			if(transportLoadUnloadSingleTx && resp) {
+				transactions.push(resp);
+			}
+
+			if(needToUnloadCrew) {
+				resp = await handleCrewUnloading(userFleets[i], sourceCoord, needToUnloadCrew, transportLoadUnloadSingleTx);
+				if(transportLoadUnloadSingleTx && resp) {
+					transactions.push(resp);
+				}
+			}
+			if(needToLoadCrew) {
+				let crewResp = await handleCrewLoading(userFleets[i], sourceCoord, needToLoadCrew, transportLoadUnloadSingleTx);
+				if (crewResp && crewResp.name == 'NotEnoughCrew') {
+					if(globalSettings.transportStopOnError) {
+						cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - ERROR: Not enough crew`);
+						updateFleetState(userFleets[i], 'ERROR: Not enough crew');
+						return false;
+					} else {
+						cLog(1,`${FleetTimeStamp(userFleets[i].label)} Not enough crew`);
+					}
+				} else if(transportLoadUnloadSingleTx && crewResp) {
+					transactions.push(crewResp);
+				}
+			}
+
+			let fuelUnloadDeficit = 0;
+			if (hasSourceManifest || checkCargoResult.needToUnload) {
+				const unloadResult = await handleTransportUnloading(userFleets[i], sourceCoord, sourceCargoManifest, transportLoadUnloadSingleTx);
+				fuelUnloadDeficit = unloadResult.fuelUnloadDeficit;
+				if(transportLoadUnloadSingleTx) {
+					transactions = transactions.concat(unloadResult.transactions);
+					unloadedAmountInTransaction = unloadResult.unloadedAmount;
+				}
+			} else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Unloading skipped - No resources specified`);
+
+			let refuelResp = await handleTransportRefueling(userFleets[i], sourceCoord, sourceCoords, destCoords, roundTrip, roundTrip ? 0 : fuelUnloadDeficit, destinationCargoManifest, transportLoadUnloadSingleTx);
+			if (refuelResp.status === 0) {
+				userFleets[i].state = refuelResp.detail;
+				return false;
+			} else if(transportLoadUnloadSingleTx && refuelResp && refuelResp.transactions) {
+				transactions = transactions.concat(refuelResp.transactions);
+			}
+
+			let fuelIndex = destinationCargoManifest.findIndex(e => e.res === sageGameAcct.account.mints.fuel.toString());
+			if (fuelIndex > -1) {
+				destinationCargoManifest[fuelIndex].amt = destinationCargoManifest[fuelIndex].amt - refuelResp.amount;
+				if(transportLoadUnloadSingleTx && refuelResp.alreadyLoaded) destinationCargoManifest[fuelIndex].alreadyLoadedInTransaction = refuelResp.alreadyLoaded;
+			}
+
+			if(hasDestinationManifest) {
+				const loadedCargo = await handleTransportLoading(i, sourceCoord, destinationCargoManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
+				cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargo.success);
+				if(!loadedCargo.success && globalSettings.transportStopOnError) {
+					cLog(1,`${FleetTimeStamp(userFleets[i].label)} ERROR: Unexpected error on cargo load.`);
+					return false;
+				} else if(transportLoadUnloadSingleTx) {
+					transactions = transactions.concat(loadedCargo.transactions);
+				}
+			} else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Loading skipped - No resources specified`);
+
+			let undockResult = await execUndock(userFleets[i], sourceCoord, transportLoadUnloadSingleTx);
+			if(transportLoadUnloadSingleTx) {
+				updateFleetState(userFleets[i], 'Exec tx bundle');
+				transactions.push(undockResult);
+				undockResult = await txSliceAndSend(transactions, userFleets[i], 'LOAD/UNLOAD', 100, 5);
+				updateFleetState(userFleets[i], 'Idle');
+			}
+			let fleetState = await solanaReadConnection.getAccountInfoAndContext(userFleets[i].publicKey, {minContextSlot: undockResult.slot});
+		}
+
+		await persistFleetTransportRouteState(i, moveType, destCoord, routeIndex);
+		userFleets[i].resupplying = false;
+		cLog(3,`${FleetTimeStamp(userFleets[i].label)} userFleets[i]: `, userFleets[i]);
+		return true;
+	}
+
+	async function handleSupplyChain(i, fleetState, fleetCoords) {
+		const fleetParsedData = JSON.parse(await GM.getValue(userFleets[i].publicKey.toString(), '{}'));
+		const transportPlusLegs = getTransportPlusLegs(fleetParsedData, userFleets[i].starbaseCoord, userFleets[i].destCoord);
+		const activeTransportPlusRouteIndex = getTransportPlusRouteIndex(fleetParsedData, transportPlusLegs.length);
+		if(transportPlusLegs.length < 2 || transportPlusLegs.some(route => !route.sourceCoord || !route.destCoord)) {
+			cLog(1,`${FleetTimeStamp(userFleets[i].label)} Supply Chain - ERROR: Missing route coordinates`);
+			updateFleetState(userFleets[i], 'ERROR: Missing Supply Chain route');
+			return;
+		}
+
+		let activeLeg = null;
+		if (fleetState === 'Idle') {
+			if(activeTransportPlusRouteIndex !== null) {
+				const indexedLeg = transportPlusLegs[activeTransportPlusRouteIndex];
+				if(indexedLeg && CoordsEqual(fleetCoords, ConvertCoords(indexedLeg.destCoord))) {
+					activeLeg = transportPlusLegs[(activeTransportPlusRouteIndex + 1) % transportPlusLegs.length];
+				} else if(indexedLeg && CoordsEqual(fleetCoords, ConvertCoords(indexedLeg.sourceCoord))) {
+					activeLeg = indexedLeg;
+				}
+			}
+			if(!activeLeg) activeLeg = transportPlusLegs.find(route => CoordsEqual(fleetCoords, ConvertCoords(route.sourceCoord)));
+			if(activeLeg) {
+				const handled = await handleTransportStop(i, activeLeg.sourceCoord, activeLeg.destCoord, activeLeg.currentManifest, activeLeg.destinationManifest, activeLeg.moveType, activeLeg.roundTrip, activeLeg.routeIndex);
+				if(handled === false) return;
+			}
+		}
+
+		if(userFleets[i].stopping) return;
+
+		const activeMoveTarget = userFleets[i].moveTarget !== '' ? userFleets[i].moveTarget : (fleetParsedData.moveTarget || '');
+		if (activeMoveTarget !== '') {
+			const activeMoveTargetCoords = ConvertCoords(activeMoveTarget);
+			if(!activeLeg && activeTransportPlusRouteIndex !== null) {
+				const indexedLeg = transportPlusLegs[activeTransportPlusRouteIndex];
+				if(indexedLeg && CoordsEqual(ConvertCoords(indexedLeg.destCoord), activeMoveTargetCoords)) activeLeg = indexedLeg;
+			}
+			if(!activeLeg) activeLeg = transportPlusLegs.find(route => CoordsEqual(ConvertCoords(route.destCoord), activeMoveTargetCoords));
+			if(activeLeg) {
+				userFleets[i].moveType = activeLeg.moveType;
+				userFleets[i].moveTarget = activeMoveTarget;
+				userFleets[i].transportPlusRouteIndex = activeLeg.routeIndex;
+			}
+			const targetX = activeMoveTarget.split(',').length > 1 ? activeMoveTarget.split(',')[0].trim() : '';
+			const targetY = activeMoveTarget.split(',').length > 1 ? activeMoveTarget.split(',')[1].trim() : '';
+			const moveDist = calculateMovementDistance(fleetCoords, [targetX,targetY]);
+			let isStarbaseAndWarpSubwarp = false;
+			if(activeLeg && userFleets[i].moveType == 'warpsubwarp') {
+				const activeSourceCoords = ConvertCoords(activeLeg.sourceCoord);
+				const activeDestCoords = ConvertCoords(activeLeg.destCoord);
+				isStarbaseAndWarpSubwarp =
+					(fleetCoords[0] == activeSourceCoords[0] && fleetCoords[1] == activeSourceCoords[1]) ||
+					(fleetCoords[0] == activeDestCoords[0] && fleetCoords[1] == activeDestCoords[1]);
+			}
+			await handleMovement(i, moveDist, targetX, targetY, isStarbaseAndWarpSubwarp);
+		} else {
+			cLog(1,`${FleetTimeStamp(userFleets[i].label)} Supply Chain - ERROR: Fleet must start at Starbase or a configured target`);
+			updateFleetState(userFleets[i], 'ERROR: Fleet must start at Starbase or a configured target');
+		}
+	}
+
 	async function getFleetFuelData(fleet, currentPos, targetPos, roundTrip = true) {
 		const moveDist = calculateMovementDistance(currentPos, targetPos);
 		const fleetCurrentFuelTank = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.fuelTank, {programId: tokenProgramPK});
@@ -10842,7 +11450,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				}
 
 				if ((userFleets[i].iterCnt < 2) && fleetState == 'StarbaseLoadingBay') {
-					if(fleetParsedData.assignment == 'Scan' || fleetParsedData.assignment == 'Mine' || fleetParsedData.assignment == 'Transport')
+					if(fleetParsedData.assignment == 'Scan' || fleetParsedData.assignment == 'Mine' || fleetParsedData.assignment == 'Transport' || fleetParsedData.assignment == 'Supply Chain')
 						await execStartupUndock(i, fleetParsedData.assignment);
 				}
 				else if (fleetState == 'MoveWarp' || fleetState == 'MoveSubwarp') {
@@ -10896,6 +11504,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				}
 				else if (fleetParsedData.assignment == 'Transport') {
 					await handleTransport(i, userFleets[i].state, fleetCoords);
+				}
+				else if (fleetParsedData.assignment == 'Supply Chain') {
+					await handleSupplyChain(i, userFleets[i].state, fleetCoords);
 				}
 		} catch (err) {
 			cLog(1,`${FleetTimeStamp(userFleets[i].label)} ERROR`, err);
@@ -11861,6 +12472,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				let fleetStarbase = fleetParsedData && fleetParsedData.starbase ? fleetParsedData.starbase : '';
 				let fleetMoveType = fleetParsedData && fleetParsedData.moveType ? fleetParsedData.moveType : 'warp';
 				let fleetMoveTarget = fleetParsedData && fleetParsedData.moveTarget ? fleetParsedData.moveTarget : '';
+				let fleetTransportPlusRouteIndex = getTransportPlusRouteIndex(fleetParsedData);
 
 				let fleetScanEnd = fleetParsedData && fleetParsedData.scanEnd ? fleetParsedData.scanEnd : 0;
 				//double check for a wrongly set time and correct it if needed:
@@ -11944,6 +12556,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					planetExitFuelAmount: fleet.account.stats.movementStats.planetExitFuelAmount,
 					destCoord: fleetDest,
 					starbaseCoord: fleetStarbase,
+					transportPlusRouteIndex: fleetTransportPlusRouteIndex,
 					scanBlock: fleetScanBlock,
 					scanBlockIdx: fleetScanBlockIdx,
 					scanEnd: fleetScanEnd,
@@ -12023,7 +12636,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			observer && observer.disconnect();
 			let assistCSS = document.createElement('style');
 			const statusPanelOpacity = globalSettings.statusPanelOpacity / 100;
-			let assistCSSString = `.assist-modal {display: none; position: fixed; z-index: 2; padding-top: 100px; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4); text-align:center; } .assist-modal-content {position: relative; display: inline-block; text-align:left; background-color: rgb(41, 41, 48); margin: auto; padding: 0; border: 1px solid #888; width: 667px; min-width: 450px; max-width: 95%; height: auto; min-height: 50px; max-height: 95%; overflow-y: auto; box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2),0 6px 20px 0 rgba(0,0,0,0.19); -webkit-animation-name: animatetop; -webkit-animation-duration: 0.4s; animation-name: animatetop; animation-duration: 0.4s;} .assist-modal-save { font-size:100%; font-weight:bold; vertical-align:top; margin-left:0.5em; } #assist-modal-error {color: red; margin-left: 5px; margin-right: 5px; font-size: 16px; display:block; } .assist-modal-header-right {color: rgb(255, 190, 77); margin-left: auto !important; font-size: 20px;} .assist-btn {background-color: rgb(41, 41, 48); color: rgb(255, 190, 77); margin-left: 2px; margin-right: 2px;} .assist-btn:hover {background-color: rgba(255, 190, 77, 0.2);} .assist-modal-close { font-size:130%; line-height:80%; vertical-align:middle; } .assist-modal-close:hover, .assist-modal-close:focus {font-weight: bold; text-decoration: none; cursor: pointer;} .assist-modal-btn {color: rgb(255, 190, 77); padding: 5px 5px; margin-right: 5px; text-decoration: none; background-color: rgb(41, 41, 48); border: none; cursor: pointer;} .assist-modal-save:hover { background-color: rgba(255, 190, 77, 0.2); } .assist-modal-header {display: flex; position:sticky; z-index:1000; top:0; left:0; align-items: center; padding: 2px 16px; background-color: #544735; border-bottom: 2px solid rgb(255, 190, 77); color: rgb(255, 190, 77);} .assist-modal-body {padding: 2px 16px; font-size: 12px;} .assist-modal-body > table, .assist-modal-body table.main table {width: 100%;border-collapse: collapse;} .assist-modal-body th, .assist-modal-body td {padding:0 7px 0 0; line-height:130%;} #assistStatus {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 82px; left: 10px; z-index: 1;} #assistStarbaseStatus {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 80px; right: 20px; z-index: 1;} #assistCheck {background-color: rgba(0,0,0,0.75); backdrop-filter: blur(10px); position: absolute; margin: auto; left: 0; right: 0; top: 100px; width: 650px; min-width: 450px; max-width: 75%; z-index: 1;} .dropdown { position: absolute; display: none; margin-top: 25px; margin-left: 152px; background-color: rgb(41, 41, 48); min-width: 120px; box-shadow: 0 8px 16px 0 rgba(0, 0, 0, 0.2); z-index: 2; } .dropdown.show { display: block; } .assist-btn-alt { color: rgb(255, 190, 77); padding: 12px 16px; text-decoration: none; display: block; background-color: rgb(41, 41, 48); border: none; cursor: pointer; } .assist-btn-alt:hover { background-color: rgba(255, 190, 77, 0.2); } #checkresults { padding: 5px; margin-top: 20px; border: 1px solid grey; border-radius: 8px;} .dropdown button {width: 100%; text-align: left;} #assistModal table {border-collapse: collapse;} .assist-scan-row, .assist-scan2-row, .assist-mine-row, .assist-transport-row {background-color: rgba(255, 190, 77, 0.1); border-left: 1px solid white; border-right: 1px solid white; border-bottom: 1px solid white} .show-top-border {background-color: rgba(255, 190, 77, 0.1); border-left: 1px solid white; border-right: 1px solid white; border-top: 1px solid white;} #fleetTable { margin-top: 8px } #assistModal .assist-modal-content { width:auto } .transport-to-target select, .transport-to-starbase select { max-width: 11.5em; } #assistModal .assist-modal-body option { background-color:white } #assistModal .assist-modal-body > table { width: auto } #fleetTable tbody:nth-child(1) td { position:sticky; top:62px; background-color: #292930; padding: 5px 0 2px 0; } `;
+			let assistCSSString = `.assist-modal {display: none; position: fixed; z-index: 2; padding-top: 100px; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4); text-align:center; } .assist-modal-content {position: relative; display: inline-block; text-align:left; background-color: rgb(41, 41, 48); margin: auto; padding: 0; border: 1px solid #888; width: 667px; min-width: 450px; max-width: 95%; height: auto; min-height: 50px; max-height: 95%; overflow-y: auto; box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2),0 6px 20px 0 rgba(0,0,0,0.19); -webkit-animation-name: animatetop; -webkit-animation-duration: 0.4s; animation-name: animatetop; animation-duration: 0.4s;} .assist-modal-save { font-size:100%; font-weight:bold; vertical-align:top; margin-left:0.5em; } #assist-modal-error {color: red; margin-left: 5px; margin-right: 5px; font-size: 16px; display:block; } .assist-modal-header-right {color: rgb(255, 190, 77); margin-left: auto !important; font-size: 20px;} .assist-btn {background-color: rgb(41, 41, 48); color: rgb(255, 190, 77); margin-left: 2px; margin-right: 2px;} .assist-btn:hover {background-color: rgba(255, 190, 77, 0.2);} .assist-modal-close { font-size:130%; line-height:80%; vertical-align:middle; } .assist-modal-close:hover, .assist-modal-close:focus {font-weight: bold; text-decoration: none; cursor: pointer;} .assist-modal-btn {color: rgb(255, 190, 77); padding: 5px 5px; margin-right: 5px; text-decoration: none; background-color: rgb(41, 41, 48); border: none; cursor: pointer;} .assist-modal-save:hover { background-color: rgba(255, 190, 77, 0.2); } .assist-modal-header {display: flex; position:sticky; z-index:1000; top:0; left:0; align-items: center; padding: 2px 16px; background-color: #544735; border-bottom: 2px solid rgb(255, 190, 77); color: rgb(255, 190, 77);} .assist-modal-body {padding: 2px 16px; font-size: 12px;} .assist-modal-body > table, .assist-modal-body table.main table {width: 100%;border-collapse: collapse;} .assist-modal-body th, .assist-modal-body td {padding:0 7px 0 0; line-height:130%;} #assistStatus {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 82px; left: 10px; z-index: 1;} #assistStarbaseStatus {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 80px; right: 20px; z-index: 1;} #assistCheck {background-color: rgba(0,0,0,0.75); backdrop-filter: blur(10px); position: absolute; margin: auto; left: 0; right: 0; top: 100px; width: 650px; min-width: 450px; max-width: 75%; z-index: 1;} .dropdown { position: absolute; display: none; margin-top: 25px; margin-left: 152px; background-color: rgb(41, 41, 48); min-width: 120px; box-shadow: 0 8px 16px 0 rgba(0, 0, 0, 0.2); z-index: 2; } .dropdown.show { display: block; } .assist-btn-alt { color: rgb(255, 190, 77); padding: 12px 16px; text-decoration: none; display: block; background-color: rgb(41, 41, 48); border: none; cursor: pointer; } .assist-btn-alt:hover { background-color: rgba(255, 190, 77, 0.2); } #checkresults { padding: 5px; margin-top: 20px; border: 1px solid grey; border-radius: 8px;} .dropdown button {width: 100%; text-align: left;} #assistModal table {border-collapse: collapse;} .assist-scan-row, .assist-scan2-row, .assist-mine-row, .assist-transport-row, .assist-transport-plus-row {background-color: rgba(255, 190, 77, 0.1); border-left: 1px solid white; border-right: 1px solid white; border-bottom: 1px solid white} .show-top-border {background-color: rgba(255, 190, 77, 0.1); border-left: 1px solid white; border-right: 1px solid white; border-top: 1px solid white;} #fleetTable { margin-top: 8px } #assistModal .assist-modal-content { width:auto } .transport-to-target select, .transport-to-starbase select, .transport-plus-route-manifest select { max-width: 11.5em; } .transport-plus-locations { display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap; } .transport-plus-targets { display:flex; flex-wrap:wrap; gap:6px 12px; margin-bottom:8px; } .transport-plus-target { display:flex; align-items:center; gap:6px; } .transport-plus-routes { display:flex; flex-direction:column; gap:8px; } .assist-transport-plus-route { padding-top:6px; border-top:1px solid rgba(255, 255, 255, 0.15); } .assist-transport-plus-route:first-child { padding-top:0; border-top:none; } .transport-plus-route-header { display:flex; align-items:center; gap:8px; margin-bottom:4px; flex-wrap:wrap; } .transport-plus-route-manifest { display:flex; flex-wrap:wrap; gap:6px 10px; } .transport-plus-route-manifest > div { display:flex; align-items:center; gap:4px; } .transport-resource-entry span { margin-right:4px; } #assistModal .assist-modal-body option { background-color:white } #assistModal .assist-modal-body > table { width: auto } #fleetTable tbody:nth-child(1) td { position:sticky; top:62px; background-color: #292930; padding: 5px 0 2px 0; } `;
 			assistCSSString += ` #assistStats {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 80px; right: 20px; z-index: 1; } #assistStats table { border-collapse: collapse; border-spacing:1px; } #assistStats td, #assistStats th { padding:0 7px 0 0; }`; // statsadd
 			assistCSSString += ` #assistLpAutomation {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 70px; left: 40px; z-index: 1; width: calc((100vw - 80px) * 0.75); max-width: calc(100vw - 80px); max-height: calc(100vh - 60px); overflow: auto; } #assistLpAutomation table { border-collapse: collapse; border-spacing:1px; } #assistLpAutomation td, #assistLpAutomation th { padding:0 7px 0 0; } #assistLpAutomation .lp-auto-section { margin: 0 0 10px 0; } #assistLpAutomation .lp-auto-section-gap { height: 8px; } #assistLpAutomation .lp-auto-summary-table { table-layout: fixed; width: auto; } #assistLpAutomation .lp-auto-summary-table td:nth-child(1):not([colspan]), #assistLpAutomation .lp-auto-summary-table td:nth-child(3):not([colspan]), #assistLpAutomation .lp-auto-summary-table td:nth-child(5):not([colspan]) { min-width: 165px; padding-left: 18px; } #assistLpAutomation .lp-auto-summary-table tr:first-child td { padding-left: 0 !important; } #assistLpAutomation .lp-auto-summary-table td:nth-child(2), #assistLpAutomation .lp-auto-summary-table td:nth-child(4), #assistLpAutomation .lp-auto-summary-table td:nth-child(6) { min-width: 90px; } #assistLpAutomation .lp-auto-influx table, #assistLpAutomation .lp-auto-components table { width: 100%; table-layout: fixed; } #assistLpAutomation .lp-auto-influx td, #assistLpAutomation .lp-auto-influx th, #assistLpAutomation .lp-auto-components td, #assistLpAutomation .lp-auto-components th { overflow: hidden; text-overflow: ellipsis; } #assistLpAutomation .lp-auto-influx tr:first-child td:first-child, #assistLpAutomation .lp-auto-components tr:first-child td:first-child { padding-left: 0 !important; } #assistLpAutomation .lp-auto-influx td:first-child, #assistLpAutomation .lp-auto-influx th:first-child, #assistLpAutomation .lp-auto-components td:first-child, #assistLpAutomation .lp-auto-components th:first-child { width: 16%; overflow: visible; text-overflow: clip; white-space: nowrap; } #assistLpAutomation .lp-auto-influx td:nth-child(n+2), #assistLpAutomation .lp-auto-influx th:nth-child(n+2), #assistLpAutomation .lp-auto-components td:nth-child(n+2), #assistLpAutomation .lp-auto-components th:nth-child(n+2) { width: 12%; overflow: visible; text-overflow: clip; } #assistLpAutomation .lp-auto-influx tr:first-child td, #assistLpAutomation .lp-auto-components tr:first-child td { white-space: normal; line-height: 1.15; } #assistLpAutomation .lp-auto-influx tr:not(:first-child) td, #assistLpAutomation .lp-auto-components tr:not(:first-child) td { white-space: nowrap; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table { table-layout: fixed; width: 100%; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:first-child, #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:first-child { width: 160px !important; min-width: 160px !important; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(2), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(2) { width: 100px !important; min-width: 100px !important; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(3), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(3), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(4), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(4), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(5), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(5), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(6), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(6), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(7), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(7), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(8), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(8) { width: auto !important; min-width: 0 !important; }`;
 			assistCSSString += ` #autoFeeData { display:none; } #automaticFee:checked ~ #autoFeeData { display:block; }`;
