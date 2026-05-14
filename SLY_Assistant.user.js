@@ -2,6 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
+// @aephia-version 0.7.35-01
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -29,6 +30,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
+    const AEPHIA_SLYA_VERSION = '0.7.35-01'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
         'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
@@ -12789,7 +12791,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			scanAutoInfoStr += '<b>Minimum probability:</b> The algo tries to find fields with at least this chance (these fields count as a "good" field)<br>';
 			scanAutoInfoStr += '<b>Home at fuel/dist %:</b> After each movement the fleet checks the fuel that is needed to reach the home base. If you enter a value larger than 100 here (e.g. 130 = 130%) and the fleet has less than 130% of the fuel needed for the way back, it will start moving towards the home base and scan along. It can move up to 2 fields (essentially it uses the "auto(1,2hv++)" pattern now), then it scans, then it moves again. It will still try to find better bypass fields while moving. It only works for fleets that are running out of fuel before running out of cargo space.<br>';
 			let commonInfoStr = 'You can enter amounts with the suffixes K, M and G. So e.g. "1M" equals "1000000".<br>The "Clean" button will clean up your config file and will remove all fleets that are not shown in the table below (do a backup before!).<br>The "Download" button will save/backup your current config to a file.<br>If something goes wrong, you can import the backup later and paste it in the "Import" textbox.';
-			assistModalContent.innerHTML = '<div class="assist-modal-header"><img src="' + iconStr + '" /><div style="text-align:center;padding-left: 15px;">SLYA v' + GM_info.script.version + '<div style="font-size:65%">(<span class="tooltip">Info<div class="tooltiptext">'+commonInfoStr+'</div></span> / <span class="tooltip">Auto scan<div class="tooltiptext" style="max-width:600px">'+scanAutoInfoStr+'</div></span>)</div></div><div class="assist-modal-header-right"><button id="cleanBtn" class="assist-modal-btn">Clean</button><button id="undockAllBtn" class="assist-modal-btn">Undock All</button><button id="configImportExport" class="assist-modal-btn">Import</button><button id="downloadConfig" class="assist-modal-btn">Download</button><button class=" assist-modal-btn assist-modal-save">Save</button>&nbsp;&nbsp;<span class="assist-modal-close">&#x2715;</span></div></div><div class="assist-modal-body"><span id="assist-modal-error"></span><table id="fleetTable"><tr><td>Fleet</td><td>Assignment</td><td>Target</td><td>Starbase</td><td>Warp/Subwarp</td><td>Max Cargo</td><td>Max Ammo</td><td>Max Fuel</td></tr></table><hr><strong>Crafting</strong><table id="craftTable"><tr><td></td><td>Starbase</td><td>Crew</td><td>Item | Max Amount</td><td>If stock is below</td><td>Use special ingredient</td></tr></table></div>';
+			assistModalContent.innerHTML = '<div class="assist-modal-header"><img src="' + iconStr + '" /><div style="text-align:center;padding-left: 15px;">AEP v' + AEPHIA_SLYA_VERSION + '<div style="font-size:65%">(<span class="tooltip">Info<div class="tooltiptext">'+commonInfoStr+'</div></span> / <span class="tooltip">Auto scan<div class="tooltiptext" style="max-width:600px">'+scanAutoInfoStr+'</div></span>)</div></div><div class="assist-modal-header-right"><button id="cleanBtn" class="assist-modal-btn">Clean</button><button id="undockAllBtn" class="assist-modal-btn">Undock All</button><button id="configImportExport" class="assist-modal-btn">Import</button><button id="downloadConfig" class="assist-modal-btn">Download</button><button class=" assist-modal-btn assist-modal-save">Save</button>&nbsp;&nbsp;<span class="assist-modal-close">&#x2715;</span></div></div><div class="assist-modal-body"><span id="assist-modal-error"></span><table id="fleetTable"><tr><td>Fleet</td><td>Assignment</td><td>Target</td><td>Starbase</td><td>Warp/Subwarp</td><td>Max Cargo</td><td>Max Ammo</td><td>Max Fuel</td></tr></table><hr><strong>Crafting</strong><table id="craftTable"><tr><td></td><td>Starbase</td><td>Crew</td><td>Item | Max Amount</td><td>If stock is below</td><td>Use special ingredient</td></tr></table></div>';
 			assistModal.append(assistModalContent);
 
 			let settingsModal = document.createElement('div');

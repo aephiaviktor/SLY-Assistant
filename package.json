@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "scripts": {
+    "aephia:version:bump": "node scripts/bump-aephia-version.js",
+    "aephia:version:bump:dry-run": "node scripts/bump-aephia-version.js --dry-run",
+    "aephia:version:release": "node scripts/bump-aephia-version.js --commit --tag"
+  }
+}
