@@ -5,7 +5,13 @@ const APP_NAME = 'SLYA - MUD'
 const APP_ID = 'slya.mud'
 const APP_INSTANCE_NAME = APP_NAME.replace(/^SLYA\s*-\s*/, '')
 const ORIGINAL_UPDATE_URL = 'https://raw.githubusercontent.com/Swift42/SLY-Assistant/refs/heads/patch-collection-for-0.7.0/SLY_Assistant.user.js'
-const AEP_UPDATE_URL = 'https://raw.githubusercontent.com/aephiaviktor/SLY-Assistant/refs/heads/patch-collection-for-0.7.0/SLY_Assistant.user.js'
+const AEP_UPDATE_BASE_URL = 'https://raw.githubusercontent.com/aephiaviktor/SLY-Assistant/refs/heads/patch-collection-for-0.7.0'
+const AEP_UPDATE_URL = `${AEP_UPDATE_BASE_URL}/SLY_Assistant.user.js`
+const AEP_WRAPPER_UPDATE_FILES = [
+	{ url: `${AEP_UPDATE_BASE_URL}/electron-app/main.js`, target: 'main.js', transform: preserveElectronMainIdentity },
+	{ url: `${AEP_UPDATE_BASE_URL}/electron-app/preload.js`, target: 'preload.js' },
+	{ url: `${AEP_UPDATE_BASE_URL}/electron-app/app/index.html`, target: path.join('app', 'index.html'), transform: preserveElectronIndexIdentity }
+]
 app.setName(APP_NAME)
 app.setAppUserModelId(APP_ID)
 app.setPath('userData',path.join(__dirname, 'data'))
@@ -50,22 +56,68 @@ function readInstalledSLYAMeta()
 	}
 }
 
-async function fetchSLYA(sourceUrl)
+async function fetchText(sourceUrl)
 {
 	const response = await fetch(sourceUrl)
-	if (!response.ok) throw new Error(`Failed to fetch SLYA update (${response.status}) from ${sourceUrl}`)
-	const file = await response.text()
+	if (!response.ok) throw new Error(`Failed to fetch update file (${response.status}) from ${sourceUrl}`)
+	return await response.text()
+}
+
+async function fetchSLYA(sourceUrl)
+{
+	const file = await fetchText(sourceUrl)
 	const version = readUserscriptMeta(file, 'version')
 	const aephiaVersion = readUserscriptMeta(file, 'aephia-version')
 	return { file, version, aephiaVersion }
 }
 
+function preserveElectronMainIdentity(file)
+{
+	return file
+		.replace(/const APP_NAME = '[^']+'/, `const APP_NAME = '${APP_NAME}'`)
+		.replace(/const APP_ID = '[^']+'/, `const APP_ID = '${APP_ID}'`)
+}
+
+function preserveElectronIndexIdentity(file)
+{
+	return file
+		.replace(/<title>[^<]+<\/title>/, `<title>${APP_NAME}</title>`)
+		.replace(/appInstanceName'\) \|\| '[^']+'/, `appInstanceName') || '${APP_INSTANCE_NAME}'`)
+		.replace(/This SLYA - [^<]+ standalone version/g, `This ${APP_NAME} standalone version`)
+}
+
+function writeUpdateFile(target, file)
+{
+	const targetPath = path.join(__dirname, target)
+	fs.mkdirSync(path.dirname(targetPath), { recursive: true })
+	fs.writeFileSync(targetPath, file)
+}
+
 async function updateSLYA(sourceUrl = AEP_UPDATE_URL)
 {
 	const latest = await fetchSLYA(sourceUrl)
-	fs.writeFileSync("app/SLY_Assistant.user.js", latest.file)
+	writeUpdateFile(path.join('app', 'SLY_Assistant.user.js'), latest.file)
 	return latest
-}	
+}
+
+async function updateAepFromGitHub()
+{
+	const latest = await updateSLYA(AEP_UPDATE_URL)
+	for (const updateFile of AEP_WRAPPER_UPDATE_FILES) {
+		let file = await fetchText(updateFile.url)
+		if (updateFile.transform) file = updateFile.transform(file)
+		writeUpdateFile(updateFile.target, file)
+	}
+	return latest
+}
+
+function restartApp()
+{
+	setTimeout(function() {
+		app.relaunch()
+		app.exit(0)
+	}, 2000)
+}
 
 function wait(ms) {	return new Promise(resolve => {	setTimeout(resolve, ms); }); }
 
@@ -137,15 +189,15 @@ else
 	const latest = await updateSLYA(ORIGINAL_UPDATE_URL);
 	version = latest.version;
 	aephiaVersion = latest.aephiaVersion;
-	win.webContents.send('update', '<div style="position:absolute;left:50%;margin-left:-200px;top:40vh;width:400px;text-align:center;background-color:#eee;color:black">ORIGINAL CODE UPDATED<br>Restarting ...<br></div>');
-	setTimeout(function() { loadApp(win, version, aephiaVersion) } , 2000 )
+	win.webContents.send('update', '<div style="position:absolute;left:50%;margin-left:-200px;top:40vh;width:400px;text-align:center;background-color:#eee;color:black">SLYA CODE UPDATED<br>Restarting app ...<br></div>');
+	restartApp()
   })
   ipcMain.on('updateToLatestAep', async function() {
-	const latest = await updateSLYA(AEP_UPDATE_URL);
+	const latest = await updateAepFromGitHub();
 	version = latest.version;
 	aephiaVersion = latest.aephiaVersion;
-	win.webContents.send('update', '<div style="position:absolute;left:50%;margin-left:-200px;top:40vh;width:400px;text-align:center;background-color:#eee;color:black">AEP CODE UPDATED<br>Restarting ...<br></div>');
-	setTimeout(function() { loadApp(win, version, aephiaVersion) } , 2000 )
+	win.webContents.send('update', '<div style="position:absolute;left:50%;margin-left:-200px;top:40vh;width:400px;text-align:center;background-color:#eee;color:black">AEP CODE UPDATED<br>Restarting app ...<br></div>');
+	restartApp()
   })
 
   ipcMain.handle('appendUpgradeAutomationLogFile', async (event, line) => {
