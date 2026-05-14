@@ -3,13 +3,18 @@ const path = require('node:path')
 const fs = require('node:fs')
 const APP_NAME = 'SLYA - MUD'
 const APP_ID = 'slya.mud'
+const APP_INSTANCE_NAME = APP_NAME.replace(/^SLYA\s*-\s*/, '')
 const ORIGINAL_UPDATE_URL = 'https://raw.githubusercontent.com/Swift42/SLY-Assistant/refs/heads/patch-collection-for-0.7.0/SLY_Assistant.user.js'
 const AEP_UPDATE_URL = 'https://raw.githubusercontent.com/aephiaviktor/SLY-Assistant/refs/heads/patch-collection-for-0.7.0/SLY_Assistant.user.js'
 app.setName(APP_NAME)
 app.setAppUserModelId(APP_ID)
 app.setPath('userData',path.join(__dirname, 'data'))
 
-const createWindow = (version) => {
+const loadApp = (win, version, aephiaVersion) => {
+	win.loadFile('app/index.html', { query: { version: version, aephiaVersion: aephiaVersion, appInstanceName: APP_INSTANCE_NAME } } )
+}
+
+const createWindow = (version, aephiaVersion) => {
   const win = new BrowserWindow({
     title: APP_NAME,
     width: 800,
@@ -22,8 +27,27 @@ const createWindow = (version) => {
   })
   //win.webContents.openDevTools()  
   win.setTitle(APP_NAME + (version ? ` v${version}` : ''))
-  win.loadFile('app/index.html', { query: { version: version } } )
+  loadApp(win, version, aephiaVersion)
   return win
+}
+
+function readUserscriptMeta(file, key)
+{
+	const metaPrefix = `@${key}`
+	const line = file.split(/\r?\n/).find((entry) => entry.includes(metaPrefix))
+	if (!line) return 'unknown'
+	const value = line.slice(line.indexOf(metaPrefix) + metaPrefix.length).trim()
+	return value || 'unknown'
+}
+
+function readInstalledSLYAMeta()
+{
+	const file = fs.readFileSync("app/SLY_Assistant.user.js").toString()
+	return {
+		file,
+		version: readUserscriptMeta(file, 'version'),
+		aephiaVersion: readUserscriptMeta(file, 'aephia-version')
+	}
 }
 
 async function fetchSLYA(sourceUrl)
@@ -31,17 +55,16 @@ async function fetchSLYA(sourceUrl)
 	const response = await fetch(sourceUrl)
 	if (!response.ok) throw new Error(`Failed to fetch SLYA update (${response.status}) from ${sourceUrl}`)
 	const file = await response.text()
-	const pos = file.indexOf('@version')
-	const pos2 = file.indexOf("\n", pos)
-	const version = pos >= 0 ? file.substring(pos + 8, pos2).trim() : 'unknown'
-	return { file, version }
+	const version = readUserscriptMeta(file, 'version')
+	const aephiaVersion = readUserscriptMeta(file, 'aephia-version')
+	return { file, version, aephiaVersion }
 }
 
 async function updateSLYA(sourceUrl = AEP_UPDATE_URL)
 {
 	const latest = await fetchSLYA(sourceUrl)
 	fs.writeFileSync("app/SLY_Assistant.user.js", latest.file)
-	return latest.version
+	return latest
 }	
 
 function wait(ms) {	return new Promise(resolve => {	setTimeout(resolve, ms); }); }
@@ -62,58 +85,67 @@ session.defaultSession.webRequest.onBeforeSendHeaders(filter, (details, callback
 
 var win
 var version
+var aephiaVersion
 
 var firstinit=false;
 if(!fs.existsSync("app/SLY_Assistant.user.js"))
 {
-	win = createWindow(version)
+	win = createWindow(version, aephiaVersion)
 	await wait(500);
-	version = await updateSLYA();
+	const latest = await updateSLYA();
+	version = latest.version;
+	aephiaVersion = latest.aephiaVersion;
 	await wait(3000);
 	win.webContents.send('firstinitdone','');
 	await wait(3000);
 	firstinit=true;
 }
-file = fs.readFileSync("app/SLY_Assistant.user.js").toString();
-pos = file.indexOf('@version');
-pos2 = file.indexOf("\n",pos);
-version = file.substring(pos+8,pos2).trim();
+const installedMeta = readInstalledSLYAMeta();
+file = installedMeta.file;
+version = installedMeta.version;
+aephiaVersion = installedMeta.aephiaVersion;
 
 if(firstinit)
 {
-	win.loadFile('app/index.html', { query: { version: version } } )
+	loadApp(win, version, aephiaVersion)
 }
 else
 {
-	win = createWindow(version)
+	win = createWindow(version, aephiaVersion)
 }
 
   ipcMain.on('openDevTools', function() { win.openDevTools() })
   ipcMain.on('openUpdate', async function() {
 	let originalVersion = 'unknown'
 	let viktorVersion = 'unknown'
-	let currentSource = 'Local/custom'
+	let currentVersion = version
+	let currentLabel = `SLYA v${version}`
 	let originalLatest = null
 	let viktorLatest = null
 	try { originalLatest = await fetchSLYA(ORIGINAL_UPDATE_URL); originalVersion = originalLatest.version } catch (error) { originalVersion = 'unavailable' }
-	try { viktorLatest = await fetchSLYA(AEP_UPDATE_URL); viktorVersion = viktorLatest.version } catch (error) { viktorVersion = 'unavailable' }
+	try { viktorLatest = await fetchSLYA(AEP_UPDATE_URL); viktorVersion = viktorLatest.aephiaVersion !== 'unknown' ? viktorLatest.aephiaVersion : viktorLatest.version } catch (error) { viktorVersion = 'unavailable' }
 	try {
 		const currentFile = fs.readFileSync("app/SLY_Assistant.user.js").toString()
-		if (viktorLatest && currentFile === viktorLatest.file) currentSource = 'Viktor'
-		else if (originalLatest && currentFile === originalLatest.file) currentSource = 'Swift'
+		const currentAephiaVersion = readUserscriptMeta(currentFile, 'aephia-version')
+		currentVersion = currentAephiaVersion !== 'unknown' ? currentAephiaVersion : readUserscriptMeta(currentFile, 'version')
+		currentLabel = currentAephiaVersion !== 'unknown' ? `AEP v${currentVersion}` : `SLYA v${currentVersion}`
 	} catch (error) {}
 	  
-	win.webContents.send('update', '<div style="position:absolute;left:50%;margin-left:-230px;top:30vh;width:460px;text-align:center;background-color:white;padding:10px;color:black">UPDATE<br>Current version '+currentSource+': '+version+'<br><button onClick="window.electronAPI.updateToLatestSwift()">Update to original latest: '+originalVersion+'</button><br><button onClick="window.electronAPI.updateToLatestAep()">Update to AEP latest: '+viktorVersion+'</button><br><small>(The app will automatically restart after the update)</small><br><button onClick="document.getElementById(\'updateOverlay\').remove()">Cancel</button><br></div>');
+	win.webContents.send('update', '<div style="position:absolute;left:50%;margin-left:-230px;top:30vh;width:460px;text-align:center;background-color:white;padding:10px;color:black">UPDATE<br>Current version: '+currentLabel+'<br><button onClick="window.electronAPI.updateToLatestSwift()">Update to SLYA v'+originalVersion+'</button><br><button onClick="window.electronAPI.updateToLatestAep()">Update to AEP v'+viktorVersion+'</button><br><small>(The app will automatically restart after the update)</small><br><button onClick="document.getElementById(\'updateOverlay\').remove()">Cancel</button><br></div>');
   })
   ipcMain.on('updateToLatestSwift', async function() {
-	version = await updateSLYA(ORIGINAL_UPDATE_URL);
+	const latest = await updateSLYA(ORIGINAL_UPDATE_URL);
+	version = latest.version;
+	aephiaVersion = latest.aephiaVersion;
 	win.webContents.send('update', '<div style="position:absolute;left:50%;margin-left:-200px;top:40vh;width:400px;text-align:center;background-color:#eee;color:black">ORIGINAL CODE UPDATED<br>Restarting ...<br></div>');
-	setTimeout(function() { win.loadFile('app/index.html', { query: { version: version } } ) } , 2000 )
+	setTimeout(function() { loadApp(win, version, aephiaVersion) } , 2000 )
   })
   ipcMain.on('updateToLatestAep', async function() {
-	version = await updateSLYA(AEP_UPDATE_URL);
+	const latest = await updateSLYA(AEP_UPDATE_URL);
+	version = latest.version;
+	aephiaVersion = latest.aephiaVersion;
 	win.webContents.send('update', '<div style="position:absolute;left:50%;margin-left:-200px;top:40vh;width:400px;text-align:center;background-color:#eee;color:black">AEP CODE UPDATED<br>Restarting ...<br></div>');
-	setTimeout(function() { win.loadFile('app/index.html', { query: { version: version } } ) } , 2000 )
+	setTimeout(function() { loadApp(win, version, aephiaVersion) } , 2000 )
   })
 
   ipcMain.handle('appendUpgradeAutomationLogFile', async (event, line) => {
