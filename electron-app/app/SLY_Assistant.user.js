@@ -14,6 +14,8 @@
 // @grant        GM_getValue
 // @grant        GM_deleteValue
 // @grant        GM_listValues
+// @grant        GM_xmlhttpRequest
+// @connect      api.aephia.com
 // ==/UserScript==
 
 (async function() {
@@ -26,6 +28,7 @@
     let customWriteRPCs = [];
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
+    const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
         'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
@@ -87,6 +90,7 @@
 	let solanaErrorCount = 0;
 
 	let globalSettings;
+	let aephiaApiKeyValidation = { status: 'unknown', message: 'Aephia API key has not been checked yet.', checkedAt: 0, tokenKey: '' };
 	const settingsGmKey = 'globalSettings';
 	// Viktor: Simple capture-at-xx:58 / write-at-xx:59 state tracking
 	let upgradeAutomationPendingPlanRows = null;
@@ -110,6 +114,100 @@
 		errorLog = parsedErrorLog.messages;
 	}
 	await loadErrorLog();
+
+	function getAephiaApiKey() {
+		return String(globalSettings?.aephiaApiKey || '').trim();
+	}
+
+	function escapeAephiaHtml(value) {
+		return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+	}
+
+	function getAephiaTokenCacheKey(token) {
+		return token ? String(token.length) + ':' + token.slice(0, 4) + ':' + token.slice(-4) : '';
+	}
+
+	function aephiaRequestStatus(status, statusText) {
+		if (status === 204) return { status: 'valid', message: 'Aephia API key is valid and active.' };
+		if (status === 401) return { status: 'invalid', message: 'Aephia API key is invalid, disabled, or expired. Refresh/reclaim your Aephia token in settings.' };
+		if (status === 405) return { status: 'temporary_error', message: 'Aephia token check used the wrong HTTP method. Please update SLYA; validation must use GET.' };
+		if (status >= 500) return { status: 'temporary_error', message: 'Aephia token service is temporarily unavailable. This does not prove the key is invalid.' };
+		return { status: 'temporary_error', message: 'Unexpected Aephia token check response: HTTP ' + status + (statusText ? ' ' + statusText : '') + '.' };
+	}
+
+	async function validateAephiaApiKey(force=false) {
+		const token = getAephiaApiKey();
+		const tokenKey = getAephiaTokenCacheKey(token);
+		const now = Date.now();
+		if (!token) {
+			aephiaApiKeyValidation = { status: 'missing', message: 'Add your Aephia API key in Settings to use the LP Automation Panel.', checkedAt: now, tokenKey: '' };
+			return aephiaApiKeyValidation;
+		}
+		if (!force && aephiaApiKeyValidation.tokenKey === tokenKey && ['valid', 'invalid'].includes(aephiaApiKeyValidation.status) && (now - Number(aephiaApiKeyValidation.checkedAt || 0)) < 5 * 60 * 1000) {
+			return aephiaApiKeyValidation;
+		}
+		aephiaApiKeyValidation = { status: 'checking', message: 'Checking Aephia API key...', checkedAt: now, tokenKey };
+		try {
+			let response;
+			if (typeof GM_xmlhttpRequest === 'function') {
+				response = await new Promise((resolve, reject) => {
+					GM_xmlhttpRequest({
+						method: 'GET',
+						url: AEPHIA_TOKEN_VALIDATE_URL,
+						headers: { Authorization: 'Bearer ' + token },
+						timeout: 10000,
+						onload: resolve,
+						onerror: () => reject(new Error('network_error')),
+						ontimeout: () => reject(new Error('timeout'))
+					});
+				});
+			} else {
+				response = await fetch(AEPHIA_TOKEN_VALIDATE_URL, { method: 'GET', headers: { Authorization: 'Bearer ' + token } });
+			}
+			const statusInfo = aephiaRequestStatus(Number(response.status || 0), response.statusText || '');
+			aephiaApiKeyValidation = { ...statusInfo, checkedAt: Date.now(), tokenKey };
+		} catch (e) {
+			aephiaApiKeyValidation = { status: 'temporary_error', message: 'Could not reach Aephia token service. This is a temporary service/network problem, not proof the key is invalid.', checkedAt: Date.now(), tokenKey };
+		}
+		return aephiaApiKeyValidation;
+	}
+
+	function renderAephiaApiKeyGateContent() {
+		const state = aephiaApiKeyValidation || {};
+		const status = state.status || 'unknown';
+		const color = status === 'valid' ? '#80ff80' : (status === 'invalid' || status === 'missing' ? '#ff8080' : '#ffb366');
+		const label = status === 'valid' ? 'Valid' : (status === 'invalid' ? 'Auth failed' : (status === 'missing' ? 'Missing' : (status === 'checking' ? 'Checking' : 'Service issue')));
+		const checked = state.checkedAt ? (' Last checked: ' + new Date(state.checkedAt).toLocaleString()) : '';
+		return '<div class="lp-auto-section"><table class="lp-auto-section-table lp-auto-summary-table">' +
+			'<tr style="opacity:0.66"><td colspan="6"><b>Aephia API Key</b></td></tr>' +
+			'<tr><td>Status</td><td align="right" style="color:' + color + '">' + label + '</td><td colspan="4">' + escapeAephiaHtml(state.message || '') + escapeAephiaHtml(checked) + '</td></tr>' +
+			'<tr><td colspan="6"><button id="aephiaApiKeyRecheck" type="button">Recheck Aephia API Key</button></td></tr>' +
+			'</table></div>' + (status === 'valid' ? '<div class="lp-auto-section-gap"></div>' : '');
+	}
+
+
+	function hasValidAephiaApiKey() {
+		const token = getAephiaApiKey();
+		return !!token && aephiaApiKeyValidation.status === 'valid' && aephiaApiKeyValidation.tokenKey === getAephiaTokenCacheKey(token);
+	}
+
+	function updateLpAutomationMenuVisibility() {
+		const hasAccess = hasValidAephiaApiKey();
+		const button = document.querySelector('#assistLpAutomationBtn');
+		const panel = document.querySelector('#assistLpAutomation');
+		if (button) button.style.display = hasAccess ? '' : 'none';
+		if (!hasAccess && panel) panel.style.display = 'none';
+		return hasAccess;
+	}
+
+	async function refreshLpAutomationMenuAccess(force=false) {
+		updateLpAutomationMenuVisibility();
+		await validateAephiaApiKey(force);
+		const hasAccess = updateLpAutomationMenuVisibility();
+		if (document.querySelector('#assistLpAutomationContent')) renderLpAutomationContent();
+		return hasAccess;
+	}
+
 	async function logError(msg, fleetName) {
 		let timeStamp = "[" + new Date(Date.now()).toLocaleString("en-GB", { hour12: false }) + "]";
 		errorLog[errorLogIndex] = timeStamp + " " + (fleetName ? (fleetName + " ") : '') + msg;
@@ -3097,7 +3195,7 @@
 			minerKeep1: parseBoolDefault(globalSettings.minerKeep1, false),
 			starbaseKeep1: parseBoolDefault(globalSettings.starbaseKeep1, false),
 			queueExitWarpSubwarp: parseBoolDefault(globalSettings.queueExitWarpSubwarp, false),
-			aephiaMembershipToken: parseStringDefault(globalSettings.aephiaMembershipToken,''),
+			aephiaApiKey: parseStringDefault(globalSettings.aephiaApiKey,''),
 			slyInstanceName: parseStringDefault(globalSettings.slyInstanceName,''),
 			heliusRpcURL: parseStringDefault(globalSettings.heliusRpcURL,''),
 
@@ -3323,6 +3421,18 @@
 		const openSection = extraClass => '<div class="lp-auto-section' + (extraClass ? ' ' + extraClass : '') + '"><table class="lp-auto-section-table lp-auto-summary-table">';
 		const closeSection = '</table></div>';
 		try {
+			const currentAephiaToken = getAephiaApiKey();
+			if (aephiaApiKeyValidation.tokenKey && aephiaApiKeyValidation.tokenKey !== getAephiaTokenCacheKey(currentAephiaToken)) {
+				aephiaApiKeyValidation = { status: 'unknown', message: 'Aephia API key changed; validation required.', checkedAt: 0, tokenKey: '' };
+			}
+			content += renderAephiaApiKeyGateContent();
+			if (aephiaApiKeyValidation.status !== 'valid') {
+				const token = currentAephiaToken;
+				if (token && !['checking', 'invalid', 'temporary_error', 'missing'].includes(aephiaApiKeyValidation.status)) {
+					validateAephiaApiKey(false).then(() => renderLpAutomationContent());
+				}
+				throw { aephiaGate: true };
+			}
 			const lpAutomationEnabled = !!globalSettings.upgradeAutomationEnabled;
 			const executionPlanReady = !!upgradeAutomationExecutionSummary?.neutralComponentPlan?.length;
 			const totalCraftingJobs = Math.max(0, parseIntDefault(globalSettings.craftingJobs, 0));
@@ -3548,11 +3658,22 @@
 			}
 			content += closeSection;
 		} catch (e) {
-			content += '<div class="lp-auto-section"><table class="lp-auto-section-table lp-auto-summary-table"><tr><td colspan="6" style="color:#ff8080">Automation render error: ' + String(e?.message || e || 'unknown_error').replace(/[<>]/g, '') + '</td></tr></table></div>';
+			if (!e?.aephiaGate) content += '<div class="lp-auto-section"><table class="lp-auto-section-table lp-auto-summary-table"><tr><td colspan="6" style="color:#ff8080">Automation render error: ' + String(e?.message || e || 'unknown_error').replace(/[<>]/g, '') + '</td></tr></table></div>';
 		}
 		const el = document.querySelector('#assistLpAutomationContent');
 		if (el) {
 			el.innerHTML = content;
+			const aephiaApiKeyRecheck = el.querySelector('#aephiaApiKeyRecheck');
+			if (aephiaApiKeyRecheck && !aephiaApiKeyRecheck.dataset.bound) {
+				aephiaApiKeyRecheck.dataset.bound = '1';
+				aephiaApiKeyRecheck.addEventListener('click', async () => {
+					aephiaApiKeyRecheck.disabled = true;
+					aephiaApiKeyValidation = { ...aephiaApiKeyValidation, status: 'checking', message: 'Checking Aephia API key...' };
+					renderLpAutomationContent();
+					await validateAephiaApiKey(true);
+					renderLpAutomationContent();
+				});
+			}
 			const lpAutomationEnabledToggle = el.querySelector('#lpAutomationEnabledToggle');
 			if (lpAutomationEnabledToggle && !lpAutomationEnabledToggle.dataset.bound) {
 				lpAutomationEnabledToggle.dataset.bound = '1';
@@ -8512,7 +8633,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			minerKeep1: document.querySelector('#minerKeep1').checked,
 			starbaseKeep1: document.querySelector('#starbaseKeep1').checked,
 			queueExitWarpSubwarp: document.querySelector('#queueExitWarpSubwarp').checked,
-			aephiaMembershipToken: document.querySelector('#aephiaMembershipToken') ? parseStringDefault(document.querySelector('#aephiaMembershipToken').value,'') : parseStringDefault(globalSettings.aephiaMembershipToken,''),
+			aephiaApiKey: document.querySelector('#aephiaApiKey') ? parseStringDefault(document.querySelector('#aephiaApiKey').value,'') : parseStringDefault(globalSettings.aephiaApiKey,''),
 			slyInstanceName: document.querySelector('#slyInstanceName') ? parseStringDefault(document.querySelector('#slyInstanceName').value,'') : parseStringDefault(globalSettings.slyInstanceName,''),
 			upgradeAutomationInfluxTracking: document.querySelector('#upgradeAutomationInfluxTracking') ? document.querySelector('#upgradeAutomationInfluxTracking').checked : parseBoolDefault(globalSettings.upgradeAutomationInfluxTracking, false),
 			heliusRpcURL: document.querySelector('#heliusRpcURL') ? parseStringDefault(document.querySelector('#heliusRpcURL').value,'') : parseStringDefault(globalSettings.heliusRpcURL,''),
@@ -8574,7 +8695,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 		await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
 		rebuildRpcPools();
-
+		aephiaApiKeyValidation = { status: 'unknown', message: 'Aephia API key changed; validation required.', checkedAt: 0, tokenKey: '' };
+		refreshLpAutomationMenuAccess(true);
 
 		if (errBool === false) {
 			errElem[0].innerHTML = '';
@@ -8585,7 +8707,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 	let sensitiveFieldsVisible = false;
 	function applySensitiveFieldMasking() {
-		const selectors = ['#mySecretKey', '#aephiaMembershipToken', '#heliusRpcURL', '#influxAuth', '#lpTargetHistoryInfluxAuth'];
+		const selectors = ['#mySecretKey', '#aephiaApiKey', '#heliusRpcURL', '#influxAuth', '#lpTargetHistoryInfluxAuth'];
 		for (const selector of selectors) {
 			const el = document.querySelector(selector);
 			if (!el) continue;
@@ -8620,7 +8742,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		document.querySelector('#minerKeep1').checked = globalSettings.minerKeep1;
 		document.querySelector('#starbaseKeep1').checked = globalSettings.starbaseKeep1;
 		document.querySelector('#queueExitWarpSubwarp').checked = globalSettings.queueExitWarpSubwarp;
-		if (document.querySelector('#aephiaMembershipToken')) document.querySelector('#aephiaMembershipToken').value = globalSettings.aephiaMembershipToken || '';
+		if (document.querySelector('#aephiaApiKey')) document.querySelector('#aephiaApiKey').value = globalSettings.aephiaApiKey || '';
 		if (document.querySelector('#slyInstanceName')) document.querySelector('#slyInstanceName').value = globalSettings.slyInstanceName || '';
 		if (document.querySelector('#upgradeAutomationInfluxTracking')) document.querySelector('#upgradeAutomationInfluxTracking').checked = !!globalSettings.upgradeAutomationInfluxTracking;
 		if (document.querySelector('#heliusRpcURL')) document.querySelector('#heliusRpcURL').value = globalSettings.heliusRpcURL || '';
@@ -8675,7 +8797,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				applySensitiveFieldMasking();
 			});
 		}
-		for (const selector of ['#mySecretKey', '#aephiaMembershipToken', '#heliusRpcURL', '#influxAuth', '#lpTargetHistoryInfluxAuth']) {
+		for (const selector of ['#mySecretKey', '#aephiaApiKey', '#heliusRpcURL', '#influxAuth', '#lpTargetHistoryInfluxAuth']) {
 			const el = document.querySelector(selector);
 			if (el && !el.dataset.maskBound) {
 				el.dataset.maskBound = '1';
@@ -12125,7 +12247,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			settingsModalContentString += '<div>Queue exit warp/subwarp <input id="queueExitWarpSubwarp" type="checkbox"></input><br><small>EXPERIMENTAL: Queue the exit warp/subwarp instruction, so it gets bundled with the following instruction(s). Saves one transaction in most cases. Works only with miners and transporters (a scan instruction can\'t be bundled with any other instruction).</small></div>';
 			settingsModalContentString += '<hr style="margin:12px 0; opacity:0.35">';
 			settingsModalContentString += '<div><button id="toggleSensitiveFields" class="assist-modal-btn" type="button">Show Sensitive Fields</button></div>';
-			settingsModalContentString += '<div><div style="display:flex; align-items:center; gap:8px;"><span>Aephia Membership Token</span><input id="aephiaMembershipToken" type="text" style="flex:1; min-width:0;"></input></div><small>This token will give you access to the LP Automation Panel</small></div>';
+			settingsModalContentString += '<div><div style="display:flex; align-items:center; gap:8px;"><span>Aephia API Key</span><input id="aephiaApiKey" type="text" style="flex:1; min-width:0;"></input></div><small>This key will give you access to the LP Automation Panel</small></div>';
 						settingsModalContentString += '<div><div style="display:flex; align-items:center; gap:8px;"><span>SLY Instance Name</span><input id="slyInstanceName" type="text" placeholder="For example MUD, ONI, USTUR" style="width:104px;"></input></div><small>Optional, but potentially useful if you are running multiple instances.</small></div>';
 			settingsModalContentString += '<div style="display:flex; align-items:center; gap:8px;"><input id="upgradeAutomationInfluxTracking" type="checkbox"></input><span>InfluxDB Performance Tracking</span></div><small>Enable LP Automation performance data emission to InfluxDB. Only enable on one instance per faction to avoid double-counting.</small>';
 			settingsModalContentString += '<div><div style="display:flex; align-items:center; gap:8px;"><span>Helius RPC URL</span><input id="heliusRpcURL" type="text" placeholder="https://mainnet.helius-rpc.com/?api-key=&lt;YOUR API KEY&gt;" style="flex:1; min-width:0;"></input></div><small>Optional custom Helius RPC URL used in the fallback RPC pool.</small></div>';
@@ -12297,7 +12419,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let assistLpAutomationButton = document.createElement('button');
 			assistLpAutomationButton.id = 'assistLpAutomationBtn';
 			assistLpAutomationButton.classList.add('assist-btn','assist-btn-alt');
-			assistLpAutomationButton.addEventListener('click', function(e) {assistStatToggle('#assistLpAutomation'); renderLpAutomationContent();});
+			assistLpAutomationButton.style.display = 'none';
+			assistLpAutomationButton.addEventListener('click', async function(e) {
+				if (!hasValidAephiaApiKey() && !(await refreshLpAutomationMenuAccess(true))) return;
+				assistStatToggle('#assistLpAutomation');
+				renderLpAutomationContent();
+			});
 			let assistLpAutomationSpan = document.createElement('span');
 			assistLpAutomationSpan.innerText = 'LP Automation';
 			assistLpAutomationSpan.style.fontSize = '14px';
@@ -12395,6 +12522,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			assistStarbaseStatusClose.addEventListener('click', function(e) {assistStarbaseStatusToggle();});
 			let assistCheckClose = document.querySelector('#assistCheck .assist-modal-close');
 			assistCheckClose.addEventListener('click', function(e) {assistCheckToggle();});
+			updateLpAutomationMenuVisibility();
+			refreshLpAutomationMenuAccess(false);
 			let assistCheckFleetBtn = document.querySelector('#checkFleetBtn');
 			assistCheckFleetBtn.addEventListener('click', function(e) {getFleetCntAtCoords();});
 			let assistStatsClose = document.querySelector('#assistStats .assist-modal-close'); //statsadd
