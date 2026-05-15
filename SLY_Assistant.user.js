@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-03
+// @aephia-version 0.7.35-04
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -30,7 +30,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-03'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-04'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
         'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
@@ -2013,7 +2013,7 @@
 		}
 		const computeWeighted = hour => {
 			const entries = (byHour.get(hour) || []).slice(-7);
-			if (entries.length < 3) return { value: null, count: entries.length };
+			if (!entries.length) return { value: null, count: 0 };
 			const relevantWeights = weights.slice(weights.length - entries.length);
 			const wsum = relevantWeights.reduce((a, x) => a + x, 0);
 			const val = entries.reduce((sum, entry, idx) => sum + entry.value * relevantWeights[idx], 0) / Math.max(wsum, 1);
