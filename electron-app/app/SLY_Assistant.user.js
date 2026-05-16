@@ -17,6 +17,7 @@
 // @grant        GM_listValues
 // @grant        GM_xmlhttpRequest
 // @connect      api.aephia.com
+// @connect      store-sage-lp.aephia.workers.dev
 // ==/UserScript==
 
 (async function() {
@@ -93,6 +94,7 @@
 
 	let globalSettings;
 	let aephiaApiKeyValidation = { status: 'unknown', message: 'Aephia API key has not been checked yet.', checkedAt: 0, tokenKey: '' };
+	let upgradeAutomationAephiaSummaryCache = { fetchedAt: 0, tokenKey: '', data: null };
 	const settingsGmKey = 'globalSettings';
 	// Viktor: Simple capture-at-xx:58 / write-at-xx:59 state tracking
 	let upgradeAutomationPendingPlanRows = null;
@@ -271,6 +273,7 @@
 	}
 
 	const UPGRADE_AUTOMATION_STATS_API = 'https://api.ryden.systems/api_stats_points.php';
+	const UPGRADE_AUTOMATION_AEPHIA_SUMMARY_API = 'https://store-sage-lp.aephia.workers.dev/summary';
 	const UPGRADE_AUTOMATION_POINTS_CATEGORY = LPCategory.toString();
 	const UPGRADE_AUTOMATION_FACTION_CONFIG = {
 		MUD: { lpInstance: 1, phantomCrewCoords: '0,-24' },
@@ -640,7 +643,8 @@
 		}
 		const effectiveTargetNow = Number.isFinite(Number(influxTarget.targetNowInflux)) && Number(influxTarget.targetNowInflux) > 0 ? Number(influxTarget.targetNowInflux) : null;
 		const rawTargetNowInflux = Number.isFinite(Number(influxTarget.targetNowInflux)) ? Number(influxTarget.targetNowInflux) : null;
-		const control = computeUpgradeAutomationControl(series, now, effectiveTargetNow);
+		const aephiaLpToday = await fetchUpgradeAutomationAephiaLpToday(lpInstanceKey, now);
+		const control = computeUpgradeAutomationControl(series, now, effectiveTargetNow, aephiaLpToday);
 		const state = await loadUpgradeAutomationState(instanceId);
 		const dayKey = now.toISOString().slice(0, 10);
 		const cumErr = state.dayKey === dayKey ? Number(state.cumErr || 0) : 0;
@@ -1702,7 +1706,8 @@
 		);
 		const profitStats = await fetchUpgradeAutomationStrategyProfitStats(now);
 		const effectiveTargetNow = Number.isFinite(Number(influxTarget.targetNowInflux)) && Number(influxTarget.targetNowInflux) > 0 ? Number(influxTarget.targetNowInflux) : null;
-		const control = computeUpgradeAutomationControl(series, now, effectiveTargetNow);
+		const aephiaLpToday = await fetchUpgradeAutomationAephiaLpToday(lpInstanceKey, now);
+		const control = computeUpgradeAutomationControl(series, now, effectiveTargetNow, aephiaLpToday);
 		const state = await loadUpgradeAutomationState(instanceId);
 		const dayKey = now.toISOString().slice(0, 10);
 		const cumErr = state.dayKey === dayKey ? Number(state.cumErr || 0) : 0;
@@ -2481,7 +2486,60 @@
 		return parsed;
 	}
 
-	function computeUpgradeAutomationControl(series, now = new Date(), preferredTargetNow = null) {
+	async function fetchUpgradeAutomationAephiaSummary() {
+		const token = getAephiaApiKey();
+		if (!token) throw new Error('aephia_api_key_missing');
+		const tokenKey = getAephiaTokenCacheKey(token);
+		const now = Date.now();
+		if (upgradeAutomationAephiaSummaryCache.tokenKey === tokenKey && upgradeAutomationAephiaSummaryCache.data && (now - Number(upgradeAutomationAephiaSummaryCache.fetchedAt || 0)) < 30000) {
+			return upgradeAutomationAephiaSummaryCache.data;
+		}
+		let response;
+		if (typeof GM_xmlhttpRequest === 'function') {
+			response = await new Promise((resolve, reject) => {
+				GM_xmlhttpRequest({
+					method: 'GET',
+					url: UPGRADE_AUTOMATION_AEPHIA_SUMMARY_API,
+					headers: { Authorization: 'Bearer ' + token },
+					timeout: 15000,
+					onload: resolve,
+					onerror: () => reject(new Error('aephia_summary_network_error')),
+					ontimeout: () => reject(new Error('aephia_summary_timeout'))
+				});
+			});
+		} else {
+			response = await fetch(UPGRADE_AUTOMATION_AEPHIA_SUMMARY_API, { method: 'GET', headers: { Authorization: 'Bearer ' + token } });
+		}
+		const status = Number(response.status || 0);
+		const body = response.responseText != null ? response.responseText : await response.text();
+		if (status !== 200) throw new Error('aephia_summary_http_' + status);
+		const data = JSON.parse(body);
+		upgradeAutomationAephiaSummaryCache = { fetchedAt: Date.now(), tokenKey, data };
+		return data;
+	}
+
+	async function fetchUpgradeAutomationAephiaLpToday(faction, now = new Date()) {
+		const data = await fetchUpgradeAutomationAephiaSummary();
+		const normalizedFaction = normalizeUpgradeAutomationLpInstance(faction || globalSettings?.upgradeAutomationLpInstance || 'MUD');
+		const factionKeys = normalizedFaction === 'UST' ? ['UST', 'USTUR', 'Ustur'] : [normalizedFaction];
+		const utcDayIndex = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 86400000);
+		let rows = [];
+		for (const key of factionKeys) {
+			rows = data?.interval?.factions?.[key] || [];
+			if (Array.isArray(rows) && rows.length) break;
+		}
+		if (!Array.isArray(rows) || !rows.length) throw new Error('aephia_summary_faction_series_missing');
+		const todayRows = rows
+			.filter(row => Number(row?.dayIndex) === utcDayIndex)
+			.map(row => ({ row, timestamp: Number(row?.timestamp || Date.parse(row?.dateTime || '')) || 0 }))
+			.sort((a, b) => a.timestamp - b.timestamp);
+		const latest = todayRows.at(-1)?.row;
+		const total = Number(latest?.redeemedLp);
+		if (!latest || !Number.isFinite(total)) throw new Error('aephia_summary_lp_today_missing');
+		return total;
+	}
+
+	function computeUpgradeAutomationControl(series, now = new Date(), preferredTargetNow = null, preferredTodayTotal = null) {
 		const utcDayIndex = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 86400000);
 		const completed = series.filter(x => x.dayIndex < utcDayIndex && x.totalPoints > 0);
 		if (completed.length < 7) throw new Error('not_enough_history_for_avg7');
@@ -2494,7 +2552,7 @@
 		const trend2 = ((yesterday + dayBefore) / 2 - avg7Weighted) / Math.max(avg7Weighted, 1);
 		const p = utcDayProgress(now);
 		const todayRow = series.find(x => x.dayIndex === utcDayIndex);
-		const todayTotal = todayRow?.totalPoints || 0;
+		const todayTotal = preferredTodayTotal != null && Number.isFinite(Number(preferredTodayTotal)) ? Number(preferredTodayTotal) : (todayRow?.totalPoints || 0);
 		const fallbackTargetNow = Math.max(avg7Weighted * p, 1);
 		const targetNow = Number.isFinite(Number(preferredTargetNow)) && Number(preferredTargetNow) > 0 ? Number(preferredTargetNow) : fallbackTargetNow;
 		const errNow = (targetNow - todayTotal) / Math.max(targetNow, 1);
@@ -2850,7 +2908,8 @@
 		}
 		const effectiveTargetNow = Number.isFinite(Number(influxTarget.targetNowInflux)) && Number(influxTarget.targetNowInflux) > 0 ? Number(influxTarget.targetNowInflux) : null;
 
-		const control = computeUpgradeAutomationControl(series, now, effectiveTargetNow);
+		const aephiaLpToday = await fetchUpgradeAutomationAephiaLpToday(lpInstanceKey, now);
+		const control = computeUpgradeAutomationControl(series, now, effectiveTargetNow, aephiaLpToday);
 
 		const state = await loadUpgradeAutomationState(instanceId);
 		const dayKey = now.toISOString().slice(0, 10);
