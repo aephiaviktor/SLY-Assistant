@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-05
+// @aephia-version 0.7.35-06
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-05'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-06'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
         'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
@@ -1978,44 +1978,54 @@
 
 	async function fetchUpgradeAutomationHourlyInfluxAverages(lpInstanceKey, now = new Date()) {
 		const normalizedFaction = normalizeUpgradeAutomationLpInstance(lpInstanceKey);
-		const fieldMap = {
-			MUD: 'mud_earned_today',
-			ONI: 'oni_earned_today',
-			UST: 'ustur_earned_today',
-		};
-		const fieldName = fieldMap[normalizedFaction];
-		if (!fieldName) throw new Error('unknown_lp_history_faction');
-		if (!globalSettings?.lpTargetHistoryInfluxDB) throw new Error('missing_lp_target_history_influx_db');
+		const factionKeys = normalizedFaction === 'UST' ? ['UST', 'USTUR', 'Ustur'] : [normalizedFaction];
 		const weights = [1, 7/6, 4/3, 3/2, 5/3, 11/6, 2];
 		const windows = getUpgradeAutomationLpSnapshotWindows(now);
-		// Query all 24 hours to support per-hour projection sum
 		const hourSet = Array.from({ length: 24 }, (_, i) => i);
-		const flux = `from(bucket: "${globalSettings.lpTargetHistoryInfluxDB}")
-  |> range(start: -8d)
-  |> filter(fn: (r) => r._field == "${fieldName}")
-  |> keep(columns: ["_time", "_value"])
-  |> sort(columns: ["_time"])`;
-		const csv = await queryInfluxFlux(flux, globalSettings.lpTargetHistoryInfluxURL, globalSettings.lpTargetHistoryInfluxAuth);
-		const rows = parseInfluxCsv(csv);
+		const data = await fetchUpgradeAutomationAephiaSummary();
+		let rows = [];
+		let factionKey = '';
+		for (const key of factionKeys) {
+			rows = data?.interval?.factions?.[key] || [];
+			if (Array.isArray(rows) && rows.length) {
+				factionKey = key;
+				break;
+			}
+		}
+		if (!Array.isArray(rows) || !rows.length) throw new Error('aephia_summary_faction_series_missing');
 		const todayKey = now.toISOString().slice(0, 10);
-		const byHour = new Map();
-		for (const hour of hourSet) byHour.set(hour, []);
+		const byDay = new Map();
 		for (const row of rows) {
-			const timeStr = String(row._time || '');
-			const value = Number(row._value);
-			if (!timeStr || !Number.isFinite(value)) continue;
-			const dt = new Date(timeStr);
+			const rawTime = row?.timestamp ?? row?.dateTime;
+			const parsedTime = typeof rawTime === 'number' ? rawTime : Date.parse(String(rawTime || ''));
+			const timeMs = Number.isFinite(parsedTime) && parsedTime > 0 && parsedTime < 1000000000000 ? parsedTime * 1000 : parsedTime;
+			const value = Number(row?.redeemedLp);
+			if (!Number.isFinite(timeMs) || timeMs <= 0 || !Number.isFinite(value)) continue;
+			const dt = new Date(timeMs);
 			if (!Number.isFinite(dt.getTime())) continue;
 			const dayKey = dt.toISOString().slice(0, 10);
-			const snapshotHour = dt.getUTCHours();
-			if (!byHour.has(snapshotHour)) continue;
 			if (!dayKey || dayKey === todayKey) continue;
-			byHour.get(snapshotHour).push({ dayKey, value, timeStr });
+			if (!byDay.has(dayKey)) byDay.set(dayKey, []);
+			byDay.get(dayKey).push({ timeMs, value, timeStr: dt.toISOString() });
+		}
+		for (const entries of byDay.values()) entries.sort((a, b) => a.timeMs - b.timeMs);
+		const byHour = new Map();
+		for (const hour of hourSet) byHour.set(hour, []);
+		for (const [dayKey, entries] of byDay.entries()) {
+			const dayStartMs = Date.parse(dayKey + 'T00:00:00.000Z');
+			if (!Number.isFinite(dayStartMs)) continue;
+			for (const hour of hourSet) {
+				const cutoffMs = dayStartMs + ((hour * 60) + 50) * 60000;
+				let selected = null;
+				for (const entry of entries) {
+					if (entry.timeMs < cutoffMs) selected = entry;
+					else break;
+				}
+				if (selected) byHour.get(hour).push({ dayKey, value: selected.value, timeStr: selected.timeStr });
+			}
 		}
 		for (const hour of hourSet) {
-			const deduped = new Map();
-			for (const entry of byHour.get(hour) || []) deduped.set(entry.dayKey, entry);
-			byHour.set(hour, Array.from(deduped.values()).sort((a, b) => String(a.timeStr).localeCompare(String(b.timeStr))));
+			byHour.set(hour, (byHour.get(hour) || []).sort((a, b) => String(a.timeStr).localeCompare(String(b.timeStr))));
 		}
 		const computeWeighted = hour => {
 			const entries = (byHour.get(hour) || []).slice(-7);
@@ -2025,7 +2035,6 @@
 			const val = entries.reduce((sum, entry, idx) => sum + entry.value * relevantWeights[idx], 0) / Math.max(wsum, 1);
 			return { value: val, count: entries.length };
 		};
-		// Build per-hour weighted values for projection
 		const hourlyValues = {};
 		for (let h = 0; h < 24; h++) {
 			const w = computeWeighted(h);
@@ -2049,14 +2058,12 @@
 			fallbackUsed: !Number.isFinite(targetNowInflux),
 			hourlyValues,
 			debug: {
-				fieldName,
+				factionKey,
 				hourSet: [windows.prevHour, windows.nextHour],
 				rowsCount: rows.length,
-				config: {
-					urlSet: !!globalSettings.lpTargetHistoryInfluxURL,
-					authSet: !!globalSettings.lpTargetHistoryInfluxAuth,
-					db: globalSettings.lpTargetHistoryInfluxDB || ''
-				}
+				daysCount: byDay.size,
+				source: 'aephia_summary_interval',
+				bucketRule: 'latest_snapshot_before_xx50'
 			}
 		};
 	}
