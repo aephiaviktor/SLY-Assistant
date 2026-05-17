@@ -38,6 +38,10 @@ tmp/
 temp/
 logs/
 
+# Local instance identity
+electron-app/instance-config.json
+instance-config.json
+
 # Common dependency/build output
 node_modules/
 dist/
