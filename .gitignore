@@ -1,28 +1,54 @@
-# Dependencies
+# Secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.csr
+wallet*
+*wallet*
+mnemonic*
+seed*
+private_key*
+private-key*
+secret*
+credentials*
+api_keys/
+api_keys.*
+apikey*
+token*
+keystore*
+id_rsa*
+id_ed25519*
+
+# Risky local/runtime folders
+instances/
+instance/
+openclaw/
+OpenClaw/
+.openclaw/
+workspace*/
+runtime/
+.local/
+cache/
+tmp/
+temp/
+logs/
+
+# Common dependency/build output
 node_modules/
-
-# Runtime / local app data
-/data/
-electron-app/data/
-*.log
-
-# Backups / temp
-*.bak
-*.bak-*
-*.pre-*.bak
-*.tmp
-
-# Electron packaged runtime binaries (do not commit)
-electron.exe
-*.dll
-*.pak
-*.bin
-*.dat
-*.asar
-locales/
-resources/
+dist/
+build/
+out/
+.venv/
+venv/
+__pycache__/
+*.pyc
 
 # OS/editor
 .DS_Store
-Thumbs.db
 .vscode/
+.idea/
