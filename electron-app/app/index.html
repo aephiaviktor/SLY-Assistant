@@ -1,7 +1,7 @@
 <!doctype html>
 <html>
  <head>
-    <title>SLYA - MUD</title>
+    <title>SLYA</title>
     <link rel="stylesheet" href="roboto.css">
     <style>
 	html { webkit-font-smoothing: antialiased; box-sizing: border-box; text-size-adjust: 100%; }
@@ -17,7 +17,7 @@
 const urlParams = new URLSearchParams(window.location.search);
 const version = urlParams.get('version');
 const aephiaVersion = urlParams.get('aephiaVersion');
-const appInstanceName = urlParams.get('appInstanceName') || 'MUD';
+const appInstanceName = urlParams.get('appInstanceName') || '';
 const loadingVersionLabel = aephiaVersion && aephiaVersion !== 'unknown' ? (appInstanceName + ' - AEP v' + aephiaVersion) : (appInstanceName + ' - SLYA v' + version);
 window.GM_info = { script: { version: version } };
 
@@ -40,7 +40,7 @@ if(version)
 
 	if(!globalSettings.mySecretKey)
 	{
-		document.write('<div style="position:absolute;top:36vh;left:0px;text-align:center;width:100%;z-index:-1;font-size:90%;color:#ffb;">This SLYA - MUD standalone version needs your wallet key to sign transactions.<br>Click on "Tools->Settings->Advanced->My Secret Key" and follow the instructions.<br>After you have saved the key, use the top-right "Reload" button.</div>');
+		document.write('<div style="position:absolute;top:36vh;left:0px;text-align:center;width:100%;z-index:-1;font-size:90%;color:#ffb;">This SLYA standalone version needs your wallet key to sign transactions.<br>Click on "Tools->Settings->Advanced->My Secret Key" and follow the instructions.<br>After you have saved the key, use the top-right "Reload" button.</div>');
 	}
 }
 

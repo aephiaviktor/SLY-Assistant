@@ -1,8 +1,8 @@
 const { ipcMain, session, app, BrowserWindow } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
-const APP_NAME = 'SLYA - MUD'
-const APP_ID = 'slya.mud'
+const APP_NAME = 'SLYA'
+const APP_ID = 'slya'
 const APP_INSTANCE_NAME = APP_NAME.replace(/^SLYA\s*-\s*/, '')
 const ORIGINAL_UPDATE_URL = 'https://raw.githubusercontent.com/Swift42/SLY-Assistant/refs/heads/patch-collection-for-0.7.0/SLY_Assistant.user.js'
 const AEP_UPDATE_BASE_URL = 'https://raw.githubusercontent.com/aephiaviktor/SLY-Assistant/refs/heads/patch-collection-for-0.7.0'
@@ -82,8 +82,8 @@ function preserveElectronIndexIdentity(file)
 {
 	return file
 		.replace(/<title>[^<]+<\/title>/, `<title>${APP_NAME}</title>`)
-		.replace(/appInstanceName'\) \|\| '[^']+'/, `appInstanceName') || '${APP_INSTANCE_NAME}'`)
-		.replace(/This SLYA - [^<]+ standalone version/g, `This ${APP_NAME} standalone version`)
+		.replace(/appInstanceName'\) \|\| '[^']+'/, `appInstanceName') || ''`)
+                .replace(/This SLYA - [^<]+ standalone version/g, `This SLYA standalone version`)
 }
 
 function writeUpdateFile(target, file)
