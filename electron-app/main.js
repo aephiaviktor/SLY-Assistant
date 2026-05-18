@@ -1,9 +1,25 @@
 const { ipcMain, session, app, BrowserWindow } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
-const APP_NAME = 'SLYA'
-const APP_ID = 'slya'
-const APP_INSTANCE_NAME = APP_NAME.replace(/^SLYA\s*-\s*/, '')
+
+function readInstanceConfig()
+{
+        const configPath = path.join(__dirname, 'instance-config.json')
+        try {
+                if (!fs.existsSync(configPath)) return {}
+                return JSON.parse(fs.readFileSync(configPath, 'utf8'))
+        } catch (error) {
+                console.error('Failed to read instance-config.json:', error)
+                return {}
+        }
+}
+
+const instanceConfig = readInstanceConfig()
+const APP_INSTANCE_NAME = String(instanceConfig.instanceName || '').replace(/[<>]/g, '').trim()
+const APP_NAME = APP_INSTANCE_NAME ? `SLYA - ${APP_INSTANCE_NAME}` : 'SLYA'
+const APP_ID = APP_INSTANCE_NAME ? `slya.${APP_INSTANCE_NAME.toLowerCase().replace(/[^a-z0-9]+/g, '')}` : 'slya'
+
+
 const ORIGINAL_UPDATE_URL = 'https://raw.githubusercontent.com/Swift42/SLY-Assistant/refs/heads/patch-collection-for-0.7.0/SLY_Assistant.user.js'
 const AEP_UPDATE_BASE_URL = 'https://raw.githubusercontent.com/aephiaviktor/SLY-Assistant/refs/heads/aep-release'
 const AEP_UPDATE_URL = `${AEP_UPDATE_BASE_URL}/SLY_Assistant.user.js`
