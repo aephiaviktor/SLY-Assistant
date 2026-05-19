@@ -1,3 +1,40 @@
+slya-electron
+Standalone version of SLY Assistant (for Electron)
+
+Works with: Windows, Linux, MacOS, ARM64, ...
+
+Important preliminary note
+The standalone version doesn't use a wallet extension. Instead SLYA signs the transactions by itself - so it needs your wallet key. For security reasons you should do this only with a lancer wallet!
+
+Install instructions
+Download Electron.
+Go to https://github.com/electron/electron/releases/tag/v42.1.0 and download the electron-v42.1.0-[...] version for your OS/CPU.
+Or use a direct link from this list:
+Windows (Intel/AMD): https://github.com/electron/electron/releases/download/v42.1.0/electron-v42.1.0-win32-x64.zip
+Windows (ARM): https://github.com/electron/electron/releases/download/v42.1.0/electron-v42.1.0-win32-arm64.zip
+MacOS: https://github.com/electron/electron/releases/download/v42.1.0/electron-v42.1.0-darwin-arm64.zip
+
+Unpack the Electron ZIP file.
+Download the AEP SLYA release files from here:
+(https://github.com/aephiaviktor/SLY-Assistant/archive/refs/tags/aephia-slya-v0.7.35-08.zip)
+... and unpack the ZIP in the Electron program folder - or alternatively unpack it somewhere else and copy all files/folders into the Electron folder.
+Start the app with "SLYA.bat" (on Windows). It may be useful to create a shortcut/launcher for it. Alternatively you can start the Electron app with the parameter ".", so e.g. electron.exe . on Windows or ./electron . from a Linux shell.
+When the standalone app has started, it will automatically download the latest SLYA version and tells you that the wallet key is missing. Follow the instructions to add the key.
+The SLYA standalone version comes with three additional buttons:
+
+Reload: The app gets reloaded
+Update: Check for an update and optionally install it
+Console: Open the internal error console
+
+
+
+
+
+
+
+
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
 ![SLY Lab Assistant](https://github.com/ImGroovin/Lab-Assistant/blob/main/SLY_Lab_Assistant-banner.png)
 
 # Lab Assistant by Shadow Loyal [SLY]
