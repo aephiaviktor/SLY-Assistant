@@ -1,7 +1,7 @@
 slya-electron
 Standalone version of SLY Assistant (for Electron)
 
-Works with: Windows, Linux, MacOS, ARM64, ...
+Works with: Windows, MacOS, ARM64
 
 Important preliminary note
 The standalone version doesn't use a wallet extension. Instead SLYA signs the transactions by itself - so it needs your wallet key. For security reasons you should do this only with a lancer wallet!
