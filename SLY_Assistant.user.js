@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-11
+// @aephia-version 0.7.35-13
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-11'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-13'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
         'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
@@ -489,6 +489,14 @@
 		return result;
 	}
 
+	function formatUpgradeAutomationObservedDrainDebugLine(observedDrainMap = {}) {
+		const order = ['Framework','Electronics','Power Source','Electromagnet','Field Stabilizer','Particle Accelerator','Radiation Absorber','Survey Data Unit'];
+		return order.map(name => {
+			const value = Number(observedDrainMap[name] || (name === 'Survey Data Unit' ? observedDrainMap.SDU : 0) || 0);
+			return name + ': ' + Math.round(value).toLocaleString();
+		}).join(' | ');
+	}
+
 	function formatUpgradeAutomationInfluxRows(craftMap = {}, upgradeMap = {}, inventoryMap = {}, inventoryGlobalMap = {}, observedDrainMap = {}) {
 		const order = ['Framework','Electronics','Power Source','Electromagnet','Field Stabilizer','Particle Accelerator','Radiation Absorber','Survey Data Unit'];
 		let html = '';
@@ -497,14 +505,15 @@
 			const upgrade = Number(upgradeMap[name] || 0);
 			const inventory = Number(inventoryMap[name] || 0);
 			const inventoryGlobal = Number(inventoryGlobalMap[name] || 0);
-			const observedDrain = Number(observedDrainMap[name] || 0);
-			const deficit = upgrade - craft;
+			const observedDrain = Number(observedDrainMap[name] || (name === 'Survey Data Unit' ? observedDrainMap.SDU : 0) || 0);
+			const plannedDrain = upgrade - craft;
+			const effectiveDrain = Math.max(plannedDrain, observedDrain, 0);
 			const bufferDaysPhantom = upgrade > 0 ? (inventory / upgrade) : null;
-			const bufferDaysGlobal = deficit > 0 ? (inventoryGlobal / deficit) : null;
+			const bufferDaysGlobal = effectiveDrain > 0 ? (inventoryGlobal / effectiveDrain) : null;
 			const phantomBlocked = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
 			const displayName = phantomBlocked ? '<span style="color:#ff8080">' + name + ' (blocked)</span>' : name;
 			const phantomNumberStyle = phantomBlocked ? ' style="color:#ff8080"' : '';
-			html += '<tr><td style="padding-left:18px">' + displayName + '</td><td align="right">' + Math.round(upgrade).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + Math.round(inventory).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + (bufferDaysPhantom === null ? '' : Number(bufferDaysPhantom).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td><td align="right">' + Math.round(craft).toLocaleString() + '</td><td align="right">' + Math.round(inventoryGlobal).toLocaleString() + '</td><td align="right">' + Math.round(deficit).toLocaleString() + '</td><td align="right">' + (bufferDaysGlobal === null ? '' : Number(bufferDaysGlobal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td><td align="right">' + Math.round(observedDrain).toLocaleString() + '</td></tr>';
+			html += '<tr><td style="padding-left:18px">' + displayName + '</td><td align="right">' + Math.round(upgrade).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + Math.round(inventory).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + (bufferDaysPhantom === null ? '' : Number(bufferDaysPhantom).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td><td align="right">' + Math.round(craft).toLocaleString() + '</td><td align="right">' + Math.round(inventoryGlobal).toLocaleString() + '</td><td align="right">' + Math.round(plannedDrain).toLocaleString() + '</td><td align="right">' + Math.round(observedDrain).toLocaleString() + '</td><td align="right">' + Math.round(effectiveDrain).toLocaleString() + '</td><td align="right">' + (bufferDaysGlobal === null ? '' : Number(bufferDaysGlobal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td></tr>';
 		}
 		return html;
 	}
@@ -3628,10 +3637,10 @@
 			content += '<div class="lp-auto-section-gap"></div>';
 
 			content += openSection('lp-auto-influx');
-			content += '<tr style="opacity:0.66"><td><b>InfluxDB<br>Component</b></td><td align="right"><b>Upgrading 24h</b></td><td align="right"><b>Inventory<br>Phantom</b></td><td align="right"><b>Buffer Days<br>Phantom</b></td><td align="right"><b>Crafting 24h</b></td><td align="right"><b>Inventory<br>global</b></td><td align="right"><b>Deficit</b></td><td align="right"><b>Buffer Days<br>global</b></td><td align="right"><b>Buffer Days new<br>Observed Drain</b></td></tr>';
+			content += '<tr style="opacity:0.66"><td><b>InfluxDB<br>Component</b></td><td align="right"><b>Upgrading 24h</b></td><td align="right"><b>Inventory<br>Phantom</b></td><td align="right"><b>Buffer Days<br>Phantom</b></td><td align="right"><b>Crafting 24h</b></td><td align="right"><b>Inventory<br>global</b></td><td align="right"><b>Planned<br>Drain</b></td><td align="right"><b>Observed<br>Drain</b></td><td align="right"><b>Effective<br>Drain</b></td><td align="right"><b>Buffer Days<br>global</b></td></tr>';
 			content += formatUpgradeAutomationInfluxRows(upgradeAutomationInfluxCraft24h, upgradeAutomationInfluxUpgrade24h, upgradeAutomationInfluxInventory, upgradeAutomationInfluxInventoryGlobal, upgradeAutomationInfluxInventoryGlobalWeightedDrain);
-			if (upgradeAutomationInfluxUpgrade24hError) content += '<tr><td colspan="9" style="color:#ff8080">Influx error: ' + String(upgradeAutomationInfluxUpgrade24hError).replace(/[<>]/g, '') + '</td></tr>';
-			if (upgradeAutomationInfluxInventoryDrainError) content += '<tr><td colspan="9" style="color:#ff8080">Inventory drain error: ' + String(upgradeAutomationInfluxInventoryDrainError).replace(/[<>]/g, '') + '</td></tr>';
+			if (upgradeAutomationInfluxUpgrade24hError) content += '<tr><td colspan="10" style="color:#ff8080">Influx error: ' + String(upgradeAutomationInfluxUpgrade24hError).replace(/[<>]/g, '') + '</td></tr>';
+			if (upgradeAutomationInfluxInventoryDrainError) content += '<tr><td colspan="10" style="color:#ff8080">Inventory drain error: ' + String(upgradeAutomationInfluxInventoryDrainError).replace(/[<>]/g, '') + '</td></tr>';
 			content += closeSection;
 			content += '<div class="lp-auto-section-gap"></div>';
 
@@ -3801,7 +3810,9 @@
 			const perfEveeyeToday = perfEveeyeTodayValue == null || !Number.isFinite(Number(perfEveeyeTodayValue)) ? '-' : Math.round(Number(perfEveeyeTodayValue || 0)).toLocaleString();
 			const perfEveeyeYday = perfEveeyeYdayValue == null || !Number.isFinite(Number(perfEveeyeYdayValue)) ? '-' : Math.round(Number(perfEveeyeYdayValue || 0)).toLocaleString();
 			const perfEveeyeUpdatedAt = String(perfEveeyeUpdatedRaw || '-').replace(/[<>]/g, '');
+			const bufferDaysNewObservedDrainLine = formatUpgradeAutomationObservedDrainDebugLine(upgradeAutomationInfluxInventoryGlobalWeightedDrain).replace(/[<>]/g, '');
 			content += '<tr style="opacity:0.5"><td colspan="8" style="font-size:85%;font-family:monospace">Pools src=' + Math.floor(Number(upgradeAutomationExecutionSummary?.sourcePoolCount || 0)).toLocaleString() + ' (' + Math.floor(Number(upgradeAutomationExecutionSummary?.sourcePoolMass || 0)).toLocaleString() + ' LP) dst=' + Math.floor(Number(upgradeAutomationExecutionSummary?.destPoolCount || 0)).toLocaleString() + ' (' + Math.floor(Number(upgradeAutomationExecutionSummary?.destPoolMass || 0)).toLocaleString() + ' LP) dir=' + String(upgradeAutomationExecutionSummary?.partitionDirection || '-').replace(/[<>]/g, '') + ' behind=' + Number(upgradeAutomationExecutionSummary?.behindRatio || 0).toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 }) + '</td></tr>';
+			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:85%">Buffer Days new</td><td colspan="6" style="font-size:85%;font-family:monospace;word-break:break-word"><b>Observed Drain</b> ' + bufferDaysNewObservedDrainLine + '</td></tr>';
 			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:85%">Past hours</td><td align="right" style="font-size:85%">' + optDebugNeutralPast + '<br><small>Neutral past</small></td><td align="right" style="font-size:85%">' + optDebugNeutralCurrentHour + '<br><small>Current hour</small></td><td align="right" style="font-size:85%">' + optDebugTargetPast + '<br><small>Target past</small></td><td align="right" style="font-size:85%">' + optDebugAchievablePast + '<br><small>Optimizer past</small></td><td></td><td></td></tr>';
 			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:85%">Performance alpha 1</td><td align="right" style="font-size:85%">' + perfCleanRequestedAlphaValue + '<br><small>clean requested alpha</small></td><td align="right" style="font-size:85%">' + perfCleanRequestedAlphaK + '<br><small>requested k</small></td><td align="right" style="font-size:85%">' + perfCleanRequestedAlphaDays + '<br><small>requested days</small></td><td align="right" style="font-size:85%">' + perfCleanOptimizerAlphaValue + '<br><small>clean optimizer alpha</small></td><td align="right" style="font-size:85%">' + perfCleanOptimizerAlphaK + '<br><small>optimizer k</small></td><td align="right" style="font-size:85%">' + perfCleanOptimizerAlphaDays + '<br><small>optimizer days</small></td></tr>';
 			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:85%">Performance alpha 2</td><td align="right" style="font-size:85%">' + perfNeutralLpYesterday + '<br><small>neutral yday</small></td><td align="right" style="font-size:85%">' + perfRequestedLpYesterday + '<br><small>requested yday</small></td><td align="right" style="font-size:85%">' + perfOptimizerLpYesterday + '<br><small>optimizer yday</small></td><td align="right" style="font-size:85%">' + perfInstalledYesterday + '<br><small>installed yday</small></td><td></td><td></td></tr>';
