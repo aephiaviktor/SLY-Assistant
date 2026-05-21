@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-16
+// @aephia-version 0.7.35-17
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-16'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-17'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
         'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
@@ -501,6 +501,10 @@
 		return Number(map?.[componentName] || (componentName === 'Survey Data Unit' ? map?.SDU : 0) || 0);
 	}
 
+	function getUpgradeAutomationEffectiveDrain(plannedDrain = 0, observedDrain = 0) {
+		return Math.max(Number(plannedDrain || 0), Number(observedDrain || 0), 0);
+	}
+
 	function formatUpgradeAutomationInfluxRows(craftMap = {}, upgradeMap = {}, inventoryMap = {}, inventoryGlobalMap = {}, observedDrainMap = {}) {
 		const order = ['Framework','Electronics','Power Source','Electromagnet','Field Stabilizer','Particle Accelerator','Radiation Absorber','Survey Data Unit'];
 		let html = '';
@@ -511,7 +515,7 @@
 			const inventoryGlobal = getUpgradeAutomationComponentValue(inventoryGlobalMap, name);
 			const observedDrain = getUpgradeAutomationComponentValue(observedDrainMap, name);
 			const plannedDrain = upgrade - craft;
-			const effectiveDrain = Math.max(plannedDrain, observedDrain, 0);
+			const effectiveDrain = getUpgradeAutomationEffectiveDrain(plannedDrain, observedDrain);
 			const bufferDaysPhantom = upgrade > 0 ? (inventory / upgrade) : null;
 			const bufferDaysGlobal = effectiveDrain > 0 ? (inventoryGlobal / effectiveDrain) : null;
 			const phantomBlocked = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
@@ -827,13 +831,15 @@
 		const lpPerUnit = Number(row?.lpPerUnit || 0);
 		const installedToday = Math.floor(Number(row?.installedToday || 0));
 		const craft24h = Number(row?.craft24h || 0);
+		const observedDrain = Number(row?.observedDrain || 0);
 		const inventoryGlobal = Number(row?.inventoryGlobal || 0);
 		const secondsInRemainingHours = Math.max(0, Number(remainingHours || 0)) * 3600;
 		const finalUpgradingHour = Math.floor(projectedCrew * 3600 / secondsPerUnit);
 		const finalUpgradingDay = Math.floor(installedToday + (projectedCrew * secondsInRemainingHours) / secondsPerUnit);
 		const finalLpTarget = Math.floor(finalUpgradingDay * lpPerUnit);
 		const finalDeficitDay = finalUpgradingDay - craft24h;
-		const finalBufferDays = finalDeficitDay > 0 ? (inventoryGlobal / finalDeficitDay) : (inventoryGlobal > 0 ? Number.POSITIVE_INFINITY : null);
+		const finalEffectiveDrain = getUpgradeAutomationEffectiveDrain(finalDeficitDay, observedDrain);
+		const finalBufferDays = finalEffectiveDrain > 0 ? (inventoryGlobal / finalEffectiveDrain) : (inventoryGlobal > 0 ? Number.POSITIVE_INFINITY : null);
 		const finalTier = getUpgradeAutomationBufferTier(finalBufferDays, inventoryGlobal);
 		const finalTierFloor = getUpgradeAutomationBufferTierFloor(finalTier);
 		const finalTierSurplus = finalBufferDays == null
@@ -845,6 +851,7 @@
 			finalUpgradingDay,
 			finalLpTarget,
 			finalDeficitDay,
+			finalEffectiveDrain,
 			finalBufferDays,
 			finalTier,
 			finalTierFloor,
@@ -1383,12 +1390,14 @@
 			const inventoryGlobal = getUpgradeAutomationComponentValue(upgradeAutomationInfluxInventoryGlobal, canonicalName);
 			const craft24h = getUpgradeAutomationComponentValue(upgradeAutomationInfluxCraft24h, canonicalName);
 			const upgrade24h = getUpgradeAutomationComponentValue(upgradeAutomationInfluxUpgrade24h, canonicalName);
+			const observedDrain = getUpgradeAutomationComponentValue(upgradeAutomationInfluxInventoryGlobalWeightedDrain, canonicalName);
 			const installedToday = Math.floor(Number(installedTodayByComponent[canonicalName] || (canonicalName === 'Survey Data Unit' ? installedTodayByComponent['SDU'] : 0) || 0));
 			const secondsPerUnit = Number(UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_SECONDS[canonicalName] || (canonicalName === 'Survey Data Unit' ? UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_SECONDS['SDU'] : 0) || 0);
 			const neutralTarget24h = inventoryGlobal / 10 + craft24h;
 			const neutralTargetRemaining = Math.max(0, neutralTarget24h - installedToday);
-			const deficit24h = Math.max(0, upgrade24h - craft24h);
-			const bufferDaysGlobal = deficit24h > 0 ? (inventoryGlobal / deficit24h) : null;
+			const deficit24h = upgrade24h - craft24h;
+			const effectiveDrain24h = getUpgradeAutomationEffectiveDrain(deficit24h, observedDrain);
+			const bufferDaysGlobal = effectiveDrain24h > 0 ? (inventoryGlobal / effectiveDrain24h) : null;
 			const avgCrewNeeded = secondsPerUnit > 0 ? (neutralTargetRemaining * secondsPerUnit) / Math.max(1, secondsInRemainingHours) : 0;
 			// Keep this aligned with formatUpgradeAutomationInfluxRows: Buffer Days Phantom = inventory / upgrading 24h.
 			const bufferDaysPhantom = upgrade24h > 0 ? (inventoryPhantom / upgrade24h) : (inventoryPhantom > 0 ? Number.POSITIVE_INFINITY : null);
@@ -1401,6 +1410,7 @@
 				inventoryPhantom,
 				inventoryGlobal,
 				craft24h,
+				observedDrain,
 				secondsPerUnit,
 				neutralTarget24h,
 				neutralTargetRemaining,
@@ -1428,7 +1438,8 @@
 				? Math.floor(row.installedToday + (projectedCrew * secondsInRemainingHours) / row.secondsPerUnit)
 				: Math.floor(row.installedToday || 0);
 			const projectedNeutralDeficitDay = projectedNeutralUpgradingDay - row.craft24h;
-			if (projectedNeutralDeficitDay > 0) return row.inventoryGlobal / projectedNeutralDeficitDay;
+			const projectedNeutralEffectiveDrain = getUpgradeAutomationEffectiveDrain(projectedNeutralDeficitDay, row.observedDrain);
+			if (projectedNeutralEffectiveDrain > 0) return row.inventoryGlobal / projectedNeutralEffectiveDrain;
 			if (Number(row.inventoryGlobal || 0) > 0) return Number.POSITIVE_INFINITY;
 			return null;
 		};
@@ -1439,7 +1450,8 @@
 				const currentNeutralUpgradingDay = Number(row.crew || 0) > 0
 					? Math.floor(row.installedToday + (Number(row.crew || 0) * secondsInRemainingHours) / row.secondsPerUnit)
 					: Math.floor(row.installedToday || 0);
-				return Number(row.inventoryGlobal || 0) > 0 && Number(row.craft24h || 0) > currentNeutralUpgradingDay;
+				const currentNeutralDeficitDay = currentNeutralUpgradingDay - Number(row.craft24h || 0);
+				return Number(row.inventoryGlobal || 0) > 0 && getUpgradeAutomationEffectiveDrain(currentNeutralDeficitDay, row.observedDrain) <= 0;
 			};
 			for (const row of activeRows) {
 				while (usedCrew < totalCrew && isCurrentInfinity(row)) {
@@ -1473,20 +1485,23 @@
 				row.neutralUpgradingDay = Math.floor(row.installedToday + (row.crew * secondsInRemainingHours) / row.secondsPerUnit);
 				row.neutralLpTarget = Math.floor(row.neutralUpgradingDay * lpPerUnit);
 				const neutralDeficitDay = row.neutralUpgradingDay - row.craft24h;
-				row.neutralBufferDays = neutralDeficitDay > 0 ? (row.inventoryGlobal / neutralDeficitDay) : (Number(row.inventoryGlobal || 0) > 0 ? Number.POSITIVE_INFINITY : null);
+				const neutralEffectiveDrain = getUpgradeAutomationEffectiveDrain(neutralDeficitDay, row.observedDrain);
+				row.neutralBufferDays = neutralEffectiveDrain > 0 ? (row.inventoryGlobal / neutralEffectiveDrain) : (Number(row.inventoryGlobal || 0) > 0 ? Number.POSITIVE_INFINITY : null);
 			} else {
 				row.neutralUpgradingDay = Math.floor(row.installedToday || 0);
 				row.neutralUpgradingHour = 0;
 				row.neutralLpTarget = Math.floor(Number(row.neutralUpgradingDay || 0) * lpPerUnit);
 				const neutralDeficitDay = Number(row.neutralUpgradingDay || 0) - Number(row.craft24h || 0);
-				row.neutralBufferDays = neutralDeficitDay > 0 ? (Number(row.inventoryGlobal || 0) / neutralDeficitDay) : (Number(row.inventoryGlobal || 0) > 0 ? Number.POSITIVE_INFINITY : null);
+				const neutralEffectiveDrain = getUpgradeAutomationEffectiveDrain(neutralDeficitDay, row.observedDrain);
+				row.neutralBufferDays = neutralEffectiveDrain > 0 ? (Number(row.inventoryGlobal || 0) / neutralEffectiveDrain) : (Number(row.inventoryGlobal || 0) > 0 ? Number.POSITIVE_INFINITY : null);
 			}
 			row.finalCrew = row.crew;
 			row.finalUpgradingHour = row.neutralUpgradingHour;
 			row.finalUpgradingDay = row.neutralUpgradingDay;
 			row.finalLpTarget = row.neutralLpTarget;
 			const finalDeficitDay = row.finalUpgradingDay - row.craft24h;
-			row.finalBufferDays = finalDeficitDay > 0 ? (row.inventoryGlobal / finalDeficitDay) : (Number(row.inventoryGlobal || 0) > 0 ? Number.POSITIVE_INFINITY : null);
+			const finalEffectiveDrain = getUpgradeAutomationEffectiveDrain(finalDeficitDay, row.observedDrain);
+			row.finalBufferDays = finalEffectiveDrain > 0 ? (row.inventoryGlobal / finalEffectiveDrain) : (Number(row.inventoryGlobal || 0) > 0 ? Number.POSITIVE_INFINITY : null);
 		}
 		const cleanedRows = rows.map(({ remainder, scaledCrew, ...row }) => row);
 		return cleanedRows;
