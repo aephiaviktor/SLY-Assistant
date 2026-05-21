@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-15
+// @aephia-version 0.7.35-16
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-15'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-16'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
         'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
@@ -492,20 +492,24 @@
 	function formatUpgradeAutomationObservedDrainDebugLine(observedDrainMap = {}) {
 		const order = ['Framework','Electronics','Power Source','Electromagnet','Field Stabilizer','Particle Accelerator','Radiation Absorber','Survey Data Unit'];
 		return order.map(name => {
-			const value = Number(observedDrainMap[name] || (name === 'Survey Data Unit' ? observedDrainMap.SDU : 0) || 0);
+			const value = getUpgradeAutomationComponentValue(observedDrainMap, name);
 			return name + ': ' + Math.round(value).toLocaleString();
 		}).join(' | ');
+	}
+
+	function getUpgradeAutomationComponentValue(map = {}, componentName = '') {
+		return Number(map?.[componentName] || (componentName === 'Survey Data Unit' ? map?.SDU : 0) || 0);
 	}
 
 	function formatUpgradeAutomationInfluxRows(craftMap = {}, upgradeMap = {}, inventoryMap = {}, inventoryGlobalMap = {}, observedDrainMap = {}) {
 		const order = ['Framework','Electronics','Power Source','Electromagnet','Field Stabilizer','Particle Accelerator','Radiation Absorber','Survey Data Unit'];
 		let html = '';
 		for (const name of order) {
-			const craft = Number(craftMap[name] || 0);
-			const upgrade = Number(upgradeMap[name] || 0);
-			const inventory = Number(inventoryMap[name] || 0);
-			const inventoryGlobal = Number(inventoryGlobalMap[name] || 0);
-			const observedDrain = Number(observedDrainMap[name] || (name === 'Survey Data Unit' ? observedDrainMap.SDU : 0) || 0);
+			const craft = getUpgradeAutomationComponentValue(craftMap, name);
+			const upgrade = getUpgradeAutomationComponentValue(upgradeMap, name);
+			const inventory = getUpgradeAutomationComponentValue(inventoryMap, name);
+			const inventoryGlobal = getUpgradeAutomationComponentValue(inventoryGlobalMap, name);
+			const observedDrain = getUpgradeAutomationComponentValue(observedDrainMap, name);
 			const plannedDrain = upgrade - craft;
 			const effectiveDrain = Math.max(plannedDrain, observedDrain, 0);
 			const bufferDaysPhantom = upgrade > 0 ? (inventory / upgrade) : null;
@@ -1375,10 +1379,10 @@
 		const rows = [];
 		for (const rawName of UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_ORDER) {
 			const canonicalName = rawName;
-			const inventoryPhantom = Number(upgradeAutomationInfluxInventory[canonicalName] || (canonicalName === 'Survey Data Unit' ? upgradeAutomationInfluxInventory['SDU'] : 0) || 0);
-			const inventoryGlobal = Number(upgradeAutomationInfluxInventoryGlobal[canonicalName] || (canonicalName === 'Survey Data Unit' ? upgradeAutomationInfluxInventoryGlobal['SDU'] : 0) || 0);
-			const craft24h = Number(upgradeAutomationInfluxCraft24h[canonicalName] || (canonicalName === 'Survey Data Unit' ? upgradeAutomationInfluxCraft24h['SDU'] : 0) || 0);
-			const upgrade24h = Number(upgradeAutomationInfluxUpgrade24h[canonicalName] || (canonicalName === 'Survey Data Unit' ? upgradeAutomationInfluxUpgrade24h['SDU'] : 0) || 0);
+			const inventoryPhantom = getUpgradeAutomationComponentValue(upgradeAutomationInfluxInventory, canonicalName);
+			const inventoryGlobal = getUpgradeAutomationComponentValue(upgradeAutomationInfluxInventoryGlobal, canonicalName);
+			const craft24h = getUpgradeAutomationComponentValue(upgradeAutomationInfluxCraft24h, canonicalName);
+			const upgrade24h = getUpgradeAutomationComponentValue(upgradeAutomationInfluxUpgrade24h, canonicalName);
 			const installedToday = Math.floor(Number(installedTodayByComponent[canonicalName] || (canonicalName === 'Survey Data Unit' ? installedTodayByComponent['SDU'] : 0) || 0));
 			const secondsPerUnit = Number(UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_SECONDS[canonicalName] || (canonicalName === 'Survey Data Unit' ? UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_SECONDS['SDU'] : 0) || 0);
 			const neutralTarget24h = inventoryGlobal / 10 + craft24h;
