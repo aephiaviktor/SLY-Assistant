@@ -1311,9 +1311,8 @@
 			const deficit24h = Math.max(0, upgrade24h - craft24h);
 			const bufferDaysGlobal = deficit24h > 0 ? (inventoryGlobal / deficit24h) : null;
 			const avgCrewNeeded = secondsPerUnit > 0 ? (neutralTargetRemaining * secondsPerUnit) / Math.max(1, secondsInRemainingHours) : 0;
-			// Compute phantom blocking: block if buffer days phantom < 0.5 (same formula as InfluxDB component table)
-			const upgradePerHour = upgrade24h / 24;
-			const bufferDaysPhantom = upgradePerHour > 0 ? (inventoryPhantom / upgradePerHour) : (inventoryPhantom > 0 ? Number.POSITIVE_INFINITY : null);
+			// Keep this aligned with formatUpgradeAutomationInfluxRows: Buffer Days Phantom = inventory / upgrading 24h.
+			const bufferDaysPhantom = upgrade24h > 0 ? (inventoryPhantom / upgrade24h) : (inventoryPhantom > 0 ? Number.POSITIVE_INFINITY : null);
 			const phantomBlocked = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
 			rows.push({
 				key: canonicalName,
