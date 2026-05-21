@@ -12415,7 +12415,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			assistLpAutomation.style.display = 'none';
 			let assistLpAutomationContent = document.createElement('div');
 			assistLpAutomationContent.classList.add('assist-status-content');
-			assistLpAutomationContent.innerHTML = '<div class="assist-modal-header" style="cursor: move;">LP Automation<div class="assist-modal-header-right"><span class="assist-modal-close">&#x2715;</span></div></div><div id="assistLpAutomationContent" class="assist-modal-body"></div>'
+			assistLpAutomationContent.innerHTML = '<div class="assist-modal-header" style="cursor: move;">LP Automation - AEP v' + AEPHIA_SLYA_VERSION + '<div class="assist-modal-header-right"><span class="assist-modal-close">&#x2715;</span></div></div><div id="assistLpAutomationContent" class="assist-modal-body"></div>'
 			assistLpAutomation.append(assistLpAutomationContent);
 			//statsadd end
 
