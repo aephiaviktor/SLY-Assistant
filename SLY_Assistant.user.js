@@ -643,7 +643,12 @@
 		}
 		const effectiveTargetNow = Number.isFinite(Number(influxTarget.targetNowInflux)) && Number(influxTarget.targetNowInflux) > 0 ? Number(influxTarget.targetNowInflux) : null;
 		const rawTargetNowInflux = Number.isFinite(Number(influxTarget.targetNowInflux)) ? Number(influxTarget.targetNowInflux) : null;
-		const aephiaLpToday = await fetchUpgradeAutomationAephiaLpToday(lpInstanceKey, now);
+		let aephiaLpToday = null;
+		try {
+			aephiaLpToday = await fetchUpgradeAutomationAephiaLpToday(lpInstanceKey, now);
+		} catch (e) {
+			aephiaLpToday = null;
+		}
 		const control = computeUpgradeAutomationControl(series, now, effectiveTargetNow, aephiaLpToday);
 		const state = await loadUpgradeAutomationState(instanceId);
 		const dayKey = now.toISOString().slice(0, 10);
@@ -1705,7 +1710,12 @@
 		);
 		const profitStats = await fetchUpgradeAutomationStrategyProfitStats(now);
 		const effectiveTargetNow = Number.isFinite(Number(influxTarget.targetNowInflux)) && Number(influxTarget.targetNowInflux) > 0 ? Number(influxTarget.targetNowInflux) : null;
-		const aephiaLpToday = await fetchUpgradeAutomationAephiaLpToday(lpInstanceKey, now);
+		let aephiaLpToday = null;
+		try {
+			aephiaLpToday = await fetchUpgradeAutomationAephiaLpToday(lpInstanceKey, now);
+		} catch (e) {
+			aephiaLpToday = null;
+		}
 		const control = computeUpgradeAutomationControl(series, now, effectiveTargetNow, aephiaLpToday);
 		const state = await loadUpgradeAutomationState(instanceId);
 		const dayKey = now.toISOString().slice(0, 10);
@@ -3583,7 +3593,8 @@
 				content += '<tr><td>Execution Alpha (ATLAS/day)</td><td align="right">' + Math.round(executionAlphaAtlasPerDay).toLocaleString() + '</td><td>Requested Alpha (ATLAS/day)</td><td align="right">' + Math.round(requestedAlphaAtlasPerDay).toLocaleString() + '</td><td>Optimizer Alpha (ATLAS/day)</td><td align="right">' + Math.round(optimizerAlphaAtlasPerDay).toLocaleString() + '</td></tr>';
 				content += '<tr><td>Neutral LP Target</td><td align="right">' + Math.round(neutralLpTargetFullDay).toLocaleString() + '</td><td>Requested LP Target</td><td align="right">' + Math.round(requestedLpTarget).toLocaleString() + '</td><td>Optimizer LP Target</td><td align="right">' + Math.round(achievableLpTargetFullDay).toLocaleString() + '</td></tr>';
 			} else if (upgradeAutomationLpControlError || upgradeAutomationExecutionSummaryError) {
-				content += '<tr><td colspan="6" style="color:#ff8080">LP Control error: ' + String(upgradeAutomationLpControlError).replace(/[<>]/g, '') + '</td></tr>';
+				const lpErrors = [upgradeAutomationLpControlError, upgradeAutomationExecutionSummaryError].filter(Boolean).join(' | ');
+				content += '<tr><td colspan="6" style="color:#ff8080">LP Control error: ' + String(lpErrors).replace(/[<>]/g, '') + '</td></tr>';
 			} else {
 				content += '<tr><td colspan="6">LP Control unavailable</td></tr>';
 			}
