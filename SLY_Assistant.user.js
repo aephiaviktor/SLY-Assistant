@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-14
+// @aephia-version 0.7.35-15
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-14'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-15'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
         'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
@@ -604,6 +604,10 @@
 			const rawValue = row?.crafting_last_24h ?? 0;
 			if (resource) out[String(resource)] = parseInfluxNumber(rawValue);
 		}
+		const sduFlux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: -72h)\n  |> filter(fn: (r) => r._measurement == "sdu" and r._field == "amount")\n  |> group()\n  |> sum(column: "_value")\n  |> map(fn: (r) => ({ r with _value: float(v: r._value) / 3.0 }))\n  |> keep(columns: ["_value"])\n  |> rename(columns: {_value: "sdu_found_24h"})`;
+		const sduCsv = await queryInfluxFlux(sduFlux);
+		const sduRows = parseInfluxCsv(sduCsv);
+		out.SDU = parseInfluxNumber(sduRows?.[0]?.sdu_found_24h ?? 0);
 		return { map: out };
 	}
 
