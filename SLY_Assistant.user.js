@@ -643,12 +643,7 @@
 		}
 		const effectiveTargetNow = Number.isFinite(Number(influxTarget.targetNowInflux)) && Number(influxTarget.targetNowInflux) > 0 ? Number(influxTarget.targetNowInflux) : null;
 		const rawTargetNowInflux = Number.isFinite(Number(influxTarget.targetNowInflux)) ? Number(influxTarget.targetNowInflux) : null;
-		let aephiaLpToday = null;
-		try {
-			aephiaLpToday = await fetchUpgradeAutomationAephiaLpToday(lpInstanceKey, now);
-		} catch (e) {
-			aephiaLpToday = null;
-		}
+		const aephiaLpToday = await fetchUpgradeAutomationAephiaLpToday(lpInstanceKey, now);
 		const control = computeUpgradeAutomationControl(series, now, effectiveTargetNow, aephiaLpToday);
 		const state = await loadUpgradeAutomationState(instanceId);
 		const dayKey = now.toISOString().slice(0, 10);
@@ -1710,12 +1705,7 @@
 		);
 		const profitStats = await fetchUpgradeAutomationStrategyProfitStats(now);
 		const effectiveTargetNow = Number.isFinite(Number(influxTarget.targetNowInflux)) && Number(influxTarget.targetNowInflux) > 0 ? Number(influxTarget.targetNowInflux) : null;
-		let aephiaLpToday = null;
-		try {
-			aephiaLpToday = await fetchUpgradeAutomationAephiaLpToday(lpInstanceKey, now);
-		} catch (e) {
-			aephiaLpToday = null;
-		}
+		const aephiaLpToday = await fetchUpgradeAutomationAephiaLpToday(lpInstanceKey, now);
 		const control = computeUpgradeAutomationControl(series, now, effectiveTargetNow, aephiaLpToday);
 		const state = await loadUpgradeAutomationState(instanceId);
 		const dayKey = now.toISOString().slice(0, 10);
@@ -2539,19 +2529,52 @@
 		const normalizedFaction = normalizeUpgradeAutomationLpInstance(faction || globalSettings?.upgradeAutomationLpInstance || 'MUD');
 		const factionKeys = normalizedFaction === 'UST' ? ['UST', 'USTUR', 'Ustur'] : [normalizedFaction];
 		const utcDayIndex = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 86400000);
+		const todayKey = now.toISOString().slice(0, 10);
 		let rows = [];
+		let matchedFactionKey = '';
 		for (const key of factionKeys) {
 			rows = data?.interval?.factions?.[key] || [];
-			if (Array.isArray(rows) && rows.length) break;
+			if (Array.isArray(rows) && rows.length) {
+				matchedFactionKey = key;
+				break;
+			}
 		}
 		if (!Array.isArray(rows) || !rows.length) throw new Error('aephia_summary_faction_series_missing');
+		const parseDayIndex = value => {
+			if (typeof value === 'number') return [value].filter(Number.isFinite);
+			const raw = String(value ?? '').trim();
+			if (!raw) return [];
+			const out = [];
+			const decimal = Number(raw);
+			if (Number.isFinite(decimal)) out.push(decimal);
+			const hex = parseInt(raw.replace(/^0x/i, ''), 16);
+			if (Number.isFinite(hex) && !out.includes(hex)) out.push(hex);
+			return out;
+		};
+		const parseRowTimeMs = row => {
+			const rawTime = row?.timestamp ?? row?.dateTime;
+			const parsed = typeof rawTime === 'number' ? rawTime : Date.parse(String(rawTime || ''));
+			if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+			return parsed < 1000000000000 ? parsed * 1000 : parsed;
+		};
 		const todayRows = rows
-			.filter(row => Number(row?.dayIndex) === utcDayIndex)
-			.map(row => ({ row, timestamp: Number(row?.timestamp || Date.parse(row?.dateTime || '')) || 0 }))
-			.sort((a, b) => a.timestamp - b.timestamp);
+			.map((row, index) => {
+				const timestamp = parseRowTimeMs(row);
+				const timestampDay = timestamp ? new Date(timestamp).toISOString().slice(0, 10) : '';
+				const dayIndexes = parseDayIndex(row?.dayIndex);
+				const isToday = timestampDay === todayKey || dayIndexes.includes(utcDayIndex);
+				return { row, index, timestamp, timestampDay, dayIndexes, isToday };
+			})
+			.filter(entry => entry.isToday)
+			.sort((a, b) => (a.timestamp - b.timestamp) || (a.index - b.index));
 		const latest = todayRows.at(-1)?.row;
 		const total = Number(latest?.redeemedLp);
-		if (!latest || !Number.isFinite(total)) throw new Error('aephia_summary_lp_today_missing');
+		if (!latest || !Number.isFinite(total)) {
+			const latestAny = rows.at(-1) || {};
+			const latestAnyTimeMs = parseRowTimeMs(latestAny);
+			const latestAnyDay = latestAnyTimeMs ? new Date(latestAnyTimeMs).toISOString().slice(0, 10) : '';
+			throw new Error(`aephia_summary_lp_today_missing faction=${matchedFactionKey || normalizedFaction} rows=${rows.length} today=${todayKey} dayIndex=${utcDayIndex}/${utcDayIndex.toString(16)} latestDay=${latestAnyDay || '-'} latestDayIndex=${String(latestAny?.dayIndex ?? '-')}`);
+		}
 		return total;
 	}
 
