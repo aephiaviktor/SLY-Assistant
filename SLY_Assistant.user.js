@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-13
+// @aephia-version 0.7.35-14
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-13'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-14'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
         'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
@@ -655,6 +655,13 @@
 			const resource = String(row?.resource || '');
 			const time = String(row?._time || row?.time || '');
 			if (!resource || !time) continue;
+			const windowTime = new Date(time);
+			const isCompleteUtcDailyWindow = Number.isFinite(windowTime.getTime())
+				&& windowTime.getUTCHours() === 0
+				&& windowTime.getUTCMinutes() === 0
+				&& windowTime.getUTCSeconds() === 0
+				&& windowTime.getUTCMilliseconds() === 0;
+			if (!isCompleteUtcDailyWindow) continue;
 			const value = parseInfluxNumber(row?.inventory_global ?? row?._value ?? 0);
 			if (!byResource[resource]) byResource[resource] = [];
 			byResource[resource].push({ time, value });
