@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-09
+// @aephia-version 0.7.35-10
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-08'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-10'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
         'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
@@ -12285,7 +12285,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			settingsModal.style.display = 'none';
 			let settingsModalContent = document.createElement('div');
 			settingsModalContent.classList.add('assist-modal-content');
-			let settingsModalContentString = '<div class="assist-modal-header"> <img src="' + iconStr + '" /> <span style="padding-left: 15px;">SLY Assistant v' + GM_info.script.version + '</span> <div class="assist-modal-header-right"> <button class=" assist-modal-btn assist-modal-save">Save</button> <span class="assist-modal-close">&#x2715;</span> </div></div><div class="assist-modal-body"> <span id="settings-modal-error"></span> ';
+			let settingsModalContentString = '<div class="assist-modal-header"> <img src="' + iconStr + '" /> <span style="padding-left: 15px;">AEP v' + AEPHIA_SLYA_VERSION + '</span> <div class="assist-modal-header-right"> <button class=" assist-modal-btn assist-modal-save">Save</button> <span class="assist-modal-close">&#x2715;</span> </div></div><div class="assist-modal-body"> <span id="settings-modal-error"></span> ';
 			settingsModalContentString += '<div class="tabbed">';
 			settingsModalContentString += '<input checked="checked" id="tab_general" type="radio" name="tabs">';
 			settingsModalContentString += '<input id="tab_fees" type="radio" name="tabs">';
