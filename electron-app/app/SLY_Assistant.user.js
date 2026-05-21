@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-10
+// @aephia-version 0.7.35-11
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-10'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-11'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
         'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
@@ -348,6 +348,7 @@
 	let upgradeAutomationInfluxCraft24hError = '';
 	let upgradeAutomationInfluxInventoryError = '';
 	let upgradeAutomationInfluxInventoryGlobalError = '';
+	let upgradeAutomationInfluxInventoryDrainError = '';
 	let upgradeAutomationLpControl = null;
 	let upgradeAutomationLpControlError = '';
 	let upgradeAutomationExecutionSummary = null;
@@ -422,6 +423,14 @@
 			upgradeAutomationInfluxInventoryGlobalError = String(e?.message || e || 'unknown_error');
 		}
 		try {
+			const inventoryDrainResult = await fetchInfluxInventoryGlobalWeightedDrain();
+			upgradeAutomationInfluxInventoryGlobalWeightedDrain = inventoryDrainResult?.map || {};
+			upgradeAutomationInfluxInventoryDrainError = '';
+		} catch (e) {
+			upgradeAutomationInfluxInventoryGlobalWeightedDrain = {};
+			upgradeAutomationInfluxInventoryDrainError = String(e?.message || e || 'unknown_error');
+		}
+		try {
 			const lpControlResult = await fetchUpgradeAutomationLpControl();
 			upgradeAutomationLpControl = lpControlResult || null;
 			upgradeAutomationLpControlError = '';
@@ -480,7 +489,7 @@
 		return result;
 	}
 
-	function formatUpgradeAutomationInfluxRows(craftMap = {}, upgradeMap = {}, inventoryMap = {}, inventoryGlobalMap = {}) {
+	function formatUpgradeAutomationInfluxRows(craftMap = {}, upgradeMap = {}, inventoryMap = {}, inventoryGlobalMap = {}, observedDrainMap = {}) {
 		const order = ['Framework','Electronics','Power Source','Electromagnet','Field Stabilizer','Particle Accelerator','Radiation Absorber','Survey Data Unit'];
 		let html = '';
 		for (const name of order) {
@@ -488,13 +497,14 @@
 			const upgrade = Number(upgradeMap[name] || 0);
 			const inventory = Number(inventoryMap[name] || 0);
 			const inventoryGlobal = Number(inventoryGlobalMap[name] || 0);
+			const observedDrain = Number(observedDrainMap[name] || 0);
 			const deficit = upgrade - craft;
 			const bufferDaysPhantom = upgrade > 0 ? (inventory / upgrade) : null;
 			const bufferDaysGlobal = deficit > 0 ? (inventoryGlobal / deficit) : null;
 			const phantomBlocked = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
 			const displayName = phantomBlocked ? '<span style="color:#ff8080">' + name + ' (blocked)</span>' : name;
 			const phantomNumberStyle = phantomBlocked ? ' style="color:#ff8080"' : '';
-			html += '<tr><td style="padding-left:18px">' + displayName + '</td><td align="right">' + Math.round(upgrade).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + Math.round(inventory).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + (bufferDaysPhantom === null ? '' : Number(bufferDaysPhantom).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td><td align="right">' + Math.round(craft).toLocaleString() + '</td><td align="right">' + Math.round(inventoryGlobal).toLocaleString() + '</td><td align="right">' + Math.round(deficit).toLocaleString() + '</td><td align="right">' + (bufferDaysGlobal === null ? '' : Number(bufferDaysGlobal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td></tr>';
+			html += '<tr><td style="padding-left:18px">' + displayName + '</td><td align="right">' + Math.round(upgrade).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + Math.round(inventory).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + (bufferDaysPhantom === null ? '' : Number(bufferDaysPhantom).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td><td align="right">' + Math.round(craft).toLocaleString() + '</td><td align="right">' + Math.round(inventoryGlobal).toLocaleString() + '</td><td align="right">' + Math.round(deficit).toLocaleString() + '</td><td align="right">' + (bufferDaysGlobal === null ? '' : Number(bufferDaysGlobal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td><td align="right">' + Math.round(observedDrain).toLocaleString() + '</td></tr>';
 		}
 		return html;
 	}
@@ -628,6 +638,51 @@
 			if (resource) out[String(resource)] = parseInfluxNumber(rawValue);
 		}
 		return { map: out };
+	}
+
+	function computeWeightedInventoryDrainFromRows(rows = []) {
+		const byResource = {};
+		for (const row of rows || []) {
+			const resource = String(row?.resource || '');
+			const time = String(row?._time || row?.time || '');
+			if (!resource || !time) continue;
+			const value = parseInfluxNumber(row?.inventory_global ?? row?._value ?? 0);
+			if (!byResource[resource]) byResource[resource] = [];
+			byResource[resource].push({ time, value });
+		}
+		const out = {};
+		for (const [resource, points] of Object.entries(byResource)) {
+			const sorted = points
+				.filter(p => Number.isFinite(Number(p.value)))
+				.sort((a, b) => String(a.time).localeCompare(String(b.time)));
+			if (sorted.length < 2) {
+				out[resource] = 0;
+				continue;
+			}
+			const recent = sorted.slice(-8);
+			const drains = [];
+			for (let i = 1; i < recent.length; i++) {
+				drains.push(Number(recent[i - 1].value || 0) - Number(recent[i].value || 0));
+			}
+			const count = drains.length;
+			let weightedSum = 0;
+			let weightSum = 0;
+			for (let i = 0; i < count; i++) {
+				const weight = count <= 1 ? 1 : (1 + (i / (count - 1)));
+				weightedSum += Number(drains[i] || 0) * weight;
+				weightSum += weight;
+			}
+			out[resource] = weightSum > 0 ? (weightedSum / weightSum) : 0;
+		}
+		return out;
+	}
+
+	async function fetchInfluxInventoryGlobalWeightedDrain() {
+		const factionInventory = getUpgradeAutomationInventoryFactionFilter();
+		const flux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: -8d)\n  |> filter(fn: (r) => r._measurement == "starbase" and r._field == "curAmount" and (${factionInventory.globalFilter}))\n  |> aggregateWindow(every: 1d, fn: last, createEmpty: false)\n  |> group(columns: ["rss", "_time"])\n  |> sum(column: "_value")\n  |> keep(columns: ["rss", "_time", "_value"])\n  |> rename(columns: {rss: "resource", _value: "inventory_global"})\n  |> sort(columns: ["resource", "_time"])`;
+		const csv = await queryInfluxFlux(flux);
+		const rows = parseInfluxCsv(csv);
+		return { map: computeWeightedInventoryDrainFromRows(rows) };
 	}
 
 	async function fetchUpgradeAutomationLpControl() {
@@ -3411,6 +3466,7 @@
 	let upgradeAutomationInfluxCraft24h = {};
 	let upgradeAutomationInfluxInventory = {};
 	let upgradeAutomationInfluxInventoryGlobal = {};
+	let upgradeAutomationInfluxInventoryGlobalWeightedDrain = {};
 	const UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_SECONDS = {
 		'Power Source': 15,
 		'Framework': 12,
@@ -3572,9 +3628,10 @@
 			content += '<div class="lp-auto-section-gap"></div>';
 
 			content += openSection('lp-auto-influx');
-			content += '<tr style="opacity:0.66"><td><b>InfluxDB<br>Component</b></td><td align="right"><b>Upgrading 24h</b></td><td align="right"><b>Inventory<br>Phantom</b></td><td align="right"><b>Buffer Days<br>Phantom</b></td><td align="right"><b>Crafting 24h</b></td><td align="right"><b>Inventory<br>global</b></td><td align="right"><b>Deficit</b></td><td align="right"><b>Buffer Days<br>global</b></td></tr>';
-			content += formatUpgradeAutomationInfluxRows(upgradeAutomationInfluxCraft24h, upgradeAutomationInfluxUpgrade24h, upgradeAutomationInfluxInventory, upgradeAutomationInfluxInventoryGlobal);
+			content += '<tr style="opacity:0.66"><td><b>InfluxDB<br>Component</b></td><td align="right"><b>Upgrading 24h</b></td><td align="right"><b>Inventory<br>Phantom</b></td><td align="right"><b>Buffer Days<br>Phantom</b></td><td align="right"><b>Crafting 24h</b></td><td align="right"><b>Inventory<br>global</b></td><td align="right"><b>Deficit</b></td><td align="right"><b>Buffer Days<br>global</b></td><td align="right"><b>Buffer Days new<br>Observed Drain</b></td></tr>';
+			content += formatUpgradeAutomationInfluxRows(upgradeAutomationInfluxCraft24h, upgradeAutomationInfluxUpgrade24h, upgradeAutomationInfluxInventory, upgradeAutomationInfluxInventoryGlobal, upgradeAutomationInfluxInventoryGlobalWeightedDrain);
 			if (upgradeAutomationInfluxUpgrade24hError) content += '<tr><td colspan="9" style="color:#ff8080">Influx error: ' + String(upgradeAutomationInfluxUpgrade24hError).replace(/[<>]/g, '') + '</td></tr>';
+			if (upgradeAutomationInfluxInventoryDrainError) content += '<tr><td colspan="9" style="color:#ff8080">Inventory drain error: ' + String(upgradeAutomationInfluxInventoryDrainError).replace(/[<>]/g, '') + '</td></tr>';
 			content += closeSection;
 			content += '<div class="lp-auto-section-gap"></div>';
 
