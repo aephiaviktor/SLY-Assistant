@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-17
+// @aephia-version 0.7.35-18
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-17'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-18'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
         'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
@@ -518,7 +518,7 @@
 			const effectiveDrain = getUpgradeAutomationEffectiveDrain(plannedDrain, observedDrain);
 			const bufferDaysPhantom = upgrade > 0 ? (inventory / upgrade) : null;
 			const bufferDaysGlobal = effectiveDrain > 0 ? (inventoryGlobal / effectiveDrain) : null;
-			const phantomBlocked = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
+			const phantomBlocked = inventory <= 0 || (bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5);
 			const displayName = phantomBlocked ? '<span style="color:#ff8080">' + name + ' (blocked)</span>' : name;
 			const phantomNumberStyle = phantomBlocked ? ' style="color:#ff8080"' : '';
 			html += '<tr><td style="padding-left:18px">' + displayName + '</td><td align="right">' + Math.round(upgrade).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + Math.round(inventory).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + (bufferDaysPhantom === null ? '' : Number(bufferDaysPhantom).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td><td align="right">' + Math.round(craft).toLocaleString() + '</td><td align="right">' + Math.round(inventoryGlobal).toLocaleString() + '</td><td align="right">' + Math.round(plannedDrain).toLocaleString() + '</td><td align="right">' + Math.round(observedDrain).toLocaleString() + '</td><td align="right">' + Math.round(effectiveDrain).toLocaleString() + '</td><td align="right">' + (bufferDaysGlobal === null ? '' : Number(bufferDaysGlobal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td></tr>';
@@ -1401,7 +1401,7 @@
 			const avgCrewNeeded = secondsPerUnit > 0 ? (neutralTargetRemaining * secondsPerUnit) / Math.max(1, secondsInRemainingHours) : 0;
 			// Keep this aligned with formatUpgradeAutomationInfluxRows: Buffer Days Phantom = inventory / upgrading 24h.
 			const bufferDaysPhantom = upgrade24h > 0 ? (inventoryPhantom / upgrade24h) : (inventoryPhantom > 0 ? Number.POSITIVE_INFINITY : null);
-			const phantomBlocked = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
+			const phantomBlocked = inventoryPhantom <= 0 || (bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5);
 			rows.push({
 				key: canonicalName,
 				name: canonicalName,
@@ -1431,7 +1431,7 @@
 				finalBufferDays: null
 			});
 		}
-		const activeRows = rows.filter(row => row.secondsPerUnit > 0 && !row.phantomBlocked);
+		const activeRows = rows.filter(row => row.secondsPerUnit > 0 && !row.phantomBlocked && Number(row.inventoryGlobal || 0) > 0);
 		const projectNeutralBufferDays = (row, crew) => {
 			const projectedCrew = Math.max(0, Math.floor(Number(crew || 0)));
 			const projectedNeutralUpgradingDay = projectedCrew > 0
@@ -1442,6 +1442,12 @@
 			if (projectedNeutralEffectiveDrain > 0) return row.inventoryGlobal / projectedNeutralEffectiveDrain;
 			if (Number(row.inventoryGlobal || 0) > 0) return Number.POSITIVE_INFINITY;
 			return null;
+		};
+		const isProjectedNeutralCrewAllowed = (row, crew) => {
+			if (!row || row.phantomBlocked || Number(row.inventoryPhantom || 0) <= 0 || Number(row.inventoryGlobal || 0) <= 0) return false;
+			const projectedBuffer = projectNeutralBufferDays(row, crew);
+			const tier = getUpgradeAutomationBufferTier(projectedBuffer, row.inventoryGlobal);
+			return tier !== 'D' && tier !== 'D_ZERO';
 		};
 		if (activeRows.length && totalCrew > 0) {
 			for (const row of activeRows) row.crew = 0;
@@ -1454,13 +1460,15 @@
 				return Number(row.inventoryGlobal || 0) > 0 && getUpgradeAutomationEffectiveDrain(currentNeutralDeficitDay, row.observedDrain) <= 0;
 			};
 			for (const row of activeRows) {
-				while (usedCrew < totalCrew && isCurrentInfinity(row)) {
+				while (usedCrew < totalCrew && isCurrentInfinity(row) && isProjectedNeutralCrewAllowed(row, Number(row.crew || 0) + 1)) {
 					row.crew += 1;
 					usedCrew += 1;
 				}
 			}
 			while (usedCrew < totalCrew) {
-				const best = [...activeRows].sort((a, b) => {
+				const eligibleRows = activeRows.filter(row => isProjectedNeutralCrewAllowed(row, Number(row.crew || 0) + 1));
+				if (!eligibleRows.length) break;
+				const best = eligibleRows.sort((a, b) => {
 					const aProjected = projectNeutralBufferDays(a, Number(a.crew || 0) + 1);
 					const bProjected = projectNeutralBufferDays(b, Number(b.crew || 0) + 1);
 					const aScore = Number.isFinite(Number(aProjected)) ? Number(aProjected) : Number.POSITIVE_INFINITY;
