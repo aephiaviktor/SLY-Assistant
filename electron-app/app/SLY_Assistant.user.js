@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-18
+// @aephia-version 0.7.35-19
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-18'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-19'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
         'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
@@ -3668,9 +3668,8 @@
 			content += '<tr><td>First automation slot</td><td align="right"><select id="lpAutomationStartCraftSlot" style="width:66px" ' + startCraftSlotDisabled + '>' + startCraftSlotOptions + '</select></td><td style="opacity:0.8">' + startCraftSlotStatus + '</td><td style="padding-left:18px;">Multiplier abs.</td><td align="right"><input id="upgradeAutomationAbsAggrMultiplier" type="number" min="0" max="100" step="0.5" value="' + absAggrMultiplier + '" style="width:66px"></td><td></td></tr>';
 			const currentPhantomCrew = Number(upgradeAutomationExecutionSummary?.crewTotal || 0);
 			const selectedMaxPhantomCrew = globalSettings.upgradeAutomationMaxPhantomCrew != null ? Math.max(0, parseIntDefault(globalSettings.upgradeAutomationMaxPhantomCrew, 0)) : currentPhantomCrew;
-			const clampedMaxPhantomCrew = currentPhantomCrew > 0 ? Math.min(selectedMaxPhantomCrew, currentPhantomCrew) : selectedMaxPhantomCrew;
 			const phantomCrewUnlimited = globalSettings.upgradeAutomationPhantomCrewUnlimited != null ? !!globalSettings.upgradeAutomationPhantomCrewUnlimited : true;
-			content += '<tr><td>Phantom Crew Unlimited</td><td align="right"><input id="phantomCrewUnlimitedToggle" type="checkbox" ' + (phantomCrewUnlimited ? 'checked' : '') + '></td><td style="white-space:nowrap; text-align:left;">Max <input id="upgradeAutomationMaxPhantomCrew" type="number" min="0" max="' + (currentPhantomCrew || 9999) + '" step="1" value="' + clampedMaxPhantomCrew + '" style="width:58px" ' + (phantomCrewUnlimited ? 'disabled' : '') + '></td><td style="padding-left:18px;">Target Skew</td><td align="right"><input id="upgradeAutomationPoolSkewMultiplier" type="number" min="0" max="100" step="0.5" value="' + poolSkewMultiplier + '" style="width:66px"></td><td></td></tr>';
+			content += '<tr><td>Phantom Crew Unlimited</td><td align="right"><input id="phantomCrewUnlimitedToggle" type="checkbox" ' + (phantomCrewUnlimited ? 'checked' : '') + '></td><td style="white-space:nowrap; text-align:left;">Max <input id="upgradeAutomationMaxPhantomCrew" type="number" min="0" step="1" value="' + selectedMaxPhantomCrew + '" style="width:58px" ' + (phantomCrewUnlimited ? 'disabled' : '') + '></td><td style="padding-left:18px;">Target Skew</td><td align="right"><input id="upgradeAutomationPoolSkewMultiplier" type="number" min="0" max="100" step="0.5" value="' + poolSkewMultiplier + '" style="width:66px"></td><td></td></tr>';
 			content += closeSection;
 			content += '<div class="lp-auto-section-gap"></div>';
 
@@ -4008,8 +4007,7 @@
 				upgradeAutomationMaxPhantomCrew.dataset.bound = '1';
 				upgradeAutomationMaxPhantomCrew.addEventListener('change', async () => {
 					const rawVal = parseIntDefault(upgradeAutomationMaxPhantomCrew.value, 0);
-					const crewTotalNow = Number(upgradeAutomationExecutionSummary?.crewTotal || 0);
-					const clamped = crewTotalNow > 0 ? Math.min(rawVal, crewTotalNow) : rawVal;
+					const clamped = Math.max(0, rawVal);
 					upgradeAutomationMaxPhantomCrew.value = clamped;
 					globalSettings.upgradeAutomationMaxPhantomCrew = clamped;
 					await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
