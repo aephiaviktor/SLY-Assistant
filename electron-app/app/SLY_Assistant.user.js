@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-19
+// @aephia-version 0.7.35-20
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-19'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-20'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
         'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
@@ -518,10 +518,11 @@
 			const effectiveDrain = getUpgradeAutomationEffectiveDrain(plannedDrain, observedDrain);
 			const bufferDaysPhantom = upgrade > 0 ? (inventory / upgrade) : null;
 			const bufferDaysGlobal = effectiveDrain > 0 ? (inventoryGlobal / effectiveDrain) : null;
-			const phantomBlocked = inventory <= 0 || (bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5);
+			const phantomBlocked = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
+			const phantomUpgradeEligible = inventory > 0 && !phantomBlocked;
 			const displayName = phantomBlocked ? '<span style="color:#ff8080">' + name + ' (blocked)</span>' : name;
 			const phantomNumberStyle = phantomBlocked ? ' style="color:#ff8080"' : '';
-			html += '<tr><td style="padding-left:18px">' + displayName + '</td><td align="right">' + Math.round(upgrade).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + Math.round(inventory).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + (bufferDaysPhantom === null ? '' : Number(bufferDaysPhantom).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td><td align="right">' + Math.round(craft).toLocaleString() + '</td><td align="right">' + Math.round(inventoryGlobal).toLocaleString() + '</td><td align="right">' + Math.round(plannedDrain).toLocaleString() + '</td><td align="right">' + Math.round(observedDrain).toLocaleString() + '</td><td align="right">' + Math.round(effectiveDrain).toLocaleString() + '</td><td align="right">' + (bufferDaysGlobal === null ? '' : Number(bufferDaysGlobal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td></tr>';
+			html += '<tr><td style="padding-left:18px">' + displayName + '</td><td align="right">' + Math.round(upgrade).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + Math.round(inventory).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + (bufferDaysPhantom === null ? '' : Number(bufferDaysPhantom).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td><td align="right">' + Math.round(craft).toLocaleString() + '</td><td align="right">' + Math.round(inventoryGlobal).toLocaleString() + '</td><td align="right">' + Math.round(plannedDrain).toLocaleString() + '</td><td align="right">' + Math.round(observedDrain).toLocaleString() + '</td><td align="right">' + Math.round(effectiveDrain).toLocaleString() + '</td><td align="right">' + (!phantomUpgradeEligible || bufferDaysGlobal === null ? '' : Number(bufferDaysGlobal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td></tr>';
 		}
 		return html;
 	}
@@ -1401,7 +1402,8 @@
 			const avgCrewNeeded = secondsPerUnit > 0 ? (neutralTargetRemaining * secondsPerUnit) / Math.max(1, secondsInRemainingHours) : 0;
 			// Keep this aligned with formatUpgradeAutomationInfluxRows: Buffer Days Phantom = inventory / upgrading 24h.
 			const bufferDaysPhantom = upgrade24h > 0 ? (inventoryPhantom / upgrade24h) : (inventoryPhantom > 0 ? Number.POSITIVE_INFINITY : null);
-			const phantomBlocked = inventoryPhantom <= 0 || (bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5);
+			const phantomBlocked = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
+			const phantomUpgradeEligible = inventoryPhantom > 0 && !phantomBlocked;
 			rows.push({
 				key: canonicalName,
 				name: canonicalName,
@@ -1417,6 +1419,7 @@
 				avgCrewNeeded,
 				bufferDaysGlobal,
 				phantomBlocked,
+				phantomUpgradeEligible,
 				lpPerUnit: 0,
 				lpPerSecond: 0,
 				crew: 0,
@@ -1431,7 +1434,7 @@
 				finalBufferDays: null
 			});
 		}
-		const activeRows = rows.filter(row => row.secondsPerUnit > 0 && !row.phantomBlocked && Number(row.inventoryGlobal || 0) > 0);
+		const activeRows = rows.filter(row => row.secondsPerUnit > 0 && row.phantomUpgradeEligible && Number(row.inventoryGlobal || 0) > 0);
 		const projectNeutralBufferDays = (row, crew) => {
 			const projectedCrew = Math.max(0, Math.floor(Number(crew || 0)));
 			const projectedNeutralUpgradingDay = projectedCrew > 0
@@ -1444,7 +1447,7 @@
 			return null;
 		};
 		const isProjectedNeutralCrewAllowed = (row, crew) => {
-			if (!row || row.phantomBlocked || Number(row.inventoryPhantom || 0) <= 0 || Number(row.inventoryGlobal || 0) <= 0) return false;
+			if (!row || !row.phantomUpgradeEligible || Number(row.inventoryPhantom || 0) <= 0 || Number(row.inventoryGlobal || 0) <= 0) return false;
 			const projectedBuffer = projectNeutralBufferDays(row, crew);
 			const tier = getUpgradeAutomationBufferTier(projectedBuffer, row.inventoryGlobal);
 			return tier !== 'D' && tier !== 'D_ZERO';
@@ -1541,6 +1544,7 @@
 		const currentTotal = () => rows.reduce((sum, row) => sum + (Number(row.neutralUpgradingHour || 0) * remainingNeutralHours + Number(row.finalUpgradingHour || 0) * remainingTargetHours) * Number(row.lpPerUnit || 0), 0);
 		if (direction === 'neutral' || !rows.length || !Number.isFinite(targetFinalLp)) return { rows, neutralLpTargetTotal, finalLpTargetTotal: currentTotal(), targetFinalLp };
 		const simulateRow = (row, projectedCrew) => {
+			if (!row?.phantomUpgradeEligible) return { legal: false };
 			if (!Number.isFinite(projectedCrew) || projectedCrew < 0) return { legal: false };
 			const projected = projectUpgradeAutomationFinalRow(row, projectedCrew, remainingHours);
 			const projectedHourly = Number(projected.finalUpgradingHour || 0);
@@ -1598,7 +1602,7 @@
 			const wantSource = sourceMass * destBias <= destMass * sourceBias;
 			if (wantSource) {
 				const row = direction === 'aggressive' ? orderedRows[left++] : orderedRows[right--];
-				if (!row || row.phantomBlocked) continue;
+				if (!row || !row.phantomUpgradeEligible) continue;
 				const key = String(row.displayName || row.name || '');
 				if (!sourceNames.has(key)) {
 					sourcePool.push(row);
@@ -1607,7 +1611,7 @@
 				}
 			} else {
 				const row = direction === 'aggressive' ? orderedRows[right--] : orderedRows[left++];
-				if (!row || row.phantomBlocked) continue;
+				if (!row || !row.phantomUpgradeEligible) continue;
 				const key = String(row.displayName || row.name || '');
 				if (!destNames.has(key)) {
 					destPool.push(row);
@@ -1617,7 +1621,7 @@
 			}
 		}
 		for (const row of orderedRows) {
-			if (row.phantomBlocked) continue;
+			if (!row.phantomUpgradeEligible) continue;
 			const key = String(row.displayName || row.name || '');
 			if (!sourceNames.has(key) && !destNames.has(key)) {
 				if (sourceMass * destBias <= destMass * sourceBias) {
@@ -3738,10 +3742,10 @@
 				for (const row of upgradeAutomationExecutionSummary.neutralComponentPlan) {
 					const finalCraft24h = Number(row.craft24h || 0);
 					const finalUpgradingDay = Number(row.finalUpgradingDay || 0);
-					const finalBufferDisplay = row.finalBufferDays == null ? '' : (Number.isFinite(row.finalBufferDays) ? Number(row.finalBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
+					const finalBufferDisplay = !row.phantomUpgradeEligible || row.finalBufferDays == null ? '' : (Number.isFinite(row.finalBufferDays) ? Number(row.finalBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
 					const neutralCraft24h = Number(row.craft24h || 0);
 					const neutralUpgradingDay = Number(row.neutralUpgradingDay || 0);
-					const neutralBufferDisplay = row.neutralBufferDays == null ? '' : (Number.isFinite(row.neutralBufferDays) ? Number(row.neutralBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
+					const neutralBufferDisplay = !row.phantomUpgradeEligible || row.neutralBufferDays == null ? '' : (Number.isFinite(row.neutralBufferDays) ? Number(row.neutralBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
 					const actualSideStyle = row.actualOptimizerSource ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.actualOptimizerDestination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
 					const optimizerDisplayName = row.phantomBlocked ? '<span style="color:#ff8080">' + row.displayName + ' (blocked)</span>' : row.displayName;
 					content += '<tr><td' + actualSideStyle + '>' + optimizerDisplayName + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(upgradeAutomationExecutionSummary.neutralPhaseMode ? (row.neutralUpgradingPhase || 0) : (row.neutralUpgradingHour || 0)) || 0).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + neutralBufferDisplay + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalCrew || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalUpgradingHour || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + finalBufferDisplay + '</td></tr>';
