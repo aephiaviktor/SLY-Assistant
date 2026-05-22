@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-22
+// @aephia-version 0.7.35-23
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-22'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-23'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4182,13 +4182,27 @@ function renderAssistStats() {
 	async function doProxyStuff(target, origMethod, args, rpcs, proxyType)
 	{
 		function isConnectivityError(error) {
+			const errorMessage = String(error?.message || error || '');
+			const lowerErrorMessage = errorMessage.toLowerCase();
+			const isTransactionFailure = (
+				lowerErrorMessage.includes('transaction simulation failed') ||
+				lowerErrorMessage.includes('instructionerror') ||
+				lowerErrorMessage.includes('custom program error') ||
+				lowerErrorMessage.includes('blockhash not found') ||
+				lowerErrorMessage.includes('signature verification failed') ||
+				lowerErrorMessage.includes('insufficient funds') ||
+				lowerErrorMessage.includes('invalid transaction') ||
+				lowerErrorMessage.includes('already been processed')
+			);
+			if (isTransactionFailure) return false;
+
 			return (
-				(Number(error.message.slice(0,3)) > 299) ||
-				(error.message === 'Failed to fetch') ||
-				(error.message.includes('failed to get')) ||
-				(error.message.includes('failed to send')) ||
-				(error.message.includes('NetworkError')) ||
-				(error.message.includes('Unable to complete request'))
+				(Number(errorMessage.slice(0,3)) > 299) ||
+				(errorMessage === 'Failed to fetch') ||
+				errorMessage.includes('failed to get') ||
+				errorMessage.includes('failed to send') ||
+				errorMessage.includes('NetworkError') ||
+				errorMessage.includes('Unable to complete request')
 			);
 			// Added "NetworkError": It happens when Cloudflare blocks the request with Status Code 502. Error message: "TypeError: NetworkError when attempting to fetch resource at [...]"
 		}
