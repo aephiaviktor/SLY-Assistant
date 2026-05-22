@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-20
+// @aephia-version 0.7.35-21
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-20'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-21'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
         'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
@@ -362,9 +362,6 @@
 	window.triggerWrite = async () => { if (!window.schedulerPendingPlanRows?.length) { console.log('[Scheduler] No pending rows - run triggerCapture() first'); return; } const writeNow = window.schedulerCaptureNow || new Date(); console.log('[Scheduler] MANUAL WRITE starting at', writeNow.toISOString()); await applyUpgradeAutomationExecutionToCraftConfig(window.schedulerPendingPlanRows, window.schedulerLastPlanSchedule || {}, globalSettings, writeNow); console.log('[Scheduler] MANUAL WRITE complete'); }; // Viktor: manual capture
 	let upgradeAutomationInfluxDebugLine = '';
 	let upgradeAutomationInfluxDebugStatus = '';
-	let upgradeAutomationEveeyeLpToday = null;
-	let upgradeAutomationEveeyeLpYesterday = null;
-	let upgradeAutomationEveeyeUpdatedAt = '';
 	const UPGRADE_AUTOMATION_TARGET_BUFFER_DAYS = 10;
 
 	async function loadUpgradeAutomationEvents() {
@@ -1750,12 +1747,9 @@
 		pastHoursLp = await computeUpgradeAutomationPastHoursLp(now);
 		const historyStartIso = new Date(now.getTime() - 8 * 86400000).toISOString();
 		const perfNeutralDebugRaw = await fetchUpgradeAutomationPerfFieldHistory('neutral_lp_target_full_day', now, historyStartIso);
-		const eveeyeTodayDebug = await fetchUpgradeAutomationEveeyeFieldHistory('lp_today', now, historyStartIso);
-		const eveeyeYdayDebugDisplay = await fetchUpgradeAutomationEveeyeFieldHistory('lp_yesterday', now, historyStartIso);
-		const eveeyeUpdatedAtDebug = await fetchUpgradeAutomationFieldHistory('lp_snapshot_eveeye', 'api_updated_at', now, historyStartIso);
+		const aephiaLpDebug = await fetchUpgradeAutomationAephiaLpHistory(lpInstanceKey, now, historyStartIso);
 		const aggrNeutralDebug = await fetchUpgradeAutomationAggrFieldHistory('neutral_lp_target', now, historyStartIso);
 		const aggrInstalledDebug = await fetchUpgradeAutomationAggrFieldHistory('installed_lp_today', now, historyStartIso);
-		const eveeyeYdayDebug = await fetchUpgradeAutomationEveeyeFieldHistory('lp_yesterday', now, historyStartIso);
 		const perfRequestedDebugRaw = await fetchUpgradeAutomationPerfFieldHistory('requested_lp_target_full_day', now, historyStartIso);
 		const aggrRequestedDebug = await fetchUpgradeAutomationAggrFieldHistory('requested_lp_target', now, historyStartIso);
 		const perfOptimizerDebugRaw = await fetchUpgradeAutomationPerfFieldHistory('achievable_lp_target_full_day', now, historyStartIso);
@@ -1781,14 +1775,12 @@
 		const todayDay = now.toISOString().slice(0, 10);
 		const minAlphaDay = '2026-04-18';
 		const maxAlphaDayExclusive = todayDay;
-		const executionAlphaRows = (eveeyeYdayDebug.rows && eveeyeYdayDebug.rows.length) ? eveeyeYdayDebug.rows : aggrInstalledDebug.rows;
-		const executionAlphaIsEveeye = !!(eveeyeYdayDebug.rows && eveeyeYdayDebug.rows.length);
+		const executionAlphaRows = (aephiaLpDebug.rows && aephiaLpDebug.rows.length) ? aephiaLpDebug.rows : aggrInstalledDebug.rows;
 		const cleanExecutionAlpha = computeUpgradeAutomationNormalizedTimingAlpha(
 			perfNeutralDebug.rows.map(r => ({ day: String(r._time || '').slice(0, 10), time: String(r._time || ''), value: Number(r._value || 0) })),
 			executionAlphaRows.map(r => {
 				const rawTime = String(r._time || '');
-				const logicalDate = executionAlphaIsEveeye ? new Date(new Date(rawTime).getTime() - 86400000) : new Date(rawTime);
-				const logicalDay = Number.isFinite(logicalDate.getTime()) ? logicalDate.toISOString().slice(0, 10) : String(rawTime || '').slice(0, 10);
+				const logicalDay = String(rawTime || '').slice(0, 10);
 				return { day: logicalDay, time: rawTime, value: Number(r._value || 0) };
 			}),
 			pricingHistoryDebug.rows,
@@ -2022,9 +2014,9 @@
 			requestedLpYesterday: perfRequestedYday.latestValue,
 			optimizerLpYesterday: perfOptimizerYday.latestValue,
 			installedYesterday: aggrInstalledYday.latestValue,
-			eveeyeLpTodayLatest: eveeyeTodayDebug.rows.length ? Number(eveeyeTodayDebug.rows[eveeyeTodayDebug.rows.length - 1]._value || 0) : null,
-			eveeyeLpYesterdayLatest: eveeyeYdayDebugDisplay.rows.length ? Number(eveeyeYdayDebugDisplay.rows[eveeyeYdayDebugDisplay.rows.length - 1]._value || 0) : null,
-			eveeyeUpdatedAtLatest: eveeyeUpdatedAtDebug.rows.length ? String(eveeyeUpdatedAtDebug.rows[eveeyeUpdatedAtDebug.rows.length - 1]._value || '') : '',
+			aephiaLpTodayLatest: aephiaLpDebug.latestToday,
+			aephiaLpYesterdayLatest: aephiaLpDebug.latestYesterday,
+			aephiaUpdatedAtLatest: aephiaLpDebug.latestTime || '',
 			atlasPool: profitStats.atlasPool,
 			lpRedemptionToday: profitStats.lpRedemptionToday,
 			lpValueToday: profitStats.lpValueToday,
@@ -2206,10 +2198,6 @@
 
 	async function fetchUpgradeAutomationPerfFieldHistory(fieldName, now = new Date(), startIso = '') {
 		return fetchUpgradeAutomationFieldHistory('lp_auto_perf', fieldName, now, startIso);
-	}
-
-	async function fetchUpgradeAutomationEveeyeFieldHistory(fieldName, now = new Date(), startIso = '') {
-		return fetchUpgradeAutomationFieldHistory('lp_snapshot_eveeye', fieldName, now, startIso);
 	}
 
 	function computeUpgradeAutomationNormalizedTimingAlpha(neutralRows, optimizerRows, pricingRows, minDay = '', maxDayExclusive = '') {
@@ -2630,44 +2618,95 @@
 		return data;
 	}
 
-	async function fetchUpgradeAutomationAephiaLpToday(faction, now = new Date()) {
-		const data = await fetchUpgradeAutomationAephiaSummary();
+	function getUpgradeAutomationAephiaFactionRows(data, faction) {
 		const normalizedFaction = normalizeUpgradeAutomationLpInstance(faction || globalSettings?.upgradeAutomationLpInstance || 'MUD');
 		const factionKeys = normalizedFaction === 'UST' ? ['UST', 'USTUR', 'Ustur'] : [normalizedFaction];
-		const utcDayIndex = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 86400000);
-		const todayKey = now.toISOString().slice(0, 10);
-		let rows = [];
-		let matchedFactionKey = '';
 		for (const key of factionKeys) {
-			rows = data?.interval?.factions?.[key] || [];
-			if (Array.isArray(rows) && rows.length) {
-				matchedFactionKey = key;
-				break;
+			const rows = data?.interval?.factions?.[key] || [];
+			if (Array.isArray(rows) && rows.length) return { rows, matchedFactionKey: key, normalizedFaction };
+		}
+		return { rows: [], matchedFactionKey: '', normalizedFaction };
+	}
+
+	function parseUpgradeAutomationAephiaDayIndexes(value) {
+		if (typeof value === 'number') return [value].filter(Number.isFinite);
+		const raw = String(value ?? '').trim();
+		if (!raw) return [];
+		const out = [];
+		const decimal = Number(raw);
+		if (Number.isFinite(decimal)) out.push(decimal);
+		const hex = parseInt(raw.replace(/^0x/i, ''), 16);
+		if (Number.isFinite(hex) && !out.includes(hex)) out.push(hex);
+		return out;
+	}
+
+	function parseUpgradeAutomationAephiaRowTimeMs(row) {
+		const rawTime = row?.timestamp ?? row?.dateTime;
+		const parsed = typeof rawTime === 'number' ? rawTime : Date.parse(String(rawTime || ''));
+		if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+		return parsed < 1000000000000 ? parsed * 1000 : parsed;
+	}
+
+	function getUpgradeAutomationAephiaRowDayKey(row) {
+		const timestamp = parseUpgradeAutomationAephiaRowTimeMs(row);
+		if (timestamp) return new Date(timestamp).toISOString().slice(0, 10);
+		const dayIndex = parseUpgradeAutomationAephiaDayIndexes(row?.dayIndex)[0];
+		return Number.isFinite(dayIndex) ? new Date(dayIndex * 86400000).toISOString().slice(0, 10) : '';
+	}
+
+	async function fetchUpgradeAutomationAephiaLpHistory(faction, now = new Date(), startIso = '') {
+		const data = await fetchUpgradeAutomationAephiaSummary();
+		const { rows, matchedFactionKey, normalizedFaction } = getUpgradeAutomationAephiaFactionRows(data, faction);
+		if (!Array.isArray(rows) || !rows.length) throw new Error('aephia_summary_faction_series_missing');
+		const todayKey = now.toISOString().slice(0, 10);
+		const yesterdayKey = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - 86400000).toISOString().slice(0, 10);
+		const startMs = Date.parse(String(startIso || '')) || 0;
+		const latestByDay = new Map();
+		for (let index = 0; index < rows.length; index++) {
+			const row = rows[index];
+			const value = Number(row?.redeemedLp);
+			if (!Number.isFinite(value)) continue;
+			const dayKey = getUpgradeAutomationAephiaRowDayKey(row);
+			if (!dayKey) continue;
+			const timestamp = parseUpgradeAutomationAephiaRowTimeMs(row);
+			const sortMs = timestamp || Date.parse(dayKey + 'T23:59:59.000Z');
+			if (startMs && sortMs < startMs) continue;
+			const existing = latestByDay.get(dayKey);
+			if (!existing || sortMs > existing.sortMs || (sortMs === existing.sortMs && index > existing.index)) {
+				latestByDay.set(dayKey, {
+					_time: timestamp ? new Date(timestamp).toISOString() : dayKey + 'T23:59:59.000Z',
+					_value: value,
+					sortMs,
+					index
+				});
 			}
 		}
+		const completedRows = [...latestByDay.entries()]
+			.filter(([day]) => day < todayKey)
+			.sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+			.map(([, entry]) => ({ _time: entry._time, _value: entry._value }));
+		const latestEntry = [...latestByDay.values()].sort((a, b) => (a.sortMs - b.sortMs) || (a.index - b.index)).at(-1);
+		return {
+			rows: completedRows,
+			latestToday: latestByDay.has(todayKey) ? Number(latestByDay.get(todayKey)._value) : null,
+			latestYesterday: latestByDay.has(yesterdayKey) ? Number(latestByDay.get(yesterdayKey)._value) : null,
+			latestTime: latestEntry?._time || '',
+			query: `aephia_summary_interval faction=${matchedFactionKey || normalizedFaction}`,
+			error: ''
+		};
+	}
+
+	async function fetchUpgradeAutomationAephiaLpToday(faction, now = new Date()) {
+		const data = await fetchUpgradeAutomationAephiaSummary();
+		const { rows, matchedFactionKey, normalizedFaction } = getUpgradeAutomationAephiaFactionRows(data, faction);
+		const utcDayIndex = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 86400000);
+		const todayKey = now.toISOString().slice(0, 10);
 		if (!Array.isArray(rows) || !rows.length) throw new Error('aephia_summary_faction_series_missing');
-		const parseDayIndex = value => {
-			if (typeof value === 'number') return [value].filter(Number.isFinite);
-			const raw = String(value ?? '').trim();
-			if (!raw) return [];
-			const out = [];
-			const decimal = Number(raw);
-			if (Number.isFinite(decimal)) out.push(decimal);
-			const hex = parseInt(raw.replace(/^0x/i, ''), 16);
-			if (Number.isFinite(hex) && !out.includes(hex)) out.push(hex);
-			return out;
-		};
-		const parseRowTimeMs = row => {
-			const rawTime = row?.timestamp ?? row?.dateTime;
-			const parsed = typeof rawTime === 'number' ? rawTime : Date.parse(String(rawTime || ''));
-			if (!Number.isFinite(parsed) || parsed <= 0) return 0;
-			return parsed < 1000000000000 ? parsed * 1000 : parsed;
-		};
 		const todayRows = rows
 			.map((row, index) => {
-				const timestamp = parseRowTimeMs(row);
+				const timestamp = parseUpgradeAutomationAephiaRowTimeMs(row);
 				const timestampDay = timestamp ? new Date(timestamp).toISOString().slice(0, 10) : '';
-				const dayIndexes = parseDayIndex(row?.dayIndex);
+				const dayIndexes = parseUpgradeAutomationAephiaDayIndexes(row?.dayIndex);
 				const isToday = timestampDay === todayKey || dayIndexes.includes(utcDayIndex);
 				return { row, index, timestamp, timestampDay, dayIndexes, isToday };
 			})
@@ -2677,7 +2716,7 @@
 		const total = Number(latest?.redeemedLp);
 		if (!latest || !Number.isFinite(total)) {
 			const latestAny = rows.at(-1) || {};
-			const latestAnyTimeMs = parseRowTimeMs(latestAny);
+			const latestAnyTimeMs = parseUpgradeAutomationAephiaRowTimeMs(latestAny);
 			const latestAnyDay = latestAnyTimeMs ? new Date(latestAnyTimeMs).toISOString().slice(0, 10) : '';
 			throw new Error(`aephia_summary_lp_today_missing faction=${matchedFactionKey || normalizedFaction} rows=${rows.length} today=${todayKey} dayIndex=${utcDayIndex}/${utcDayIndex.toString(16)} latestDay=${latestAnyDay || '-'} latestDayIndex=${String(latestAny?.dayIndex ?? '-')}`);
 		}
@@ -2819,76 +2858,6 @@
 		return String(date.getTime()) + '000000';
 	}
 
-	function getEveeyeFactionId(faction) {
-		if (faction === 'MUD') return '1';
-		if (faction === 'ONI') return '2';
-		if (faction === 'UST') return '3';
-		return '';
-	}
-
-	function findEveeyeProfileScore(section, factionId, profile) {
-		const rows = section?.[factionId]?.LP;
-		if (!Array.isArray(rows)) return null;
-		const match = rows.find(row => String(row?.profile || '') === String(profile));
-		const score = Number(match?.score);
-		return Number.isFinite(score) ? Math.floor(score) : null;
-	}
-
-	async function fetchEveeyeLpSnapshot(profile, faction) {
-		const factionId = getEveeyeFactionId(faction);
-		if (!profile || !factionId) throw new Error('eveeye_missing_profile_or_faction');
-
-		const url =
-			`https://api.ryden.systems/api_stats_leaderboard_lpxp_today.php` +
-			`?profile=${encodeURIComponent(profile)}` +
-			`&faction=${encodeURIComponent(factionId)}`;
-
-		const res = await fetch(url, { method: 'GET' });
-		if (!res.ok) throw new Error(`eveeye_http_${res.status}`);
-
-		const data = await res.json();
-		const lpToday = findEveeyeProfileScore(data?.today, factionId, profile);
-		const lpYesterday = findEveeyeProfileScore(data?.yesterday, factionId, profile);
-		if (lpToday == null && lpYesterday == null) throw new Error('eveeye_profile_not_found');
-
-		return {
-			apiUpdatedAt: String(data?.datatime || ''),
-			lpToday,
-			lpYesterday,
-			foundToday: lpToday != null ? 1 : 0,
-			foundYesterday: lpYesterday != null ? 1 : 0
-		};
-	}
-
-	async function emitEveeyeLpSnapshotToInflux({ label, faction, profile, snapshotForHour }) {
-		try {
-			const snap = await fetchEveeyeLpSnapshot(profile, faction);
-			const fields = [];
-			if (snap.lpToday != null) fields.push(`lp_today=${snap.lpToday}i`);
-			if (snap.lpYesterday != null) fields.push(`lp_yesterday=${snap.lpYesterday}i`);
-			fields.push(`found_today=${snap.foundToday}i`);
-			fields.push(`found_yesterday=${snap.foundYesterday}i`);
-			if (snap.apiUpdatedAt) fields.push(`api_updated_at=${influxFieldString(snap.apiUpdatedAt)}`);
-			if (snapshotForHour) fields.push(`snapshot_for_hour=${influxFieldString(snapshotForHour)}`);
-
-			const line =
-				`lp_snapshot_eveeye` +
-				`,label=${influxEscape(label || 'unknown')}` +
-				`,faction=${influxEscape(faction || 'unknown')}` +
-				`,profile=${influxEscape(profile || 'unknown')}` +
-				`,source=eveeye ` +
-				fields.join(',');
-
-			await sendToInflux(line);
-			upgradeAutomationEveeyeLpToday = snap.lpToday;
-			upgradeAutomationEveeyeLpYesterday = snap.lpYesterday;
-			upgradeAutomationEveeyeUpdatedAt = snap.apiUpdatedAt || '';
-			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][EVEYEE] sent profile=${profile} faction=${faction} today=${snap.lpToday} yesterday=${snap.lpYesterday}`);
-		} catch (e) {
-			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][EVEYEE] skip ${String(e?.message || e || 'unknown_error')}`);
-		}
-	}
-
 	async function emitUpgradeAutomationInfluxSnapshot(now, summary, executionSummary) {
 		if (!globalSettings.upgradeAutomationInfluxTracking) {
 			upgradeAutomationInfluxDebugStatus = 'influx tracking disabled';
@@ -2994,12 +2963,6 @@
 		}
 		upgradeAutomationInfluxDebugStatus = `send ok lines=${sentCount} last=${lastMeasurementSent || 'n/a'}`;
 		await appendUpgradeAutomationLog(`[UPGRADE-AUTO][INFLUX] debug send ok lines=${sentCount}`);
-		await emitEveeyeLpSnapshotToInflux({
-			label: globalSettings.slyInstanceName || 'unknown',
-			faction: normalizeUpgradeAutomationLpInstance(globalSettings?.upgradeAutomationLpInstance || 'MUD'),
-			profile: userProfileAcct ? userProfileAcct.toString() : '',
-			snapshotForHour
-		});
 	}
 
 	function extractInventoryFromCargo(starbasePlayerCargoHoldsAndTokens) {
@@ -3511,7 +3474,7 @@
 	}
 
 	//statsadd start
-	//Transaction statistics by Risingson/EveEye, small improvements by Swift42
+	//Transaction statistics by Risingson, small improvements by Swift42
 	let transactionStats={ "start": (Math.round(Date.now() / 1000)), "groups":{} };
 	let upgradeAutomationInfluxUpgrade24h = {};
 	let upgradeAutomationInfluxCraft24h = {};
@@ -3845,19 +3808,19 @@
 			const perfAlphaError = String(upgradeAutomationExecutionSummary?.alphaError || '-').replace(/[<>]/g, '');
 			const influxStatus = String(upgradeAutomationInfluxDebugStatus || 'n/a').replace(/[<>]/g, '');
 			const influxLineShort = String(upgradeAutomationInfluxDebugLine || '').replace(/[<>]/g, '').slice(0, 180);
-			const perfEveeyeTodayValue = upgradeAutomationExecutionSummary?.eveeyeLpTodayLatest ?? upgradeAutomationEveeyeLpToday;
-			const perfEveeyeYdayValue = upgradeAutomationExecutionSummary?.eveeyeLpYesterdayLatest ?? upgradeAutomationEveeyeLpYesterday;
-			const perfEveeyeUpdatedRaw = upgradeAutomationExecutionSummary?.eveeyeUpdatedAtLatest || upgradeAutomationEveeyeUpdatedAt || '-';
-			const perfEveeyeToday = perfEveeyeTodayValue == null || !Number.isFinite(Number(perfEveeyeTodayValue)) ? '-' : Math.round(Number(perfEveeyeTodayValue || 0)).toLocaleString();
-			const perfEveeyeYday = perfEveeyeYdayValue == null || !Number.isFinite(Number(perfEveeyeYdayValue)) ? '-' : Math.round(Number(perfEveeyeYdayValue || 0)).toLocaleString();
-			const perfEveeyeUpdatedAt = String(perfEveeyeUpdatedRaw || '-').replace(/[<>]/g, '');
+			const perfAephiaTodayValue = upgradeAutomationExecutionSummary?.aephiaLpTodayLatest;
+			const perfAephiaYdayValue = upgradeAutomationExecutionSummary?.aephiaLpYesterdayLatest;
+			const perfAephiaUpdatedRaw = upgradeAutomationExecutionSummary?.aephiaUpdatedAtLatest || '-';
+			const perfAephiaToday = perfAephiaTodayValue == null || !Number.isFinite(Number(perfAephiaTodayValue)) ? '-' : Math.round(Number(perfAephiaTodayValue || 0)).toLocaleString();
+			const perfAephiaYday = perfAephiaYdayValue == null || !Number.isFinite(Number(perfAephiaYdayValue)) ? '-' : Math.round(Number(perfAephiaYdayValue || 0)).toLocaleString();
+			const perfAephiaUpdatedAt = String(perfAephiaUpdatedRaw || '-').replace(/[<>]/g, '');
 			const bufferDaysNewObservedDrainLine = formatUpgradeAutomationObservedDrainDebugLine(upgradeAutomationInfluxInventoryGlobalWeightedDrain).replace(/[<>]/g, '');
 			content += '<tr style="opacity:0.5"><td colspan="8" style="font-size:85%;font-family:monospace">Pools src=' + Math.floor(Number(upgradeAutomationExecutionSummary?.sourcePoolCount || 0)).toLocaleString() + ' (' + Math.floor(Number(upgradeAutomationExecutionSummary?.sourcePoolMass || 0)).toLocaleString() + ' LP) dst=' + Math.floor(Number(upgradeAutomationExecutionSummary?.destPoolCount || 0)).toLocaleString() + ' (' + Math.floor(Number(upgradeAutomationExecutionSummary?.destPoolMass || 0)).toLocaleString() + ' LP) dir=' + String(upgradeAutomationExecutionSummary?.partitionDirection || '-').replace(/[<>]/g, '') + ' behind=' + Number(upgradeAutomationExecutionSummary?.behindRatio || 0).toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 }) + '</td></tr>';
 			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:85%">Buffer Days new</td><td colspan="6" style="font-size:85%;font-family:monospace;word-break:break-word"><b>Observed Drain</b> ' + bufferDaysNewObservedDrainLine + '</td></tr>';
 			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:85%">Past hours</td><td align="right" style="font-size:85%">' + optDebugNeutralPast + '<br><small>Neutral past</small></td><td align="right" style="font-size:85%">' + optDebugNeutralCurrentHour + '<br><small>Current hour</small></td><td align="right" style="font-size:85%">' + optDebugTargetPast + '<br><small>Target past</small></td><td align="right" style="font-size:85%">' + optDebugAchievablePast + '<br><small>Optimizer past</small></td><td></td><td></td></tr>';
 			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:85%">Performance alpha 1</td><td align="right" style="font-size:85%">' + perfCleanRequestedAlphaValue + '<br><small>clean requested alpha</small></td><td align="right" style="font-size:85%">' + perfCleanRequestedAlphaK + '<br><small>requested k</small></td><td align="right" style="font-size:85%">' + perfCleanRequestedAlphaDays + '<br><small>requested days</small></td><td align="right" style="font-size:85%">' + perfCleanOptimizerAlphaValue + '<br><small>clean optimizer alpha</small></td><td align="right" style="font-size:85%">' + perfCleanOptimizerAlphaK + '<br><small>optimizer k</small></td><td align="right" style="font-size:85%">' + perfCleanOptimizerAlphaDays + '<br><small>optimizer days</small></td></tr>';
 			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:85%">Performance alpha 2</td><td align="right" style="font-size:85%">' + perfNeutralLpYesterday + '<br><small>neutral yday</small></td><td align="right" style="font-size:85%">' + perfRequestedLpYesterday + '<br><small>requested yday</small></td><td align="right" style="font-size:85%">' + perfOptimizerLpYesterday + '<br><small>optimizer yday</small></td><td align="right" style="font-size:85%">' + perfInstalledYesterday + '<br><small>installed yday</small></td><td></td><td></td></tr>';
-			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:85%">Performance alpha 3</td><td align="right" style="font-size:85%">' + perfEveeyeToday + '<br><small>lp_today_eve</small></td><td align="right" style="font-size:85%">' + perfEveeyeYday + '<br><small>lp_yday_eve</small></td><td align="right" style="font-size:85%">' + perfEveeyeUpdatedAt + '<br><small>eveeye updated</small></td><td></td><td></td><td></td></tr>';
+			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:85%">Performance alpha 3</td><td align="right" style="font-size:85%">' + perfAephiaToday + '<br><small>lp_today_aephia</small></td><td align="right" style="font-size:85%">' + perfAephiaYday + '<br><small>lp_yday_aephia</small></td><td align="right" style="font-size:85%">' + perfAephiaUpdatedAt + '<br><small>aephia updated</small></td><td></td><td></td><td></td></tr>';
 			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:90%">Influx</td><td colspan="6" style="font-size:85%;word-break:break-all">' + influxStatus + (influxLineShort ? ('<br><span style="font-size:85%">' + influxLineShort + '</span>') : '') + '</td></tr>';
 
 			try {
@@ -13091,7 +13054,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			importModal.style.zIndex = 3;
 			let importModalContent = document.createElement('div');
 			importModalContent.classList.add('assist-modal-content');
-			importModalContent.innerHTML = '<div class="assist-modal-header"><span>Config Import/Export</span><div class="assist-modal-header-right"><button id="importTargetsBtn" class="assist-modal-btn assist-modal-save">Import Fleet Targets</button><button id="importConfigBtn" class="assist-modal-btn assist-modal-save">Import Config</button><span class="assist-modal-close">&#x2715;</span></div></div><div class="assist-modal-body"><span id="assist-modal-error"></span><div></div><div><ul><li>Copy the text below to save your raw Lab Assistant configuration.</li><li>To restore your previous configuration, enter configuration text in the text box below then click the Import Config button.</li><li>To import new Target coordinates for fleets, paste the exported text from EveEye in the text box below then click the Import Fleet Targets button.</li></ul></div><div></div><textarea id="importText" rows="6" cols="80" max-width="100%"></textarea></div>';
+			importModalContent.innerHTML = '<div class="assist-modal-header"><span>Config Import/Export</span><div class="assist-modal-header-right"><button id="importTargetsBtn" class="assist-modal-btn assist-modal-save">Import Fleet Targets</button><button id="importConfigBtn" class="assist-modal-btn assist-modal-save">Import Config</button><span class="assist-modal-close">&#x2715;</span></div></div><div class="assist-modal-body"><span id="assist-modal-error"></span><div></div><div><ul><li>Copy the text below to save your raw Lab Assistant configuration.</li><li>To restore your previous configuration, enter configuration text in the text box below then click the Import Config button.</li><li>To import new Target coordinates for fleets, paste the exported target JSON in the text box below then click the Import Fleet Targets button.</li></ul></div><div></div><textarea id="importText" rows="6" cols="80" max-width="100%"></textarea></div>';
 			importModal.append(importModalContent);
 
 			let errorModal = document.createElement('div');
