@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-21
+// @aephia-version 0.7.35-22
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,10 +31,9 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-21'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-22'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
-        'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
     ];
 
     const fallbackRpcIdentifier = 'mainnet.helius-rpc.com';
@@ -49,7 +48,6 @@
             : [];
         saRPCs = [
             'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
-            'https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ',
             ...heliusRpcUrls,
         ];
         readRPCs = customReadRPCs.concat(saRPCs);
@@ -5431,6 +5429,70 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	}
  */
 
+	function getTransactionInstructionError(confirmation, txResult) {
+		const confirmationErr = confirmation?.value?.err?.InstructionError;
+		const txErr = txResult?.meta?.err?.InstructionError;
+		return confirmationErr || txErr || null;
+	}
+
+	function getCustomInstructionErrorCode(instructionError, logMessages) {
+		let errorDetail = Array.isArray(instructionError) ? instructionError[1] : instructionError;
+		if (typeof errorDetail === 'number') return errorDetail;
+		if (typeof errorDetail === 'string') {
+			const decimalMatch = errorDetail.match(/\bCustom(?: program error)?:?\s*(\d+)\b/i);
+			if (decimalMatch) return Number(decimalMatch[1]);
+		}
+		if (errorDetail && typeof errorDetail === 'object') {
+			if (typeof errorDetail.Custom === 'number') return errorDetail.Custom;
+			if (typeof errorDetail.custom === 'number') return errorDetail.custom;
+		}
+		const joinedLogs = Array.isArray(logMessages) ? logMessages.join('\n') : String(logMessages || '');
+		const anchorMatch = joinedLogs.match(/Error Number:\s*(\d+)/i);
+		if (anchorMatch) return Number(anchorMatch[1]);
+		const hexMatch = joinedLogs.match(/custom program error:\s*0x([0-9a-f]+)/i);
+		if (hexMatch) return parseInt(hexMatch[1], 16);
+		const logDecimalMatch = joinedLogs.match(/custom program error:\s*(\d+)/i);
+		if (logDecimalMatch) return Number(logDecimalMatch[1]);
+		return null;
+	}
+
+	function describeInstructionError(confirmation, txResult) {
+		const instructionError = getTransactionInstructionError(confirmation, txResult);
+		const logMessages = txResult?.meta?.logMessages || [];
+		const joinedLogs = Array.isArray(logMessages) ? logMessages.join('\n') : String(logMessages || '');
+		const anchorMatch = joinedLogs.match(/Error Code:\s*([^.]+)\.\s*Error Number:\s*(\d+)\.\s*Error Message:\s*([^\n]+)/i);
+		if (anchorMatch) {
+			return {
+				status: `ERROR: Ix ${anchorMatch[2]} ${anchorMatch[1]}`.slice(0, 64),
+				detail: `${anchorMatch[2]} ${anchorMatch[1]}: ${anchorMatch[3].trim()}`
+			};
+		}
+
+		const code = getCustomInstructionErrorCode(instructionError, logMessages);
+		if (code !== null && Number.isFinite(code)) {
+			const idls = [sageIDL, profileIDL, pointsIDL, pointsStoreIDL, craftingIDL, cargoIDL].filter(idl => idl && Array.isArray(idl.errors));
+			const matches = idls
+				.map(idl => ({ idl: idl.name || 'unknown', error: idl.errors.find(error => Number(error.code) === Number(code)) }))
+				.filter(match => match.error);
+			if (matches.length === 1) {
+				const match = matches[0];
+				return {
+					status: `ERROR: Ix ${code} ${match.error.name}`.slice(0, 64),
+					detail: `${code} ${match.idl}.${match.error.name}: ${match.error.msg || ''}`.trim()
+				};
+			}
+			if (matches.length > 1) {
+				return {
+					status: `ERROR: Ix ${code}`,
+					detail: `${code} matched multiple program errors: ${matches.map(match => `${match.idl}.${match.error.name}`).join(', ')}`
+				};
+			}
+			return { status: `ERROR: Ix ${code}`, detail: `Custom program error ${code}` };
+		}
+
+		return { status: 'ERROR: Ix Error', detail: `InstructionError: ${JSON.stringify(instructionError)}` };
+	}
+
 	function txSignAndSend(ix, fleet, opName, priorityFeeMultiplier, extraSigner=false) {
 		return new Promise(async resolve => {
 			const fleetName = fleet ? fleet.label : 'unknown';
@@ -5536,7 +5598,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				let txHash = response.txHash;
 				let confirmation = response.confirmation;
 				let txResult = txHash ? await solanaReadConnection.getTransaction(txHash, {commitment: 'confirmed', maxSupportedTransactionVersion: 1}) : undefined;
-                if ((confirmation.value && confirmation.value.err && confirmation.value.err.InstructionError) || (txResult && txResult.meta && txResult.meta.err && txResult.meta.err.InstructionError)) {
+                const instructionError = getTransactionInstructionError(confirmation, txResult);
+                if (instructionError) {
                     if (globalErrorTracker.firstErrorTime === 0) globalErrorTracker.firstErrorTime = Date.now();
                     if (Date.now() < globalErrorTracker.firstErrorTime + 600000) {
                         globalErrorTracker.errorCount++
@@ -5544,11 +5607,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                         globalErrorTracker.firstErrorTime = Date.now();
                         globalErrorTracker.errorCount = 1;
                     }
-                    updateFleetState(fleet, 'ERROR: Ix Error');
-                    cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> ERROR ❌ The instruction resulted in an error.`);
+                    const ixErrorDetail = describeInstructionError(confirmation, txResult);
+                    updateFleetState(fleet, ixErrorDetail.status);
+                    cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> ERROR ❌ ${ixErrorDetail.detail}`);
                     let ixError = txResult && txResult.meta && txResult.meta.logMessages ? txResult.meta.logMessages : 'Unknown';
                     console.log(FleetTimeStamp(fleetName), ' txResult.logMessages: ', ixError);
-                    logError('ix error: ' + ixError, fleetName);
+                    logError(`ix error: ${ixErrorDetail.detail}; tx: ${txHash || 'unknown'}; logs: ${ixError}`, fleetName);
                     if(fleet.publicKey) {
                     	if(globalSettings.emailFleetIxErrors) await sendEMail(fleetName + ' ix error', ixError);
                     } else {
