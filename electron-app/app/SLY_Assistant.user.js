@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-23
+// @aephia-version 0.7.35-24
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-23'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-24'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -5474,6 +5474,13 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const instructionError = getTransactionInstructionError(confirmation, txResult);
 		const logMessages = txResult?.meta?.logMessages || [];
 		const joinedLogs = Array.isArray(logMessages) ? logMessages.join('\n') : String(logMessages || '');
+		const ixIndex = Array.isArray(instructionError) ? instructionError[0] : null;
+		if (/Error:\s*insufficient funds/i.test(joinedLogs)) {
+			return {
+				status: `ERROR: Ix ${ixIndex ?? '?'} InsufficientFunds`.slice(0, 64),
+				detail: `Instruction ${ixIndex ?? '?'} failed: Token insufficient funds`
+			};
+		}
 		const anchorMatch = joinedLogs.match(/Error Code:\s*([^.]+)\.\s*Error Number:\s*(\d+)\.\s*Error Message:\s*([^\n]+)/i);
 		if (anchorMatch) {
 			return {
