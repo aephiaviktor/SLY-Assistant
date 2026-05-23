@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-26
+// @aephia-version 0.7.35-27
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-26'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-27'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -427,10 +427,13 @@
 		}
 		try {
 			const lpControlResult = await fetchUpgradeAutomationLpControl();
-			upgradeAutomationLpControl = lpControlResult || null;
-			upgradeAutomationLpControlError = '';
+			if (lpControlResult) {
+				upgradeAutomationLpControl = lpControlResult;
+				upgradeAutomationLpControlError = '';
+			} else {
+				upgradeAutomationLpControlError = 'lp_control_empty_result';
+			}
 		} catch (e) {
-			upgradeAutomationLpControl = null;
 			upgradeAutomationLpControlError = String(e?.message || e || 'unknown_error');
 		}
 		try { renderAssistStats(); } catch (e) {}
@@ -439,12 +442,14 @@
 	async function refreshUpgradeAutomationExecutionSummary() {
 		try {
 			const executionSummaryResult = await fetchUpgradeAutomationExecutionSummary();
-			upgradeAutomationExecutionSummary = executionSummaryResult || null;
-			window.schedulerSummary = upgradeAutomationExecutionSummary; // Viktor: debug access
-			upgradeAutomationExecutionSummaryError = '';
+			if (executionSummaryResult) {
+				upgradeAutomationExecutionSummary = executionSummaryResult;
+				window.schedulerSummary = upgradeAutomationExecutionSummary; // Viktor: debug access
+				upgradeAutomationExecutionSummaryError = '';
+			} else {
+				upgradeAutomationExecutionSummaryError = 'execution_summary_empty_result';
+			}
 		} catch (e) {
-			upgradeAutomationExecutionSummary = null;
-			window.schedulerSummary = null; // Viktor: debug access
 			upgradeAutomationExecutionSummaryError = String(e?.message || e || 'unknown_error');
 		}
 		try { renderAssistStats(); } catch (e) {}
@@ -722,7 +727,12 @@
 		}
 		const effectiveTargetNow = Number.isFinite(Number(influxTarget.targetNowInflux)) && Number(influxTarget.targetNowInflux) > 0 ? Number(influxTarget.targetNowInflux) : null;
 		const rawTargetNowInflux = Number.isFinite(Number(influxTarget.targetNowInflux)) ? Number(influxTarget.targetNowInflux) : null;
-		const aephiaLpToday = await fetchUpgradeAutomationAephiaLpToday(lpInstanceKey, now);
+		let aephiaLpToday = null;
+		try {
+			aephiaLpToday = await fetchUpgradeAutomationAephiaLpToday(lpInstanceKey, now);
+		} catch (e) {
+			aephiaLpToday = null;
+		}
 		const control = computeUpgradeAutomationControl(series, now, effectiveTargetNow, aephiaLpToday);
 		const state = await loadUpgradeAutomationState(instanceId);
 		const dayKey = now.toISOString().slice(0, 10);
@@ -1745,7 +1755,12 @@
 		pastHoursLp = await computeUpgradeAutomationPastHoursLp(now);
 		const historyStartIso = new Date(now.getTime() - 8 * 86400000).toISOString();
 		const perfNeutralDebugRaw = await fetchUpgradeAutomationPerfFieldHistory('neutral_lp_target_full_day', now, historyStartIso);
-		const aephiaLpDebug = await fetchUpgradeAutomationAephiaLpHistory(lpInstanceKey, now, historyStartIso);
+		let aephiaLpDebug = { rows: [], latestToday: null, latestYesterday: null, latestTime: '', query: 'aephia_summary_unavailable', error: '' };
+		try {
+			aephiaLpDebug = await fetchUpgradeAutomationAephiaLpHistory(lpInstanceKey, now, historyStartIso);
+		} catch (e) {
+			aephiaLpDebug.error = String(e?.message || e || 'aephia_summary_failed');
+		}
 		const aggrNeutralDebug = await fetchUpgradeAutomationAggrFieldHistory('neutral_lp_target', now, historyStartIso);
 		const aggrInstalledDebug = await fetchUpgradeAutomationAggrFieldHistory('installed_lp_today', now, historyStartIso);
 		const perfRequestedDebugRaw = await fetchUpgradeAutomationPerfFieldHistory('requested_lp_target_full_day', now, historyStartIso);
@@ -1801,7 +1816,12 @@
 		);
 		const profitStats = await fetchUpgradeAutomationStrategyProfitStats(now);
 		const effectiveTargetNow = Number.isFinite(Number(influxTarget.targetNowInflux)) && Number(influxTarget.targetNowInflux) > 0 ? Number(influxTarget.targetNowInflux) : null;
-		const aephiaLpToday = await fetchUpgradeAutomationAephiaLpToday(lpInstanceKey, now);
+		let aephiaLpToday = null;
+		try {
+			aephiaLpToday = await fetchUpgradeAutomationAephiaLpToday(lpInstanceKey, now);
+		} catch (e) {
+			aephiaLpToday = null;
+		}
 		const control = computeUpgradeAutomationControl(series, now, effectiveTargetNow, aephiaLpToday);
 		const state = await loadUpgradeAutomationState(instanceId);
 		const dayKey = now.toISOString().slice(0, 10);
@@ -2611,7 +2631,16 @@
 		const status = Number(response.status || 0);
 		const body = response.responseText != null ? response.responseText : await response.text();
 		if (status !== 200) throw new Error('aephia_summary_http_' + status);
-		const data = JSON.parse(body);
+		const trimmed = String(body || '').trim();
+		if (!trimmed || trimmed[0] !== '{') {
+			throw new Error('aephia_summary_non_json_response');
+		}
+		let data;
+		try {
+			data = JSON.parse(trimmed);
+		} catch (e) {
+			throw new Error('aephia_summary_invalid_json');
+		}
 		upgradeAutomationAephiaSummaryCache = { fetchedAt: Date.now(), tokenKey, data };
 		return data;
 	}
@@ -3655,7 +3684,7 @@
 				const lpControlSource = String(upgradeAutomationLpControl?.effectiveTargetNowSource || 'epoch_fallback');
 				const lpTargetNowInflux = Number.isFinite(Number(upgradeAutomationLpControl?.targetNowInflux)) ? Number(upgradeAutomationLpControl.targetNowInflux) : 0;
 				const lpToday = Number(upgradeAutomationLpControl?.today || 0);
-				const lpAggActive = !!upgradeAutomationLpControl.aggressivenessActive;
+				const lpAggActive = !!upgradeAutomationLpControl?.aggressivenessActive;
 				const lpAggLabel = lpAggActive ? 'Aggr. (active)' : 'Aggr. (not active)';
 				const lpAggPreLabel = 'Aggr. (rel.)';
 				const lpAggColor = lpAggActive ? '#80ff80' : '#ff8080';
@@ -3685,6 +3714,10 @@
 				content += '<tr><td>Installed LP Today</td><td align="right">' + Math.round(installedToday).toLocaleString() + '</td><td></td><td></td><td></td><td></td></tr>';
 				content += '<tr><td>Execution Alpha (ATLAS/day)</td><td align="right">' + Math.round(executionAlphaAtlasPerDay).toLocaleString() + '</td><td>Requested Alpha (ATLAS/day)</td><td align="right">' + Math.round(requestedAlphaAtlasPerDay).toLocaleString() + '</td><td>Optimizer Alpha (ATLAS/day)</td><td align="right">' + Math.round(optimizerAlphaAtlasPerDay).toLocaleString() + '</td></tr>';
 				content += '<tr><td>Neutral LP Target</td><td align="right">' + Math.round(neutralLpTargetFullDay).toLocaleString() + '</td><td>Requested LP Target</td><td align="right">' + Math.round(requestedLpTarget).toLocaleString() + '</td><td>Optimizer LP Target</td><td align="right">' + Math.round(achievableLpTargetFullDay).toLocaleString() + '</td></tr>';
+				if (upgradeAutomationLpControlError || upgradeAutomationExecutionSummaryError) {
+					const lpErrors = [upgradeAutomationLpControlError, upgradeAutomationExecutionSummaryError].filter(Boolean).join(' | ');
+					content += '<tr><td colspan="6" style="color:#ffb366">LP Control using last good data; refresh issue: ' + String(lpErrors).replace(/[<>]/g, '') + '</td></tr>';
+				}
 			} else if (upgradeAutomationLpControlError || upgradeAutomationExecutionSummaryError) {
 				const lpErrors = [upgradeAutomationLpControlError, upgradeAutomationExecutionSummaryError].filter(Boolean).join(' | ');
 				content += '<tr><td colspan="6" style="color:#ff8080">LP Control error: ' + String(lpErrors).replace(/[<>]/g, '') + '</td></tr>';
