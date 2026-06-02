@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-27
+// @aephia-version 0.7.35-28
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-27'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-28'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -5534,6 +5534,15 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return normalized === 'LOAD' || normalized.includes('UPGRADE');
 	}
 
+	function getFriendlyInstructionErrorStatus(code, errorName, opName) {
+		const normalizedName = String(errorName || '').toLowerCase();
+		const normalizedOp = String(opName || '').toUpperCase();
+		if (Number(code) === 3005 && normalizedName === 'accountnotenoughkeys' && normalizedOp.includes('WARP')) {
+			return 'ERROR: IX 3005 Fleet docked';
+		}
+		return '';
+	}
+
 	function describeInstructionError(confirmation, txResult, sentInstructions, opName) {
 		const instructionError = getTransactionInstructionError(confirmation, txResult);
 		const logMessages = txResult?.meta?.logMessages || [];
@@ -5550,8 +5559,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		}
 		const anchorMatch = joinedLogs.match(/Error Code:\s*([^.]+)\.\s*Error Number:\s*(\d+)\.\s*Error Message:\s*([^\n]+)/i);
 		if (anchorMatch) {
+			const friendlyStatus = getFriendlyInstructionErrorStatus(anchorMatch[2], anchorMatch[1], opName);
 			return {
-				status: `ERROR: Ix ${anchorMatch[2]} ${anchorMatch[1]}`.slice(0, 64),
+				status: (friendlyStatus || `ERROR: Ix ${anchorMatch[2]} ${anchorMatch[1]}`).slice(0, 64),
 				detail: `${anchorMatch[2]} ${anchorMatch[1]}: ${anchorMatch[3].trim()}`
 			};
 		}
@@ -5564,8 +5574,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				.filter(match => match.error);
 			if (matches.length === 1) {
 				const match = matches[0];
+				const friendlyStatus = getFriendlyInstructionErrorStatus(code, match.error.name, opName);
 				return {
-					status: `ERROR: Ix ${code} ${match.error.name}`.slice(0, 64),
+					status: (friendlyStatus || `ERROR: Ix ${code} ${match.error.name}`).slice(0, 64),
 					detail: `${code} ${match.idl}.${match.error.name}: ${match.error.msg || ''}`.trim()
 				};
 			}
@@ -10990,11 +11001,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     if (hasTargetManifest) {
                         const loadedCargo = await handleTransportLoading(i, userFleets[i].starbaseCoord, targetCargoManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
                         cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargo.success);
-                        if(!loadedCargo.success && globalSettings.transportStopOnError) {
+                        if(!loadedCargo.success) {
                             //const newFleetState = `ERROR: No more cargo to load`;
                             //cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${newFleetState}`);
                             //userFleets[i].state = newFleetState;
                             cLog(1,`${FleetTimeStamp(userFleets[i].label)} ERROR: Unexpected error on cargo load.`);
+                            userFleets[i].resupplying = false;
                             return;
                         } else if(transportLoadUnloadSingleTx) {
                             transactions = transactions.concat(loadedCargo.transactions);
@@ -11112,11 +11124,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     if(hasStarbaseManifest) {
                         const loadedCargo = await handleTransportLoading(i, userFleets[i].destCoord, starbaseCargoManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
                         cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargo.success);
-                        if(!loadedCargo.success && globalSettings.transportStopOnError) {
+                        if(!loadedCargo.success) {
                             //const newFleetState = `ERROR: No more cargo to load`;
                             //cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${newFleetState}`);
                             //userFleets[i].state = newFleetState;
                             cLog(1,`${FleetTimeStamp(userFleets[i].label)} ERROR: Unexpected error on cargo load.`);
+                            userFleets[i].resupplying = false;
                             return;
                         } else if(transportLoadUnloadSingleTx) {
 				transactions = transactions.concat(loadedCargo.transactions);
@@ -11268,8 +11281,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			if(hasDestinationManifest) {
 				const loadedCargo = await handleTransportLoading(i, sourceCoord, destinationCargoManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
 				cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargo.success);
-				if(!loadedCargo.success && globalSettings.transportStopOnError) {
+				if(!loadedCargo.success) {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} ERROR: Unexpected error on cargo load.`);
+					userFleets[i].resupplying = false;
 					return false;
 				} else if(transportLoadUnloadSingleTx) {
 					transactions = transactions.concat(loadedCargo.transactions);
