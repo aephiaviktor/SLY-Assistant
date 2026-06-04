@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-29
+// @aephia-version 0.7.35-30
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-29'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-30'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -361,6 +361,7 @@
 	let upgradeAutomationInfluxDebugLine = '';
 	let upgradeAutomationInfluxDebugStatus = '';
 	const UPGRADE_AUTOMATION_TARGET_BUFFER_DAYS = 10;
+	const UPGRADE_AUTOMATION_LANDING_BUFFER_SECONDS = 30;
 
 	async function loadUpgradeAutomationEvents() {
 		const raw = await GM.getValue(UPGRADE_AUTOMATION_EVENTS_KEY, '[]');
@@ -983,7 +984,7 @@
 		const target = getUpgradeAutomationNextTargetWindow(now, settings);
 
 		// Viktor: Per-component target + runtime computation
-		const landingBufferSeconds = Math.max(0, parseIntDefault(settings?.upgradeAutomationLandingBufferSeconds, 30));
+		const landingBufferSeconds = UPGRADE_AUTOMATION_LANDING_BUFFER_SECONDS;
 		const minLeadSeconds = Math.max(300, parseIntDefault(settings?.upgradeAutomationMinLeadSeconds, 300));
 		const liveStatusRows = getUpgradeAutomationLiveStatusRows();
 		const targetMinute = 59;
@@ -2964,7 +2965,7 @@
 		lines.push(
 			`lp_auto_settings` +
 			` neutral_phase_length=${Math.max(0, parseIntDefault(globalSettings?.upgradeAutomationAggressivenessStartHour, 12))}i` +
-			`,landing_buffer=${Math.max(0, parseIntDefault(globalSettings?.upgradeAutomationLandingBufferSeconds, 30))}i` +
+			`,landing_buffer=${UPGRADE_AUTOMATION_LANDING_BUFFER_SECONDS}i` +
 			`,lower_boundary=${Math.max(0, Number(globalSettings?.upgradeAutomationAbsAggrBoundaryLow ?? 20000000000))}i` +
 			`,upper_boundary=${Math.max(0, Number(globalSettings?.upgradeAutomationAbsAggrBoundaryHigh ?? 35000000000))}i` +
 			`,multiplier_rel=${Number(globalSettings?.upgradeAutomationRelMultiplier ?? 1)}` +
@@ -3493,7 +3494,6 @@
 			upgradeAutomationAggressivenessStartHour: parseIntDefault(globalSettings.upgradeAutomationAggressivenessStartHour, 12),
 			upgradeAutomationNeutralBlockSingleTx: parseBoolDefault(globalSettings.upgradeAutomationNeutralBlockSingleTx, false),
 			upgradeAutomationBlockSpecialNeutral: parseBoolDefault(globalSettings.upgradeAutomationBlockSpecialNeutral, false),
-			upgradeAutomationLandingBufferSeconds: parseIntDefault(globalSettings.upgradeAutomationLandingBufferSeconds, 30),
 			upgradeAutomationAbsAggrBoundaryLow: Math.max(0, Number(globalSettings.upgradeAutomationAbsAggrBoundaryLow ?? 20_000_000_000)),
 			upgradeAutomationAbsAggrBoundaryHigh: Math.max(0, Number(globalSettings.upgradeAutomationAbsAggrBoundaryHigh ?? 35_000_000_000)),
 			upgradeAutomationRelMultiplier: Math.max(0, Number(globalSettings.upgradeAutomationRelMultiplier ?? 1)),
@@ -3655,7 +3655,6 @@
 			const startCraftSlotDisabled = executionPlanReady ? '' : 'disabled';
 			const selectedAggressivenessStartHour = Math.max(0, Math.min(23, parseIntDefault(globalSettings.upgradeAutomationAggressivenessStartHour, 12)));
 			const blockSpecialNeutral = !!globalSettings.upgradeAutomationBlockSpecialNeutral;
-			const selectedLandingBufferSeconds = Math.max(0, parseIntDefault(globalSettings.upgradeAutomationLandingBufferSeconds, 30));
 			const selectedFaction = normalizeUpgradeAutomationLpInstance(globalSettings.upgradeAutomationLpInstance || 'MUD');
 			const aggressivenessStartHourOptions = Array.from({ length: 24 }, (_, i) => '<option value="' + i + '" ' + (i === selectedAggressivenessStartHour ? 'selected' : '') + '>' + i + '</option>').join('');
 			const factionOptions = ['MUD','ONI','UST'].map(x => '<option value="' + x + '" ' + (x === selectedFaction ? 'selected' : '') + '>' + x + '</option>').join('');
@@ -3670,8 +3669,7 @@
 			content += '<tr><td>LP Automation On/Off</td><td align="right"><input id="lpAutomationEnabledToggle" type="checkbox" ' + (lpAutomationEnabled ? 'checked' : '') + '></td><td colspan="4"></td></tr>';
 			content += '<tr><td>Faction</td><td align="right"><select id="upgradeAutomationFaction" style="width:66px">' + factionOptions + '</select></td><td></td><td style="padding-left:18px;">Lower Boundary</td><td align="right"><input id="upgradeAutomationAbsAggrBoundaryLow" type="number" min="0" max="1000" step="1" value="' + absAggrBoundaryLow + '" style="width:66px"></td><td>Billions</td></tr>';
 			content += '<tr><td>Neutral Phase length</td><td align="right"><input id="upgradeAutomationAggressivenessStartHour" type="number" min="0" max="23" step="1" value="' + selectedAggressivenessStartHour + '" style="width:66px"></td><td style="white-space:nowrap; text-align:left;">hours</td><td style="padding-left:18px;">Upper Boundary</td><td align="right"><input id="upgradeAutomationAbsAggrBoundaryHigh" type="number" min="0" max="1000" step="1" value="' + absAggrBoundaryHigh + '" style="width:66px"></td><td>Billions</td></tr>';
-			content += '<tr><td>Block FSTAB, SDU during Neutral Phase</td><td align="right"><input id="upgradeAutomationBlockSpecialNeutral" type="checkbox" ' + (blockSpecialNeutral ? 'checked' : '') + '></td><td></td><td colspan="3"></td></tr>';
-			content += '<tr><td>Landing Buffer</td><td align="right"><input id="upgradeAutomationLandingBufferSeconds" type="number" min="0" max="600" step="1" value="' + selectedLandingBufferSeconds + '" style="width:66px"></td><td>sec</td><td style="padding-left:18px;">Multiplier rel.</td><td align="right"><input id="upgradeAutomationRelMultiplier" type="number" min="0" max="100" step="0.5" value="' + relMultiplier + '" style="width:66px"></td><td></td></tr>';
+			content += '<tr><td>Block FSTAB, SDU during Neutral Phase</td><td align="right"><input id="upgradeAutomationBlockSpecialNeutral" type="checkbox" ' + (blockSpecialNeutral ? 'checked' : '') + '></td><td></td><td style="padding-left:18px;">Multiplier rel.</td><td align="right"><input id="upgradeAutomationRelMultiplier" type="number" min="0" max="100" step="0.5" value="' + relMultiplier + '" style="width:66px"></td><td></td></tr>';
 			content += '<tr><td>First automation slot</td><td align="right"><select id="lpAutomationStartCraftSlot" style="width:66px" ' + startCraftSlotDisabled + '>' + startCraftSlotOptions + '</select></td><td style="opacity:0.8">' + startCraftSlotStatus + '</td><td style="padding-left:18px;">Multiplier abs.</td><td align="right"><input id="upgradeAutomationAbsAggrMultiplier" type="number" min="0" max="100" step="0.5" value="' + absAggrMultiplier + '" style="width:66px"></td><td></td></tr>';
 			const currentPhantomCrew = Number(upgradeAutomationExecutionSummary?.crewTotal || 0);
 			const selectedMaxPhantomCrew = globalSettings.upgradeAutomationMaxPhantomCrew != null ? Math.max(0, parseIntDefault(globalSettings.upgradeAutomationMaxPhantomCrew, 0)) : currentPhantomCrew;
@@ -3902,7 +3900,6 @@
 			const upgradeAutomationAggressivenessStartHour = el.querySelector('#upgradeAutomationAggressivenessStartHour');
 			const upgradeAutomationNeutralBlockSingleTx = el.querySelector('#upgradeAutomationNeutralBlockSingleTx');
 			const upgradeAutomationBlockSpecialNeutral = el.querySelector('#upgradeAutomationBlockSpecialNeutral');
-			const upgradeAutomationLandingBufferSeconds = el.querySelector('#upgradeAutomationLandingBufferSeconds');
 			const upgradeAutomationFaction = el.querySelector('#upgradeAutomationFaction');
 			const upgradeAutomationAbsAggrBoundaryLow = el.querySelector('#upgradeAutomationAbsAggrBoundaryLow');
 			const upgradeAutomationAbsAggrBoundaryHigh = el.querySelector('#upgradeAutomationAbsAggrBoundaryHigh');
@@ -3918,7 +3915,6 @@
 				const hourValue = Math.max(0, Math.min(23, parseIntDefault(upgradeAutomationAggressivenessStartHour?.value, 12)));
 				const neutralBlockSingleTx = !!upgradeAutomationNeutralBlockSingleTx?.checked;
 				const blockSpecialNeutral = !!upgradeAutomationBlockSpecialNeutral?.checked;
-				const landingBufferSeconds = Math.max(0, parseIntDefault(upgradeAutomationLandingBufferSeconds?.value, 30));
 				const factionValue = normalizeUpgradeAutomationLpInstance(upgradeAutomationFaction?.value || globalSettings.upgradeAutomationLpInstance || 'MUD');
 				const absAggrBoundaryLow = Math.max(0, parseLocaleFloat(upgradeAutomationAbsAggrBoundaryLow?.value, 20));
 				const absAggrBoundaryHigh = Math.max(0, parseLocaleFloat(upgradeAutomationAbsAggrBoundaryHigh?.value, 35));
@@ -3929,7 +3925,6 @@
 				globalSettings.upgradeAutomationAggressivenessStartHour = hourValue;
 				globalSettings.upgradeAutomationNeutralBlockSingleTx = neutralBlockSingleTx;
 				globalSettings.upgradeAutomationBlockSpecialNeutral = blockSpecialNeutral;
-				globalSettings.upgradeAutomationLandingBufferSeconds = landingBufferSeconds;
 				globalSettings.upgradeAutomationLpInstance = factionValue;
 				globalSettings.upgradeAutomationAbsAggrBoundaryLow = absAggrBoundaryLowRaw;
 				globalSettings.upgradeAutomationAbsAggrBoundaryHigh = absAggrBoundaryHighRaw;
@@ -3942,12 +3937,6 @@
 				await refreshUpgradeAutomationExecutionSummary();
 				renderLpAutomationContent();
 			};
-			if (upgradeAutomationLandingBufferSeconds && !upgradeAutomationLandingBufferSeconds.dataset.bound) {
-				upgradeAutomationLandingBufferSeconds.dataset.bound = '1';
-				upgradeAutomationLandingBufferSeconds.addEventListener('change', async () => {
-					await applyAggressivenessSettings();
-				});
-			}
 			if (upgradeAutomationFaction && !upgradeAutomationFaction.dataset.bound) {
 				upgradeAutomationFaction.dataset.bound = '1';
 				upgradeAutomationFaction.addEventListener('change', async () => {
