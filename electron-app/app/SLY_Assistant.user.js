@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-28
+// @aephia-version 0.7.35-29
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-28'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-29'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -1389,6 +1389,7 @@
 		const planning = getUpgradeAutomationPlanningHorizon(now);
 		const remainingHours = planning.planningHours;
 		const secondsInRemainingHours = remainingHours * 3600;
+		const blockSpecialNeutral = !!globalSettings?.upgradeAutomationBlockSpecialNeutral;
 		const rows = [];
 		for (const rawName of UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_ORDER) {
 			const canonicalName = rawName;
@@ -1409,6 +1410,7 @@
 			const bufferDaysPhantom = upgrade24h > 0 ? (inventoryPhantom / upgrade24h) : (inventoryPhantom > 0 ? Number.POSITIVE_INFINITY : null);
 			const phantomBlocked = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
 			const phantomUpgradeEligible = inventoryPhantom > 0 && !phantomBlocked;
+			const neutralPhaseBlocked = blockSpecialNeutral && isUpgradeAutomationNeutralSpecialBlockedComponent(canonicalName);
 			rows.push({
 				key: canonicalName,
 				name: canonicalName,
@@ -1425,6 +1427,7 @@
 				bufferDaysGlobal,
 				phantomBlocked,
 				phantomUpgradeEligible,
+				neutralPhaseBlocked,
 				lpPerUnit: 0,
 				lpPerSecond: 0,
 				crew: 0,
@@ -1439,7 +1442,7 @@
 				finalBufferDays: null
 			});
 		}
-		const activeRows = rows.filter(row => row.secondsPerUnit > 0 && row.phantomUpgradeEligible && Number(row.inventoryGlobal || 0) > 0);
+		const activeRows = rows.filter(row => row.secondsPerUnit > 0 && row.phantomUpgradeEligible && !row.neutralPhaseBlocked && Number(row.inventoryGlobal || 0) > 0);
 		const projectNeutralBufferDays = (row, crew) => {
 			const projectedCrew = Math.max(0, Math.floor(Number(crew || 0)));
 			const projectedNeutralUpgradingDay = projectedCrew > 0
@@ -2967,6 +2970,7 @@
 			`,multiplier_rel=${Number(globalSettings?.upgradeAutomationRelMultiplier ?? 1)}` +
 			`,multiplier_abs=${Number(globalSettings?.upgradeAutomationAbsAggrMultiplier ?? 1)}` +
 			`,target_skew=${Number(globalSettings?.upgradeAutomationPoolSkewMultiplier ?? 3)}` +
+			`,neutral_special_block=${!!globalSettings?.upgradeAutomationBlockSpecialNeutral ? 1 : 0}i` +
 			`,lp_automation_on=${!!globalSettings.upgradeAutomationEnabled ? 1 : 0}i` +
 			`,faction=${influxFieldString(normalizeUpgradeAutomationLpInstance(globalSettings?.upgradeAutomationLpInstance || 'MUD'))}` +
 			`,snapshot_for_hour=${influxFieldString(snapshotForHour)}`
@@ -3488,6 +3492,7 @@
 			upgradeAutomationStartCraftSlot: parseIntDefault(globalSettings.upgradeAutomationStartCraftSlot, 1),
 			upgradeAutomationAggressivenessStartHour: parseIntDefault(globalSettings.upgradeAutomationAggressivenessStartHour, 12),
 			upgradeAutomationNeutralBlockSingleTx: parseBoolDefault(globalSettings.upgradeAutomationNeutralBlockSingleTx, false),
+			upgradeAutomationBlockSpecialNeutral: parseBoolDefault(globalSettings.upgradeAutomationBlockSpecialNeutral, false),
 			upgradeAutomationLandingBufferSeconds: parseIntDefault(globalSettings.upgradeAutomationLandingBufferSeconds, 30),
 			upgradeAutomationAbsAggrBoundaryLow: Math.max(0, Number(globalSettings.upgradeAutomationAbsAggrBoundaryLow ?? 20_000_000_000)),
 			upgradeAutomationAbsAggrBoundaryHigh: Math.max(0, Number(globalSettings.upgradeAutomationAbsAggrBoundaryHigh ?? 35_000_000_000)),
@@ -3532,6 +3537,10 @@
 		'Radiation Absorber',
 		'Survey Data Unit'
 	];
+	const UPGRADE_AUTOMATION_NEUTRAL_SPECIAL_BLOCKED_COMPONENTS = new Set(['Field Stabilizer', 'Survey Data Unit', 'SDU']);
+	function isUpgradeAutomationNeutralSpecialBlockedComponent(name) {
+		return UPGRADE_AUTOMATION_NEUTRAL_SPECIAL_BLOCKED_COMPONENTS.has(String(name || ''));
+	}
 
 		function buildLpAutomationSchedDebugRowsHtml() {
 			const summaryRows = Array.isArray(upgradeAutomationExecutionSummary?.lpAutomationSchedule?.rows)
@@ -3645,6 +3654,7 @@
 			const startCraftSlotStatus = executionPlanReady ? ('craft' + selectedStartCraftSlot + '-craft' + (selectedStartCraftSlot + UPGRADE_AUTOMATION_MANAGED_CRAFT_SLOTS - 1)) : 'Waiting for Execution Plan...';
 			const startCraftSlotDisabled = executionPlanReady ? '' : 'disabled';
 			const selectedAggressivenessStartHour = Math.max(0, Math.min(23, parseIntDefault(globalSettings.upgradeAutomationAggressivenessStartHour, 12)));
+			const blockSpecialNeutral = !!globalSettings.upgradeAutomationBlockSpecialNeutral;
 			const selectedLandingBufferSeconds = Math.max(0, parseIntDefault(globalSettings.upgradeAutomationLandingBufferSeconds, 30));
 			const selectedFaction = normalizeUpgradeAutomationLpInstance(globalSettings.upgradeAutomationLpInstance || 'MUD');
 			const aggressivenessStartHourOptions = Array.from({ length: 24 }, (_, i) => '<option value="' + i + '" ' + (i === selectedAggressivenessStartHour ? 'selected' : '') + '>' + i + '</option>').join('');
@@ -3660,6 +3670,7 @@
 			content += '<tr><td>LP Automation On/Off</td><td align="right"><input id="lpAutomationEnabledToggle" type="checkbox" ' + (lpAutomationEnabled ? 'checked' : '') + '></td><td colspan="4"></td></tr>';
 			content += '<tr><td>Faction</td><td align="right"><select id="upgradeAutomationFaction" style="width:66px">' + factionOptions + '</select></td><td></td><td style="padding-left:18px;">Lower Boundary</td><td align="right"><input id="upgradeAutomationAbsAggrBoundaryLow" type="number" min="0" max="1000" step="1" value="' + absAggrBoundaryLow + '" style="width:66px"></td><td>Billions</td></tr>';
 			content += '<tr><td>Neutral Phase length</td><td align="right"><input id="upgradeAutomationAggressivenessStartHour" type="number" min="0" max="23" step="1" value="' + selectedAggressivenessStartHour + '" style="width:66px"></td><td style="white-space:nowrap; text-align:left;">hours</td><td style="padding-left:18px;">Upper Boundary</td><td align="right"><input id="upgradeAutomationAbsAggrBoundaryHigh" type="number" min="0" max="1000" step="1" value="' + absAggrBoundaryHigh + '" style="width:66px"></td><td>Billions</td></tr>';
+			content += '<tr><td>Block FSTAB, SDU during Neutral Phase</td><td align="right"><input id="upgradeAutomationBlockSpecialNeutral" type="checkbox" ' + (blockSpecialNeutral ? 'checked' : '') + '></td><td></td><td colspan="3"></td></tr>';
 			content += '<tr><td>Landing Buffer</td><td align="right"><input id="upgradeAutomationLandingBufferSeconds" type="number" min="0" max="600" step="1" value="' + selectedLandingBufferSeconds + '" style="width:66px"></td><td>sec</td><td style="padding-left:18px;">Multiplier rel.</td><td align="right"><input id="upgradeAutomationRelMultiplier" type="number" min="0" max="100" step="0.5" value="' + relMultiplier + '" style="width:66px"></td><td></td></tr>';
 			content += '<tr><td>First automation slot</td><td align="right"><select id="lpAutomationStartCraftSlot" style="width:66px" ' + startCraftSlotDisabled + '>' + startCraftSlotOptions + '</select></td><td style="opacity:0.8">' + startCraftSlotStatus + '</td><td style="padding-left:18px;">Multiplier abs.</td><td align="right"><input id="upgradeAutomationAbsAggrMultiplier" type="number" min="0" max="100" step="0.5" value="' + absAggrMultiplier + '" style="width:66px"></td><td></td></tr>';
 			const currentPhantomCrew = Number(upgradeAutomationExecutionSummary?.crewTotal || 0);
@@ -3743,7 +3754,7 @@
 					const neutralUpgradingDay = Number(row.neutralUpgradingDay || 0);
 					const neutralBufferDisplay = !row.phantomUpgradeEligible || row.neutralBufferDays == null ? '' : (Number.isFinite(row.neutralBufferDays) ? Number(row.neutralBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
 					const actualSideStyle = row.actualOptimizerSource ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.actualOptimizerDestination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
-					const optimizerDisplayName = row.phantomBlocked ? '<span style="color:#ff8080">' + row.displayName + ' (blocked)</span>' : row.displayName;
+					const optimizerDisplayName = row.phantomBlocked ? '<span style="color:#ff8080">' + row.displayName + ' (blocked)</span>' : (row.neutralPhaseBlocked ? row.displayName + ' (neutral blocked)' : row.displayName);
 					content += '<tr><td' + actualSideStyle + '>' + optimizerDisplayName + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(upgradeAutomationExecutionSummary.neutralPhaseMode ? (row.neutralUpgradingPhase || 0) : (row.neutralUpgradingHour || 0)) || 0).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + neutralBufferDisplay + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalCrew || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalUpgradingHour || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + finalBufferDisplay + '</td></tr>';
 				}
 			} else {
@@ -3890,6 +3901,7 @@
 			}
 			const upgradeAutomationAggressivenessStartHour = el.querySelector('#upgradeAutomationAggressivenessStartHour');
 			const upgradeAutomationNeutralBlockSingleTx = el.querySelector('#upgradeAutomationNeutralBlockSingleTx');
+			const upgradeAutomationBlockSpecialNeutral = el.querySelector('#upgradeAutomationBlockSpecialNeutral');
 			const upgradeAutomationLandingBufferSeconds = el.querySelector('#upgradeAutomationLandingBufferSeconds');
 			const upgradeAutomationFaction = el.querySelector('#upgradeAutomationFaction');
 			const upgradeAutomationAbsAggrBoundaryLow = el.querySelector('#upgradeAutomationAbsAggrBoundaryLow');
@@ -3905,6 +3917,7 @@
 			const applyAggressivenessSettings = async () => {
 				const hourValue = Math.max(0, Math.min(23, parseIntDefault(upgradeAutomationAggressivenessStartHour?.value, 12)));
 				const neutralBlockSingleTx = !!upgradeAutomationNeutralBlockSingleTx?.checked;
+				const blockSpecialNeutral = !!upgradeAutomationBlockSpecialNeutral?.checked;
 				const landingBufferSeconds = Math.max(0, parseIntDefault(upgradeAutomationLandingBufferSeconds?.value, 30));
 				const factionValue = normalizeUpgradeAutomationLpInstance(upgradeAutomationFaction?.value || globalSettings.upgradeAutomationLpInstance || 'MUD');
 				const absAggrBoundaryLow = Math.max(0, parseLocaleFloat(upgradeAutomationAbsAggrBoundaryLow?.value, 20));
@@ -3915,6 +3928,7 @@
 				const absAggrBoundaryHighRaw = absAggrBoundaryHigh * 1000000000;
 				globalSettings.upgradeAutomationAggressivenessStartHour = hourValue;
 				globalSettings.upgradeAutomationNeutralBlockSingleTx = neutralBlockSingleTx;
+				globalSettings.upgradeAutomationBlockSpecialNeutral = blockSpecialNeutral;
 				globalSettings.upgradeAutomationLandingBufferSeconds = landingBufferSeconds;
 				globalSettings.upgradeAutomationLpInstance = factionValue;
 				globalSettings.upgradeAutomationAbsAggrBoundaryLow = absAggrBoundaryLowRaw;
@@ -3949,6 +3963,12 @@
 			if (upgradeAutomationNeutralBlockSingleTx && !upgradeAutomationNeutralBlockSingleTx.dataset.bound) {
 				upgradeAutomationNeutralBlockSingleTx.dataset.bound = '1';
 				upgradeAutomationNeutralBlockSingleTx.addEventListener('change', async () => {
+					await applyAggressivenessSettings();
+				});
+			}
+			if (upgradeAutomationBlockSpecialNeutral && !upgradeAutomationBlockSpecialNeutral.dataset.bound) {
+				upgradeAutomationBlockSpecialNeutral.dataset.bound = '1';
+				upgradeAutomationBlockSpecialNeutral.addEventListener('change', async () => {
 					await applyAggressivenessSettings();
 				});
 			}
@@ -9016,6 +9036,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			upgradeAutomationAggressivenessPct: document.querySelector('#upgradeAutomationAggressivenessPct') ? parseIntDefault(document.querySelector('#upgradeAutomationAggressivenessPct').value, 100) : parseIntDefault(globalSettings.upgradeAutomationAggressivenessPct, 100),
 			upgradeAutomationAggressivenessStartHour: document.querySelector('#upgradeAutomationAggressivenessStartHour') ? parseIntDefault(document.querySelector('#upgradeAutomationAggressivenessStartHour').value, 12) : parseIntDefault(globalSettings.upgradeAutomationAggressivenessStartHour, 12),
 			upgradeAutomationNeutralBlockSingleTx: document.querySelector('#upgradeAutomationNeutralBlockSingleTx') ? document.querySelector('#upgradeAutomationNeutralBlockSingleTx').checked : !!globalSettings.upgradeAutomationNeutralBlockSingleTx,
+			upgradeAutomationBlockSpecialNeutral: document.querySelector('#upgradeAutomationBlockSpecialNeutral') ? document.querySelector('#upgradeAutomationBlockSpecialNeutral').checked : !!globalSettings.upgradeAutomationBlockSpecialNeutral,
 			upgradeAutomationRelMultiplier: document.querySelector('#upgradeAutomationRelMultiplier') ? Number(document.querySelector('#upgradeAutomationRelMultiplier').value) : Math.max(0, Number(globalSettings.upgradeAutomationRelMultiplier ?? 1)),
 			upgradeAutomationAbsAggrMultiplier: document.querySelector('#upgradeAutomationAbsAggrMultiplier') ? Number(document.querySelector('#upgradeAutomationAbsAggrMultiplier').value) : Math.max(0, Number(globalSettings.upgradeAutomationAbsAggrMultiplier ?? 1)),
 			upgradeAutomationPoolSkewMultiplier: document.querySelector('#upgradeAutomationPoolSkewMultiplier') ? Number(document.querySelector('#upgradeAutomationPoolSkewMultiplier').value) : Math.max(0, Number(globalSettings.upgradeAutomationPoolSkewMultiplier ?? 3)),
