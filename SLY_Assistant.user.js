@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-39
+// @aephia-version 0.7.35-40
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-39'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-40'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -740,20 +740,7 @@
 		const cumErr = state.dayKey === dayKey ? Number(state.cumErr || 0) : 0;
 		const ag = computeAggressivenessFromControl(control, cumErr, influxTarget, now);
 		const aggressivenessActive = isUpgradeAutomationAggressivenessActive(now);
-		const utcMinutes = now.getUTCMinutes() + (now.getUTCSeconds() / 60);
-		const windows = getUpgradeAutomationLpSnapshotWindows(now);
-		const hourlyValues = influxTarget.hourlyValues || {};
-		const prevVal = Number.isFinite(influxTarget.prevValue) ? influxTarget.prevValue : 0;
-		const nextVal = Number.isFinite(influxTarget.nextValue) ? influxTarget.nextValue : 0;
-		const lastHourVal = Number.isFinite(hourlyValues[23]) ? hourlyValues[23] : 0;
-		// LP added during the rest of the current hour
-		const frac = Math.max(0, (60 - utcMinutes) / 60);
-		const partialNextHour = (nextVal - prevVal) * frac;
-		// LP added from hour (nextHour+1) through hour 23 (remaining full hours)
-		const remainingFull = Math.max(0, lastHourVal - nextVal);
-		const projectedLpToday = Number.isFinite(control.todayTotal)
-			? control.todayTotal + partialNextHour + remainingFull
-			: null;
+		const projectedLpToday = computeUpgradeAutomationProjectedLpToday(control, influxTarget, now);
 		if (![control.progress, control.avg7Weighted, control.targetNow, control.todayTotal, ag.aggr].every(Number.isFinite)) {
 			throw new Error('lp_control_invalid_values');
 		}
@@ -1388,14 +1375,13 @@
 		};
 	}
 
-	function computeUpgradeAutomationNeutralPlan(crewTotal, installedTodayByComponent = {}, now = new Date()) {
+	function computeUpgradeAutomationNeutralPlan(crewTotal, installedTodayByComponent = {}, now = new Date(), specialRiskControl = null) {
 		const totalCrew = Math.max(0, Math.floor(Number(crewTotal || 0)));
 		const minCrewThreshold = totalCrew * 0.01;
 		const planning = getUpgradeAutomationPlanningHorizon(now);
 		const remainingHours = planning.planningHours;
 		const secondsInRemainingHours = remainingHours * 3600;
-		const blockSpecialNeutral = !!globalSettings?.upgradeAutomationBlockSpecialNeutral;
-		const nextCycleTarget = isUpgradeAutomationNextCycleTarget(globalSettings, now);
+		const riskControl = specialRiskControl || computeUpgradeAutomationSpecialRiskControl(null, now);
 		const rows = [];
 		for (const rawName of UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_ORDER) {
 			const canonicalName = rawName;
@@ -1416,7 +1402,10 @@
 			const bufferDaysPhantom = upgrade24h > 0 ? (inventoryPhantom / upgrade24h) : (inventoryPhantom > 0 ? Number.POSITIVE_INFINITY : null);
 			const phantomBlocked = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
 			const phantomUpgradeEligible = inventoryPhantom > 0 && !phantomBlocked;
-			const neutralPhaseBlocked = blockSpecialNeutral && !nextCycleTarget && isUpgradeAutomationNeutralSpecialBlockedComponent(canonicalName);
+			const specialRiskControlled = !!riskControl?.enabled && isUpgradeAutomationNeutralSpecialBlockedComponent(canonicalName);
+			const specialRiskMultiplier = specialRiskControlled ? Math.max(0, Math.min(1, Number(riskControl.multiplier || 0))) : 1;
+			const specialMaxCrew = specialRiskControlled ? Math.max(0, Math.floor(totalCrew * specialRiskMultiplier)) : Number.POSITIVE_INFINITY;
+			const specialRiskBlocked = specialRiskControlled && specialMaxCrew <= 0;
 			rows.push({
 				key: canonicalName,
 				name: canonicalName,
@@ -1433,7 +1422,12 @@
 				bufferDaysGlobal,
 				phantomBlocked,
 				phantomUpgradeEligible,
-				neutralPhaseBlocked,
+				neutralPhaseBlocked: specialRiskBlocked,
+				specialRiskControlled,
+				specialRiskBlocked,
+				specialRiskMultiplier,
+				specialRiskMaxCrew: specialMaxCrew,
+				specialRiskReason: specialRiskControlled ? String(riskControl.reason || '') : '',
 				lpPerUnit: 0,
 				lpPerSecond: 0,
 				crew: 0,
@@ -1462,6 +1456,7 @@
 		};
 		const isProjectedNeutralCrewAllowed = (row, crew) => {
 			if (!row || !row.phantomUpgradeEligible || Number(row.inventoryPhantom || 0) <= 0 || Number(row.inventoryGlobal || 0) <= 0) return false;
+			if (Number.isFinite(Number(row.specialRiskMaxCrew)) && Math.max(0, Math.floor(Number(crew || 0))) > Number(row.specialRiskMaxCrew)) return false;
 			const projectedBuffer = projectNeutralBufferDays(row, crew);
 			const tier = getUpgradeAutomationBufferTier(projectedBuffer, row.inventoryGlobal);
 			return tier !== 'D' && tier !== 'D_ZERO';
@@ -1560,6 +1555,7 @@
 		const simulateRow = (row, projectedCrew) => {
 			if (!row?.phantomUpgradeEligible || row.neutralPhaseBlocked) return { legal: false };
 			if (!Number.isFinite(projectedCrew) || projectedCrew < 0) return { legal: false };
+			if (Number.isFinite(Number(row.specialRiskMaxCrew)) && Math.max(0, Math.floor(Number(projectedCrew || 0))) > Number(row.specialRiskMaxCrew)) return { legal: false };
 			const projected = projectUpgradeAutomationFinalRow(row, projectedCrew, remainingHours);
 			const projectedHourly = Number(projected.finalUpgradingHour || 0);
 			const availableInventory = Number(row.inventoryGlobal || 0);
@@ -1836,6 +1832,8 @@
 		const dayKey = now.toISOString().slice(0, 10);
 		const cumErr = state.dayKey === dayKey ? Number(state.cumErr || 0) : 0;
 		const ag = computeAggressivenessFromControl(control, cumErr, influxTarget, now);
+		const projectedLpToday = computeUpgradeAutomationProjectedLpToday(control, influxTarget, now);
+		const specialRiskControl = computeUpgradeAutomationSpecialRiskControl(projectedLpToday, now);
 		const nextHour = new Date(now.getTime());
 		nextHour.setUTCMinutes(0, 0, 0);
 		nextHour.setUTCHours(nextHour.getUTCHours() + 1);
@@ -1895,7 +1893,7 @@
 		const effectiveCrewTotal = (!globalSettings?.upgradeAutomationPhantomCrewUnlimited && globalSettings?.upgradeAutomationMaxPhantomCrew != null && Number(globalSettings.upgradeAutomationMaxPhantomCrew) > 0)
 			? Math.min(crewTotal, Number(globalSettings.upgradeAutomationMaxPhantomCrew))
 			: crewTotal;
-		const neutralComponentPlan = computeUpgradeAutomationNeutralPlan(effectiveCrewTotal, installedTodayByComponent, now);
+		const neutralComponentPlan = computeUpgradeAutomationNeutralPlan(effectiveCrewTotal, installedTodayByComponent, now, specialRiskControl);
 		const finalPlan = computeUpgradeAutomationFinalPlan(neutralComponentPlan, ag.aggr, now);
 		const requestedNeutralPhaseMode = !!globalSettings?.upgradeAutomationNeutralBlockSingleTx;
 		const neutralPhaseSnapshotKey = getUpgradeAutomationNeutralPhaseSnapshotKey(globalSettings, now);
@@ -1963,6 +1961,8 @@
 			mode: ag.aggr >= 0.75 ? 'Catch-up' : ag.aggr <= 0.25 ? 'Suppress' : 'Balanced',
 			aggressiveness: ag.aggr,
 			aggressivenessActive,
+			projectedLpToday,
+			specialRiskControl,
 			nextCycleMode: nextCycleTarget ? 'target' : 'neutral',
 			nextCycleTarget,
 			crewTotal,
@@ -2789,10 +2789,7 @@
 		return totalMinutes >= activationMinutes;
 	}
 
-	function computeAbsoluteAggressivenessAdjustment(control, influxTarget, now) {
-		const boundaryLow = Math.max(0, Number(globalSettings?.upgradeAutomationAbsAggrBoundaryLow ?? 20_000_000_000));
-		const boundaryHigh = Math.max(boundaryLow + 1, Number(globalSettings?.upgradeAutomationAbsAggrBoundaryHigh ?? 35_000_000_000));
-		const maxImpact = 1;
+	function computeUpgradeAutomationProjectedLpToday(control, influxTarget, now = new Date()) {
 		const effectiveNow = now || new Date();
 		const utcMinutes = effectiveNow.getUTCMinutes() + (effectiveNow.getUTCSeconds() / 60);
 		const hourlyValues = influxTarget?.hourlyValues || {};
@@ -2801,10 +2798,38 @@
 		const lastHourVal = Number.isFinite(hourlyValues[23]) ? hourlyValues[23] : 0;
 		const frac = Math.max(0, (60 - utcMinutes) / 60);
 		const partialNextHour = (nextVal - prevVal) * frac;
-		const remainingFull = lastHourVal - nextVal;
-		const projectedLpToday = Number.isFinite(control?.todayTotal)
+		const remainingFull = Math.max(0, lastHourVal - nextVal);
+		return Number.isFinite(control?.todayTotal)
 			? control.todayTotal + partialNextHour + remainingFull
 			: null;
+	}
+
+	function computeUpgradeAutomationSpecialRiskControl(projectedLpToday, now = new Date()) {
+		const enabled = !!globalSettings?.upgradeAutomationBlockSpecialNeutral;
+		const boundaryLow = Math.max(0, Number(globalSettings?.upgradeAutomationAbsAggrBoundaryLow ?? 20_000_000_000));
+		const boundaryHigh = Math.max(boundaryLow + 1, Number(globalSettings?.upgradeAutomationAbsAggrBoundaryHigh ?? 35_000_000_000));
+		const planning = getUpgradeAutomationPlanningHorizon(now);
+		const confidenceScore = Math.max(0, Math.min(1, 1 - (Number(planning.remainingHoursExact || 0) / 24)));
+		if (!enabled) {
+			return { enabled: false, multiplier: 1, redemptionScore: 1, confidenceScore, boundaryLow, boundaryHigh, projectedLpToday: null, reason: 'disabled' };
+		}
+		const projected = Number(projectedLpToday);
+		if (!Number.isFinite(projected) || projected <= 0) {
+			return { enabled: true, multiplier: 0, redemptionScore: 0, confidenceScore, boundaryLow, boundaryHigh, projectedLpToday: null, reason: 'missing_projected_lp' };
+		}
+		let redemptionScore = 0;
+		if (projected <= boundaryLow) redemptionScore = 1;
+		else if (projected >= boundaryHigh) redemptionScore = 0;
+		else redemptionScore = (boundaryHigh - projected) / Math.max(1, boundaryHigh - boundaryLow);
+		const multiplier = Math.max(0, Math.min(1, redemptionScore * confidenceScore));
+		return { enabled: true, multiplier, redemptionScore, confidenceScore, boundaryLow, boundaryHigh, projectedLpToday: projected, reason: projected >= boundaryHigh ? 'above_upper_boundary' : 'dynamic' };
+	}
+
+	function computeAbsoluteAggressivenessAdjustment(control, influxTarget, now) {
+		const boundaryLow = Math.max(0, Number(globalSettings?.upgradeAutomationAbsAggrBoundaryLow ?? 20_000_000_000));
+		const boundaryHigh = Math.max(boundaryLow + 1, Number(globalSettings?.upgradeAutomationAbsAggrBoundaryHigh ?? 35_000_000_000));
+		const maxImpact = 1;
+		const projectedLpToday = computeUpgradeAutomationProjectedLpToday(control, influxTarget, now);
 
 		if (!Number.isFinite(projectedLpToday) || projectedLpToday <= 0) return 0;
 		const midpoint = (boundaryLow + boundaryHigh) / 2;
@@ -2979,7 +3004,9 @@
 			`,multiplier_rel=${Number(globalSettings?.upgradeAutomationRelMultiplier ?? 1)}` +
 			`,multiplier_abs=${Number(globalSettings?.upgradeAutomationAbsAggrMultiplier ?? 1)}` +
 			`,target_skew=${Number(globalSettings?.upgradeAutomationPoolSkewMultiplier ?? 3)}` +
-			`,neutral_special_block=${!!globalSettings?.upgradeAutomationBlockSpecialNeutral ? 1 : 0}i` +
+			`,dynamic_fstab_sdu_risk=${!!globalSettings?.upgradeAutomationBlockSpecialNeutral ? 1 : 0}i` +
+			`,fstab_sdu_risk_multiplier=${Number(executionSummary?.specialRiskControl?.multiplier ?? 1)}` +
+			`,fstab_sdu_risk_confidence=${Number(executionSummary?.specialRiskControl?.confidenceScore ?? 0)}` +
 			`,lp_automation_on=${!!globalSettings.upgradeAutomationEnabled ? 1 : 0}i` +
 			`,faction=${influxFieldString(normalizeUpgradeAutomationLpInstance(globalSettings?.upgradeAutomationLpInstance || 'MUD'))}` +
 			`,snapshot_for_hour=${influxFieldString(snapshotForHour)}`
@@ -3677,7 +3704,7 @@
 			content += '<tr><td>LP Automation On/Off</td><td align="right"><input id="lpAutomationEnabledToggle" type="checkbox" ' + (lpAutomationEnabled ? 'checked' : '') + '></td><td colspan="4"></td></tr>';
 			content += '<tr><td>Faction</td><td align="right"><select id="upgradeAutomationFaction" style="width:66px">' + factionOptions + '</select></td><td></td><td style="padding-left:18px;">Lower Boundary</td><td align="right"><input id="upgradeAutomationAbsAggrBoundaryLow" type="number" min="0" max="1000" step="1" value="' + absAggrBoundaryLow + '" style="width:66px"></td><td>Billions</td></tr>';
 			content += '<tr><td>Neutral Phase length</td><td align="right"><input id="upgradeAutomationAggressivenessStartHour" type="number" min="0" max="23" step="1" value="' + selectedAggressivenessStartHour + '" style="width:66px"></td><td style="white-space:nowrap; text-align:left;">hours</td><td style="padding-left:18px;">Upper Boundary</td><td align="right"><input id="upgradeAutomationAbsAggrBoundaryHigh" type="number" min="0" max="1000" step="1" value="' + absAggrBoundaryHigh + '" style="width:66px"></td><td>Billions</td></tr>';
-			content += '<tr><td>Block FSTAB, SDU unless next cycle is Target</td><td align="right"><input id="upgradeAutomationBlockSpecialNeutral" type="checkbox" ' + (blockSpecialNeutral ? 'checked' : '') + '></td><td></td><td style="padding-left:18px;">Multiplier rel.</td><td align="right"><input id="upgradeAutomationRelMultiplier" type="number" min="0" max="100" step="0.5" value="' + relMultiplier + '" style="width:66px"></td><td></td></tr>';
+			content += '<tr><td><span title="Scales Field Stabilizer and Survey Data Unit usage based on projected LP redemption and time remaining. Blocks them when projected redemption is above the upper boundary.">Dynamic FSTAB/SDU Risk Control</span></td><td align="right"><input id="upgradeAutomationBlockSpecialNeutral" type="checkbox" ' + (blockSpecialNeutral ? 'checked' : '') + '></td><td></td><td style="padding-left:18px;">Multiplier rel.</td><td align="right"><input id="upgradeAutomationRelMultiplier" type="number" min="0" max="100" step="0.5" value="' + relMultiplier + '" style="width:66px"></td><td></td></tr>';
 			content += '<tr><td>First automation slot</td><td align="right"><select id="lpAutomationStartCraftSlot" style="width:66px" ' + startCraftSlotDisabled + '>' + startCraftSlotOptions + '</select></td><td style="opacity:0.8">' + startCraftSlotStatus + '</td><td style="padding-left:18px;">Multiplier abs.</td><td align="right"><input id="upgradeAutomationAbsAggrMultiplier" type="number" min="0" max="100" step="0.5" value="' + absAggrMultiplier + '" style="width:66px"></td><td></td></tr>';
 			const currentPhantomCrew = Number(upgradeAutomationExecutionSummary?.crewTotal || 0);
 			const selectedMaxPhantomCrew = globalSettings.upgradeAutomationMaxPhantomCrew != null ? Math.max(0, parseIntDefault(globalSettings.upgradeAutomationMaxPhantomCrew, 0)) : currentPhantomCrew;
@@ -3721,6 +3748,12 @@
 				const projectedLpToday = Number.isFinite(upgradeAutomationLpControl?.projectedLpToday) ? upgradeAutomationLpControl.projectedLpToday : null;
 				const absAdjustment = Number.isFinite(upgradeAutomationLpControl?.absAdjustment) ? upgradeAutomationLpControl.absAdjustment : 0;
 				content += '<tr><td>LP Target Now Hourly</td><td align="right">' + Math.round(lpTargetNowInflux).toLocaleString() + '</td><td>LP Today</td><td align="right">' + Math.round(lpToday).toLocaleString() + '</td><td>Projected LP Today</td><td align="right">' + (projectedLpToday !== null ? Math.round(projectedLpToday).toLocaleString() : '-') + '</td></tr>';
+				const specialRiskControl = upgradeAutomationExecutionSummary?.specialRiskControl || computeUpgradeAutomationSpecialRiskControl(projectedLpToday, new Date());
+				const specialRiskLabel = specialRiskControl?.enabled ? (Math.round(Number(specialRiskControl.multiplier || 0) * 100) + '%') : 'off';
+				const specialRiskDetail = specialRiskControl?.enabled
+					? ('LP ' + (specialRiskControl.projectedLpToday != null ? Math.round(Number(specialRiskControl.projectedLpToday || 0)).toLocaleString() : '-') + ' / confidence ' + Math.round(Number(specialRiskControl.confidenceScore || 0) * 100) + '%')
+					: '';
+				content += '<tr><td>FSTAB/SDU Risk</td><td align="right">' + specialRiskLabel + '</td><td colspan="4" style="opacity:0.75">' + specialRiskDetail + '</td></tr>';
 				content += '<tr><td>' + lpAggPreLabel + '</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrRelative ?? upgradeAutomationLpControl?.rawAggressiveness ?? upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td><td>Aggr. (abs.)</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrAbsolute ?? (1 + absAdjustment)).toFixed(3) + '</td><td style="color:' + lpAggColor + '">Aggr.</td><td align="right" style="color:' + lpAggColor + '">' + Number(upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td></tr>';
 				content += '<tr><td colspan="6">&nbsp;</td></tr>';
 				const yesterdayProfitAtlas = Number(upgradeAutomationExecutionSummary?.yesterdayProfitAtlas || 0);
@@ -3762,7 +3795,8 @@
 					const neutralUpgradingDay = Number(row.neutralUpgradingDay || 0);
 					const neutralBufferDisplay = !row.phantomUpgradeEligible || row.neutralBufferDays == null ? '' : (Number.isFinite(row.neutralBufferDays) ? Number(row.neutralBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
 					const actualSideStyle = row.actualOptimizerSource ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.actualOptimizerDestination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
-					const optimizerDisplayName = row.phantomBlocked ? '<span style="color:#ff8080">' + row.displayName + ' (blocked)</span>' : (row.neutralPhaseBlocked ? row.displayName + ' (neutral blocked)' : row.displayName);
+					const riskLabel = row.specialRiskControlled ? (' (risk ' + Math.round(Number(row.specialRiskMultiplier || 0) * 100) + '%)') : '';
+					const optimizerDisplayName = row.phantomBlocked ? '<span style="color:#ff8080">' + row.displayName + ' (blocked)</span>' : (row.specialRiskBlocked ? row.displayName + ' (risk blocked)' : row.displayName + riskLabel);
 					content += '<tr><td' + actualSideStyle + '>' + optimizerDisplayName + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(upgradeAutomationExecutionSummary.neutralPhaseMode ? (row.neutralUpgradingPhase || 0) : (row.neutralUpgradingHour || 0)) || 0).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + neutralBufferDisplay + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalCrew || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalUpgradingHour || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + finalBufferDisplay + '</td></tr>';
 				}
 			} else {
