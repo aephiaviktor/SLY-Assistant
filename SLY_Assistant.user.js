@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-41
+// @aephia-version 0.7.35-42
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-41'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-42'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -8512,15 +8512,13 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				if(this.value=='') this.style.backgroundColor='white';
 				else this.style.backgroundColor='#fff0d0';
 			}
-			transportResource1.onchange = transportResource2.onchange = transportResource3.onchange = transportResource4.onchange = transportSBResource1.onchange = transportSBResource2.onchange = transportSBResource3.onchange = transportSBResource4.onchange = handleTransportResourceChange;
-			transportResource1.dispatchEvent(new Event("change"));
-			transportResource2.dispatchEvent(new Event("change"));
-			transportResource3.dispatchEvent(new Event("change"));
-			transportResource4.dispatchEvent(new Event("change"));
-			transportSBResource1.dispatchEvent(new Event("change"));
-			transportSBResource2.dispatchEvent(new Event("change"));
-			transportSBResource3.dispatchEvent(new Event("change"));
-			transportSBResource4.dispatchEvent(new Event("change"));
+			[transportResource1Div, transportResource2Div, transportResource3Div, transportResource4Div, transportSBResource1Div, transportSBResource2Div, transportSBResource3Div, transportSBResource4Div].forEach(entryDiv => {
+				if(!entryDiv) return;
+				const selectElem = entryDiv.querySelector('.transport-resource-select');
+				if(!selectElem) return;
+				selectElem.onchange = handleTransportResourceChange;
+				selectElem.dispatchEvent(new Event('change'));
+			});
 			transportPlusRow.querySelectorAll('.transport-resource-entry select').forEach(selectElem => {
 				selectElem.onchange = handleTransportResourceChange;
 				selectElem.dispatchEvent(new Event("change"));
