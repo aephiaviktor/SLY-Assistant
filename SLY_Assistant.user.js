@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-34
+// @aephia-version 0.7.35-35
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-34'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-35'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -8124,14 +8124,14 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				let transportResource = document.createElement('select');
 				transportResource.classList.add('transport-resource-select');
 				transportResource.innerHTML = transportOptStr;
-				transportResource.style.width = '74px';
+				transportResource.style.width = '96px';
 				let transportResourceToken = savedEntry && savedEntry.res ? cargoItems.find(r => r.token == savedEntry.res) : '';
 				transportResource.value = transportResourceToken && transportResourceToken.name ? transportResourceToken.name : '';
 				let transportResourcePerc = document.createElement('input');
 				transportResourcePerc.classList.add('transport-resource-amount');
 				transportResourcePerc.setAttribute('type', 'text');
 				transportResourcePerc.placeholder = '0';
-				transportResourcePerc.style.width = '54px';
+				transportResourcePerc.style.width = '70px';
 				transportResourcePerc.value = savedEntry && savedEntry.amt ? savedEntry.amt : '';
 				let transportResourceTotal = document.createElement('input');
 				transportResourceTotal.classList.add('transport-resource-total');
@@ -9328,6 +9328,65 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		header.addEventListener('touchstart', onDown, { passive: false });
 		container.addEventListener('mousedown', () => bringAssistWindowToFront(container));
 		container.addEventListener('touchstart', () => bringAssistWindowToFront(container), { passive: true });
+	}
+
+	function makeAssistModalContentDraggable(modalSelector) {
+		const modal = document.querySelector(modalSelector);
+		const content = modal?.querySelector('.assist-modal-content');
+		const header = content?.querySelector('.assist-modal-header');
+		if (!modal || !content || !header || content.dataset.dragInit === '1') return;
+		content.dataset.dragInit = '1';
+		let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+		const clampToViewport = (left, top) => {
+			const rect = content.getBoundingClientRect();
+			const maxLeft = Math.max(0, window.innerWidth - rect.width);
+			const maxTop = Math.max(0, window.innerHeight - Math.min(rect.height, window.innerHeight));
+			return {
+				left: Math.max(0, Math.min(left, maxLeft)),
+				top: Math.max(0, Math.min(top, maxTop))
+			};
+		};
+		const anchorContent = () => {
+			const rect = content.getBoundingClientRect();
+			const pos = clampToViewport(rect.left, rect.top);
+			content.style.position = 'absolute';
+			content.style.left = pos.left + 'px';
+			content.style.top = pos.top + 'px';
+			content.style.margin = '0';
+			content.style.transform = 'none';
+		};
+		const onMove = (e) => {
+			const clientX = e.clientX ?? (e.touches && e.touches[0]?.clientX) ?? startX;
+			const clientY = e.clientY ?? (e.touches && e.touches[0]?.clientY) ?? startY;
+			const pos = clampToViewport(startLeft + (clientX - startX), startTop + (clientY - startY));
+			content.style.left = pos.left + 'px';
+			content.style.top = pos.top + 'px';
+			e.preventDefault?.();
+		};
+		const onUp = () => {
+			document.removeEventListener('mousemove', onMove);
+			document.removeEventListener('mouseup', onUp);
+			document.removeEventListener('touchmove', onMove);
+			document.removeEventListener('touchend', onUp);
+		};
+		const onDown = (e) => {
+			if (e.target?.closest('button, input, select, textarea, a, .assist-modal-close')) return;
+			bringAssistWindowToFront(modal);
+			anchorContent();
+			startLeft = parseFloat(content.style.left) || 0;
+			startTop = parseFloat(content.style.top) || 0;
+			startX = e.clientX ?? (e.touches && e.touches[0]?.clientX) ?? startLeft;
+			startY = e.clientY ?? (e.touches && e.touches[0]?.clientY) ?? startTop;
+			document.addEventListener('mousemove', onMove, { passive: false });
+			document.addEventListener('mouseup', onUp);
+			document.addEventListener('touchmove', onMove, { passive: false });
+			document.addEventListener('touchend', onUp);
+			e.preventDefault?.();
+		};
+		header.addEventListener('mousedown', onDown);
+		header.addEventListener('touchstart', onDown, { passive: false });
+		content.addEventListener('mousedown', () => bringAssistWindowToFront(modal));
+		content.addEventListener('touchstart', () => bringAssistWindowToFront(modal), { passive: true });
 	}
 
 	async function assistStatToggle(el) { //statsadd
@@ -13235,6 +13294,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let assistCSS = document.createElement('style');
 			const statusPanelOpacity = globalSettings.statusPanelOpacity / 100;
 			let assistCSSString = `.assist-modal {display: none; position: fixed; z-index: 2; padding-top: 100px; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4); text-align:center; } .assist-modal-content {position: relative; display: inline-block; text-align:left; background-color: rgb(41, 41, 48); margin: auto; padding: 0; border: 1px solid #888; width: 667px; min-width: 450px; max-width: 95%; height: auto; min-height: 50px; max-height: 95%; overflow-y: auto; box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2),0 6px 20px 0 rgba(0,0,0,0.19); -webkit-animation-name: animatetop; -webkit-animation-duration: 0.4s; animation-name: animatetop; animation-duration: 0.4s;} .assist-modal-save { font-size:100%; font-weight:bold; vertical-align:top; margin-left:0.5em; } #assist-modal-error {color: red; margin-left: 5px; margin-right: 5px; font-size: 16px; display:block; } .assist-modal-header-right {color: rgb(255, 190, 77); margin-left: auto !important; font-size: 20px;} .assist-btn {background-color: rgb(41, 41, 48); color: rgb(255, 190, 77); margin-left: 2px; margin-right: 2px;} .assist-btn:hover {background-color: rgba(255, 190, 77, 0.2);} .assist-modal-close { font-size:130%; line-height:80%; vertical-align:middle; } .assist-modal-close:hover, .assist-modal-close:focus {font-weight: bold; text-decoration: none; cursor: pointer;} .assist-modal-btn {color: rgb(255, 190, 77); padding: 5px 5px; margin-right: 5px; text-decoration: none; background-color: rgb(41, 41, 48); border: none; cursor: pointer;} .assist-modal-save:hover { background-color: rgba(255, 190, 77, 0.2); } .assist-modal-header {display: flex; position:sticky; z-index:1000; top:0; left:0; align-items: center; padding: 2px 16px; background-color: #544735; border-bottom: 2px solid rgb(255, 190, 77); color: rgb(255, 190, 77);} .assist-modal-body {padding: 2px 16px; font-size: 12px;} .assist-modal-body > table, .assist-modal-body table.main table {width: 100%;border-collapse: collapse;} .assist-modal-body th, .assist-modal-body td {padding:0 7px 0 0; line-height:130%;} #assistStatus {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 82px; left: 10px; z-index: 1;} #assistStarbaseStatus {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 80px; right: 20px; z-index: 1;} #assistCheck {background-color: rgba(0,0,0,0.75); backdrop-filter: blur(10px); position: absolute; margin: auto; left: 0; right: 0; top: 100px; width: 650px; min-width: 450px; max-width: 75%; z-index: 1;} .dropdown { position: absolute; display: none; margin-top: 25px; margin-left: 152px; background-color: rgb(41, 41, 48); min-width: 120px; box-shadow: 0 8px 16px 0 rgba(0, 0, 0, 0.2); z-index: 2; } .dropdown.show { display: block; } .assist-btn-alt { color: rgb(255, 190, 77); padding: 12px 16px; text-decoration: none; display: block; background-color: rgb(41, 41, 48); border: none; cursor: pointer; } .assist-btn-alt:hover { background-color: rgba(255, 190, 77, 0.2); } #checkresults { padding: 5px; margin-top: 20px; border: 1px solid grey; border-radius: 8px;} .dropdown button {width: 100%; text-align: left;} #assistModal table {border-collapse: collapse;} .assist-scan-row, .assist-scan2-row, .assist-mine-row, .assist-transport-row, .assist-transport-plus-row {background-color: rgba(255, 190, 77, 0.1); border-left: 1px solid white; border-right: 1px solid white; border-bottom: 1px solid white} .show-top-border {background-color: rgba(255, 190, 77, 0.1); border-left: 1px solid white; border-right: 1px solid white; border-top: 1px solid white;} #fleetTable { margin-top: 8px } #assistModal .assist-modal-content { width:clamp(1120px, 74vw, 1420px); max-width:calc(100vw - 40px); } .transport-to-target select, .transport-to-starbase select, .transport-plus-route-manifest select { max-width: 11.5em; } .transport-plus-locations { display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap; } .transport-plus-targets { display:flex; flex-wrap:wrap; gap:6px 12px; margin-bottom:8px; } .transport-plus-target { display:flex; align-items:center; gap:6px; } .transport-plus-routes { display:flex; flex-direction:column; gap:8px; } .assist-transport-plus-route { padding-top:6px; border-top:1px solid rgba(255, 255, 255, 0.15); } .assist-transport-plus-route:first-child { padding-top:0; border-top:none; } .transport-plus-route-header { display:flex; align-items:center; gap:8px; margin-bottom:4px; flex-wrap:wrap; } .transport-plus-route-manifest { display:flex; flex-wrap:wrap; gap:6px 10px; } .transport-plus-route-manifest > div { display:flex; align-items:center; gap:4px; } .transport-resource-entry span { margin-right:4px; } #assistModal .assist-modal-body option { background-color:white } #assistModal .assist-modal-body > table { width: 100% } #fleetTable tbody:nth-child(1) td { position:sticky; top:62px; background-color: #292930; padding: 5px 0 2px 0; } `;
+			assistCSSString += ` #assistModal .assist-modal-header, #settingsModal .assist-modal-header { cursor: move; } #assistModal .transport-to-target, #assistModal .transport-to-starbase { width:100%; align-items:center; } #assistModal .transport-to-target .transport-resource-entry, #assistModal .transport-to-starbase .transport-resource-entry { display:flex; align-items:center; gap:4px; flex:1 1 0; min-width:0; margin-right:18px; } #assistModal .transport-to-target .transport-resource-entry:last-child, #assistModal .transport-to-starbase .transport-resource-entry:last-child { margin-right:0; } #assistModal .transport-to-target .transport-resource-entry:first-of-type, #assistModal .transport-to-starbase .transport-resource-entry:first-of-type { flex-grow:1.25; } #assistModal .transport-to-target .transport-resource-entry > div, #assistModal .transport-to-starbase .transport-resource-entry > div { display:inline-flex !important; align-items:center; gap:4px; flex:0 0 auto; } #assistModal .transport-to-target .transport-resource-select, #assistModal .transport-to-starbase .transport-resource-select { flex:1 1 auto; min-width:96px; max-width:none; width:auto !important; } #assistModal .transport-to-target .transport-resource-amount, #assistModal .transport-to-starbase .transport-resource-amount { width:70px !important; flex:0 0 70px; } `;
 			assistCSSString += ` #assistStats {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 80px; right: 20px; z-index: 1; } #assistStats table { border-collapse: collapse; border-spacing:1px; } #assistStats td, #assistStats th { padding:0 7px 0 0; }`; // statsadd
 			assistCSSString += ` #assistLpAutomation {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 70px; left: 40px; z-index: 1; width: calc((100vw - 80px) * 0.75); max-width: calc(100vw - 80px); max-height: calc(100vh - 60px); overflow: auto; } #assistLpAutomation table { border-collapse: collapse; border-spacing:1px; } #assistLpAutomation td, #assistLpAutomation th { padding:0 7px 0 0; } #assistLpAutomation .lp-auto-section { margin: 0 0 10px 0; } #assistLpAutomation .lp-auto-section-gap { height: 8px; } #assistLpAutomation .lp-auto-summary-table { table-layout: fixed; width: auto; } #assistLpAutomation .lp-auto-summary-table td:nth-child(1):not([colspan]), #assistLpAutomation .lp-auto-summary-table td:nth-child(3):not([colspan]), #assistLpAutomation .lp-auto-summary-table td:nth-child(5):not([colspan]) { min-width: 165px; padding-left: 18px; } #assistLpAutomation .lp-auto-summary-table tr:first-child td { padding-left: 0 !important; } #assistLpAutomation .lp-auto-summary-table td:nth-child(2), #assistLpAutomation .lp-auto-summary-table td:nth-child(4), #assistLpAutomation .lp-auto-summary-table td:nth-child(6) { min-width: 90px; } #assistLpAutomation .lp-auto-influx table, #assistLpAutomation .lp-auto-components table { width: 100%; table-layout: fixed; } #assistLpAutomation .lp-auto-influx td, #assistLpAutomation .lp-auto-influx th, #assistLpAutomation .lp-auto-components td, #assistLpAutomation .lp-auto-components th { overflow: hidden; text-overflow: ellipsis; } #assistLpAutomation .lp-auto-influx tr:first-child td:first-child, #assistLpAutomation .lp-auto-components tr:first-child td:first-child { padding-left: 0 !important; } #assistLpAutomation .lp-auto-influx td:first-child, #assistLpAutomation .lp-auto-influx th:first-child, #assistLpAutomation .lp-auto-components td:first-child, #assistLpAutomation .lp-auto-components th:first-child { width: 16%; overflow: visible; text-overflow: clip; white-space: nowrap; } #assistLpAutomation .lp-auto-influx td:nth-child(n+2), #assistLpAutomation .lp-auto-influx th:nth-child(n+2), #assistLpAutomation .lp-auto-components td:nth-child(n+2), #assistLpAutomation .lp-auto-components th:nth-child(n+2) { width: 12%; overflow: visible; text-overflow: clip; } #assistLpAutomation .lp-auto-influx tr:first-child td, #assistLpAutomation .lp-auto-components tr:first-child td { white-space: normal; line-height: 1.15; } #assistLpAutomation .lp-auto-influx tr:not(:first-child) td, #assistLpAutomation .lp-auto-components tr:not(:first-child) td { white-space: nowrap; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table { table-layout: fixed; width: 100%; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:first-child, #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:first-child { width: 160px !important; min-width: 160px !important; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(2), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(2) { width: 100px !important; min-width: 100px !important; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(3), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(3), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(4), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(4), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(5), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(5), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(6), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(6), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(7), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(7), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(8), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(8) { width: auto !important; min-width: 0 !important; }`;
 			assistCSSString += ` #autoFeeData { display:none; } #automaticFee:checked ~ #autoFeeData { display:block; }`;
@@ -13619,6 +13679,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			assistStatsClose.addEventListener('click', function(e) {assistStatToggle('#assistStats');}); //statsadd
 			let assistLpAutomationClose = document.querySelector('#assistLpAutomation .assist-modal-close');
 			assistLpAutomationClose.addEventListener('click', function(e) {assistStatToggle('#assistLpAutomation');});
+			makeAssistModalContentDraggable('#assistModal');
+			makeAssistModalContentDraggable('#settingsModal');
 			makeAssistWindowDraggable('#assistLpAutomation');
 			let assistStatsReset = document.querySelector('#assistStats #assist-stats-reset'); //statsadd
 			assistStatsReset.addEventListener('click', function(e) { transactionStats={ "start": (Math.round(Date.now() / 1000)), "groups":{} }; solanaReadCount = 0; solanaWriteCount = 0; document.querySelector('#assistStatsContent').innerHTML=''; }); //statsadd
