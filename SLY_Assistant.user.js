@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-32
+// @aephia-version 0.7.35-33
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-32'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-33'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -883,6 +883,12 @@
 		return now.getUTCHours() < phaseHours;
 	}
 
+	function isUpgradeAutomationNextCycleTarget(settings = {}, now = new Date()) {
+		const phaseHours = Math.max(0, Math.min(23, parseIntDefault(settings?.upgradeAutomationAggressivenessStartHour, 12)));
+		const upcomingHour = (now.getUTCHours() + 1) % 24;
+		return upcomingHour >= phaseHours;
+	}
+
 	function isUpgradeAutomationNeutralPhaseActivationWindow(now = new Date()) {
 		const secondsPastHour = now.getUTCMinutes() * 60 + now.getUTCSeconds();
 		return secondsPastHour >= 50 * 60 && secondsPastHour < 51 * 60;
@@ -919,9 +925,7 @@
 		const componentOrder = UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_ORDER;
 		const fixedRowsByComponent = new Map();
 		for (const row of sourceRows) {
-			const phaseHours = Math.max(0, Math.min(23, parseIntDefault(settings?.upgradeAutomationAggressivenessStartHour, 12)));
-			const upcomingHour = (now.getUTCHours() + 1) % 24;
-			const useNeutral = upcomingHour < phaseHours;
+			const useNeutral = !isUpgradeAutomationNextCycleTarget(settings, now);
 			const crew = Math.max(0, Math.floor(Number(useNeutral ? row.crew : (row.finalCrew !== undefined ? row.finalCrew : row.crew)) || 0));
 			const neutralExecutionAmount = settings?.upgradeAutomationNeutralBlockSingleTx ? Number(row.neutralUpgradingPhase ?? computeUpgradeAutomationNeutralPhaseAmount(row, settings) ?? 0) : Number(row.neutralUpgradingHour || 0);
 			const upgradingHour = Math.max(0, Math.floor(Number(useNeutral ? neutralExecutionAmount : (row.finalUpgradingHour !== undefined ? row.finalUpgradingHour : neutralExecutionAmount)) || 0));
@@ -1391,6 +1395,7 @@
 		const remainingHours = planning.planningHours;
 		const secondsInRemainingHours = remainingHours * 3600;
 		const blockSpecialNeutral = !!globalSettings?.upgradeAutomationBlockSpecialNeutral;
+		const nextCycleTarget = isUpgradeAutomationNextCycleTarget(globalSettings, now);
 		const rows = [];
 		for (const rawName of UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_ORDER) {
 			const canonicalName = rawName;
@@ -1411,7 +1416,7 @@
 			const bufferDaysPhantom = upgrade24h > 0 ? (inventoryPhantom / upgrade24h) : (inventoryPhantom > 0 ? Number.POSITIVE_INFINITY : null);
 			const phantomBlocked = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
 			const phantomUpgradeEligible = inventoryPhantom > 0 && !phantomBlocked;
-			const neutralPhaseBlocked = blockSpecialNeutral && isUpgradeAutomationNeutralSpecialBlockedComponent(canonicalName);
+			const neutralPhaseBlocked = blockSpecialNeutral && !nextCycleTarget && isUpgradeAutomationNeutralSpecialBlockedComponent(canonicalName);
 			rows.push({
 				key: canonicalName,
 				name: canonicalName,
@@ -1553,7 +1558,7 @@
 		const currentTotal = () => rows.reduce((sum, row) => sum + (Number(row.neutralUpgradingHour || 0) * remainingNeutralHours + Number(row.finalUpgradingHour || 0) * remainingTargetHours) * Number(row.lpPerUnit || 0), 0);
 		if (direction === 'neutral' || !rows.length || !Number.isFinite(targetFinalLp)) return { rows, neutralLpTargetTotal, finalLpTargetTotal: currentTotal(), targetFinalLp };
 		const simulateRow = (row, projectedCrew) => {
-			if (!row?.phantomUpgradeEligible) return { legal: false };
+			if (!row?.phantomUpgradeEligible || row.neutralPhaseBlocked) return { legal: false };
 			if (!Number.isFinite(projectedCrew) || projectedCrew < 0) return { legal: false };
 			const projected = projectUpgradeAutomationFinalRow(row, projectedCrew, remainingHours);
 			const projectedHourly = Number(projected.finalUpgradingHour || 0);
@@ -1611,7 +1616,7 @@
 			const wantSource = sourceMass * destBias <= destMass * sourceBias;
 			if (wantSource) {
 				const row = direction === 'aggressive' ? orderedRows[left++] : orderedRows[right--];
-				if (!row || !row.phantomUpgradeEligible) continue;
+				if (!row || !row.phantomUpgradeEligible || row.neutralPhaseBlocked) continue;
 				const key = String(row.displayName || row.name || '');
 				if (!sourceNames.has(key)) {
 					sourcePool.push(row);
@@ -1620,7 +1625,7 @@
 				}
 			} else {
 				const row = direction === 'aggressive' ? orderedRows[right--] : orderedRows[left++];
-				if (!row || !row.phantomUpgradeEligible) continue;
+				if (!row || !row.phantomUpgradeEligible || row.neutralPhaseBlocked) continue;
 				const key = String(row.displayName || row.name || '');
 				if (!destNames.has(key)) {
 					destPool.push(row);
@@ -1630,7 +1635,7 @@
 			}
 		}
 		for (const row of orderedRows) {
-			if (!row.phantomUpgradeEligible) continue;
+			if (!row.phantomUpgradeEligible || row.neutralPhaseBlocked) continue;
 			const key = String(row.displayName || row.name || '');
 			if (!sourceNames.has(key) && !destNames.has(key)) {
 				if (sourceMass * destBias <= destMass * sourceBias) {
@@ -1945,6 +1950,7 @@
 		const installedTargetNextHour = Math.max(0, installedTargetNow - installedToday) / Math.max(1, planning.planningHours);
 		const installedNeededNextHour = Math.max(0, installedTargetNextHour);
 		const aggressivenessActive = isUpgradeAutomationAggressivenessActive(now);
+		const nextCycleTarget = isUpgradeAutomationNextCycleTarget(globalSettings, now);
 		upgradeAutomationExecutionCrewDebug = crewDebug;
 		if (![ag.aggr, installedToday, installedTargetNow, installedGap, installedTargetNextHour, installedNeededNextHour, lpPerSecondNow].every(Number.isFinite)) {
 			throw new Error('execution_summary_invalid_values');
@@ -1957,6 +1963,8 @@
 			mode: ag.aggr >= 0.75 ? 'Catch-up' : ag.aggr <= 0.25 ? 'Suppress' : 'Balanced',
 			aggressiveness: ag.aggr,
 			aggressivenessActive,
+			nextCycleMode: nextCycleTarget ? 'target' : 'neutral',
+			nextCycleTarget,
 			crewTotal,
 			effectiveCrewTotal,
 			crewBusy,
@@ -3669,7 +3677,7 @@
 			content += '<tr><td>LP Automation On/Off</td><td align="right"><input id="lpAutomationEnabledToggle" type="checkbox" ' + (lpAutomationEnabled ? 'checked' : '') + '></td><td colspan="4"></td></tr>';
 			content += '<tr><td>Faction</td><td align="right"><select id="upgradeAutomationFaction" style="width:66px">' + factionOptions + '</select></td><td></td><td style="padding-left:18px;">Lower Boundary</td><td align="right"><input id="upgradeAutomationAbsAggrBoundaryLow" type="number" min="0" max="1000" step="1" value="' + absAggrBoundaryLow + '" style="width:66px"></td><td>Billions</td></tr>';
 			content += '<tr><td>Neutral Phase length</td><td align="right"><input id="upgradeAutomationAggressivenessStartHour" type="number" min="0" max="23" step="1" value="' + selectedAggressivenessStartHour + '" style="width:66px"></td><td style="white-space:nowrap; text-align:left;">hours</td><td style="padding-left:18px;">Upper Boundary</td><td align="right"><input id="upgradeAutomationAbsAggrBoundaryHigh" type="number" min="0" max="1000" step="1" value="' + absAggrBoundaryHigh + '" style="width:66px"></td><td>Billions</td></tr>';
-			content += '<tr><td>Block FSTAB, SDU during Neutral Phase</td><td align="right"><input id="upgradeAutomationBlockSpecialNeutral" type="checkbox" ' + (blockSpecialNeutral ? 'checked' : '') + '></td><td></td><td style="padding-left:18px;">Multiplier rel.</td><td align="right"><input id="upgradeAutomationRelMultiplier" type="number" min="0" max="100" step="0.5" value="' + relMultiplier + '" style="width:66px"></td><td></td></tr>';
+			content += '<tr><td>Block FSTAB, SDU unless next cycle is Target</td><td align="right"><input id="upgradeAutomationBlockSpecialNeutral" type="checkbox" ' + (blockSpecialNeutral ? 'checked' : '') + '></td><td></td><td style="padding-left:18px;">Multiplier rel.</td><td align="right"><input id="upgradeAutomationRelMultiplier" type="number" min="0" max="100" step="0.5" value="' + relMultiplier + '" style="width:66px"></td><td></td></tr>';
 			content += '<tr><td>First automation slot</td><td align="right"><select id="lpAutomationStartCraftSlot" style="width:66px" ' + startCraftSlotDisabled + '>' + startCraftSlotOptions + '</select></td><td style="opacity:0.8">' + startCraftSlotStatus + '</td><td style="padding-left:18px;">Multiplier abs.</td><td align="right"><input id="upgradeAutomationAbsAggrMultiplier" type="number" min="0" max="100" step="0.5" value="' + absAggrMultiplier + '" style="width:66px"></td><td></td></tr>';
 			const currentPhantomCrew = Number(upgradeAutomationExecutionSummary?.crewTotal || 0);
 			const selectedMaxPhantomCrew = globalSettings.upgradeAutomationMaxPhantomCrew != null ? Math.max(0, parseIntDefault(globalSettings.upgradeAutomationMaxPhantomCrew, 0)) : currentPhantomCrew;
@@ -3739,10 +3747,12 @@
 
 			content += openSection('lp-auto-components');
 			if (upgradeAutomationExecutionSummary?.neutralComponentPlan?.length) {
-				const highlightNeutral = (new Date().getUTCHours() < Math.max(0, Math.min(23, Number(globalSettings?.upgradeAutomationAggressivenessStartHour ?? 12))));
+				const nextCycleTarget = typeof upgradeAutomationExecutionSummary.nextCycleTarget === 'boolean' ? upgradeAutomationExecutionSummary.nextCycleTarget : isUpgradeAutomationNextCycleTarget(globalSettings, new Date());
+				const nextCycleLabel = nextCycleTarget ? 'Target' : 'Neutral';
+				const highlightNeutral = !nextCycleTarget;
 				const neutralHighlightStyle = highlightNeutral ? ' style="background:rgba(80,200,120,0.16); box-shadow: inset 0 0 0 1px rgba(80,200,120,0.30);"' : '';
 				const finalHighlightStyle = !highlightNeutral ? ' style="background:rgba(80,200,120,0.16); box-shadow: inset 0 0 0 1px rgba(80,200,120,0.30);"' : '';
-				content += '<tr style="opacity:0.66"><td rowspan="2" style="min-width:180px"><b>Optimizer<br>Component</b></td><td rowspan="2" align="right" style="min-width:120px"><b>Installed Today</b></td><td colspan="3" align="center" style="min-width:270px"' + neutralHighlightStyle + '><b>Neutral</b></td><td colspan="3" align="center" style="min-width:270px"' + finalHighlightStyle + '><b>Target</b></td></tr>';
+				content += '<tr style="opacity:0.66"><td rowspan="2" style="min-width:180px"><b>Optimizer<br>Component</b><br><small>Next cycle: ' + nextCycleLabel + '</small></td><td rowspan="2" align="right" style="min-width:120px"><b>Installed Today</b></td><td colspan="3" align="center" style="min-width:270px"' + neutralHighlightStyle + '><b>Neutral</b></td><td colspan="3" align="center" style="min-width:270px"' + finalHighlightStyle + '><b>Target</b></td></tr>';
 			content += '<tr style="opacity:0.66"><td align="right" style="min-width:72px"' + neutralHighlightStyle + '><b>Crew</b></td><td align="right" style="min-width:96px"' + neutralHighlightStyle + '><b>' + (upgradeAutomationExecutionSummary.neutralPhaseMode ? 'Upgrading / Phase' : 'Upgrading<br>/ Hour') + '</b></td><td align="right" style="min-width:78px"' + neutralHighlightStyle + '><b>Buffer Days</b></td><td align="right" style="min-width:72px"' + finalHighlightStyle + '><b>Crew</b></td><td align="right" style="min-width:96px"' + finalHighlightStyle + '><b>Upgrading<br>/ Hour</b></td><td align="right" style="min-width:78px"' + finalHighlightStyle + '><b>Buffer Days</b></td></tr>';
 				for (const row of upgradeAutomationExecutionSummary.neutralComponentPlan) {
 					const finalCraft24h = Number(row.craft24h || 0);
@@ -3752,8 +3762,7 @@
 					const neutralUpgradingDay = Number(row.neutralUpgradingDay || 0);
 					const neutralBufferDisplay = !row.phantomUpgradeEligible || row.neutralBufferDays == null ? '' : (Number.isFinite(row.neutralBufferDays) ? Number(row.neutralBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
 					const actualSideStyle = row.actualOptimizerSource ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.actualOptimizerDestination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
-					const showNeutralBlockedLabel = row.neutralPhaseBlocked && highlightNeutral;
-					const optimizerDisplayName = row.phantomBlocked ? '<span style="color:#ff8080">' + row.displayName + ' (blocked)</span>' : (showNeutralBlockedLabel ? row.displayName + ' (neutral blocked)' : row.displayName);
+					const optimizerDisplayName = row.phantomBlocked ? '<span style="color:#ff8080">' + row.displayName + ' (blocked)</span>' : (row.neutralPhaseBlocked ? row.displayName + ' (neutral blocked)' : row.displayName);
 					content += '<tr><td' + actualSideStyle + '>' + optimizerDisplayName + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(upgradeAutomationExecutionSummary.neutralPhaseMode ? (row.neutralUpgradingPhase || 0) : (row.neutralUpgradingHour || 0)) || 0).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + neutralBufferDisplay + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalCrew || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalUpgradingHour || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + finalBufferDisplay + '</td></tr>';
 				}
 			} else {
