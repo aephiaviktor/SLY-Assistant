@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-31
+// @aephia-version 0.7.35-32
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-31'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-32'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -7596,6 +7596,73 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return manifest.map(entry => ({...entry}));
 	}
 
+	function getTransportTotalKey(res, amt) {
+		return String(res || '') + ':' + Math.max(0, Math.floor(Number(amt || 0)));
+	}
+
+	function getTransportCrewTotalKey(crew) {
+		return String(Math.max(0, Math.floor(Number(crew || 0))));
+	}
+
+	function getTransportSavedDispatched(savedEntry, enabledKey, dispatchedKey, keyKey, currentKey) {
+		if(!savedEntry || !savedEntry[enabledKey]) return 0;
+		if(savedEntry[keyKey] && savedEntry[keyKey] !== currentKey) return 0;
+		return Math.max(0, Math.floor(Number(savedEntry[dispatchedKey] || 0)));
+	}
+
+	function applyTransportTotalRemaining(manifest) {
+		return manifest.map(entry => {
+			const nextEntry = {...entry};
+			if(nextEntry.cargoTotal) {
+				nextEntry.amt = Math.max(0, Math.floor(Number(nextEntry.amt || 0)) - Math.max(0, Math.floor(Number(nextEntry.cargoDispatched || 0))));
+			}
+			if(nextEntry.crewTotal) {
+				nextEntry.crew = Math.max(0, Math.floor(Number(nextEntry.crew || 0)) - Math.max(0, Math.floor(Number(nextEntry.crewDispatched || 0))));
+			}
+			return nextEntry;
+		});
+	}
+
+	function applyTransportLoadedTotals(manifest, loadedCargo, loadedCrew) {
+		for (let entryIndex=0; entryIndex<manifest.length; entryIndex++) {
+			const entry = manifest[entryIndex];
+			if(!entry) continue;
+			if(entry.cargoTotal) {
+				entry.cargoDispatched = Math.min(
+					Math.max(0, Math.floor(Number(entry.amt || 0))),
+					Math.max(0, Math.floor(Number(entry.cargoDispatched || 0))) + Math.max(0, Math.floor(Number((loadedCargo || {})[entryIndex] || 0)))
+				);
+				entry.cargoTotalKey = getTransportTotalKey(entry.res, entry.amt);
+			}
+			if(entryIndex === 0 && entry.crewTotal) {
+				entry.crewDispatched = Math.min(
+					Math.max(0, Math.floor(Number(entry.crew || 0))),
+					Math.max(0, Math.floor(Number(entry.crewDispatched || 0))) + Math.max(0, Math.floor(Number(loadedCrew || 0)))
+				);
+				entry.crewTotalKey = getTransportCrewTotalKey(entry.crew);
+			}
+		}
+	}
+
+	function mergeTransportTotalState(routes, savedRoutes) {
+		return routes.map((route, routeIndex) => {
+			const savedRoute = Array.isArray(savedRoutes) ? (savedRoutes[routeIndex] || {}) : {};
+			const savedManifest = Array.isArray(savedRoute.manifest) ? savedRoute.manifest : [];
+			const manifest = (route.manifest || []).map((entry, entryIndex) => {
+				const savedEntry = savedManifest[entryIndex] || {};
+				const nextEntry = {...entry};
+				const cargoTotalKey = getTransportTotalKey(nextEntry.res, nextEntry.amt);
+				const crewTotalKey = getTransportCrewTotalKey(nextEntry.crew);
+				nextEntry.cargoDispatched = nextEntry.cargoTotal && savedEntry.cargoTotal && savedEntry.cargoTotalKey === cargoTotalKey ? Math.max(0, Math.floor(Number(savedEntry.cargoDispatched || 0))) : 0;
+				nextEntry.cargoTotalKey = cargoTotalKey;
+				nextEntry.crewDispatched = entryIndex === 0 && nextEntry.crewTotal && savedEntry.crewTotal && savedEntry.crewTotalKey === crewTotalKey ? Math.max(0, Math.floor(Number(savedEntry.crewDispatched || 0))) : 0;
+				nextEntry.crewTotalKey = crewTotalKey;
+				return nextEntry;
+			});
+			return {...route, manifest};
+		});
+	}
+
 	function getTransportPlusTargetCount(fleetParsedData, target1Coord = '') {
 		const savedCount = parseInt(fleetParsedData && fleetParsedData.transportPlusTargetCount);
 		if(savedCount > 0) return savedCount;
@@ -7636,10 +7703,21 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const manifest = [];
 			for(let manifestIndex=0; manifestIndex<4; manifestIndex++) {
 				const savedEntry = savedManifest[manifestIndex] || {};
+				const res = savedEntry.res || '';
+				const amt = savedEntry.amt || 0;
+				const crew = savedEntry.crew || 0;
+				const cargoTotalKey = getTransportTotalKey(res, amt);
+				const crewTotalKey = getTransportCrewTotalKey(crew);
 				manifest.push({
-					res: savedEntry.res || '',
-					amt: savedEntry.amt || 0,
-					crew: savedEntry.crew || 0
+					res: res,
+					amt: amt,
+					crew: crew,
+					cargoTotal: !!savedEntry.cargoTotal,
+					cargoDispatched: getTransportSavedDispatched(savedEntry, 'cargoTotal', 'cargoDispatched', 'cargoTotalKey', cargoTotalKey),
+					cargoTotalKey: cargoTotalKey,
+					crewTotal: !!savedEntry.crewTotal,
+					crewDispatched: getTransportSavedDispatched(savedEntry, 'crewTotal', 'crewDispatched', 'crewTotalKey', crewTotalKey),
+					crewTotalKey: crewTotalKey
 				});
 			}
 			routes.push({
@@ -8035,32 +8113,50 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			transportResources.forEach( function(resource) {transportOptStr += '<option value="' + resource + '">' + resource + '</option>';});
 			const createTransportResourceDiv = (savedEntry, includeCrew = false) => {
 				let transportResource = document.createElement('select');
+				transportResource.classList.add('transport-resource-select');
 				transportResource.innerHTML = transportOptStr;
+				transportResource.style.width = '74px';
 				let transportResourceToken = savedEntry && savedEntry.res ? cargoItems.find(r => r.token == savedEntry.res) : '';
 				transportResource.value = transportResourceToken && transportResourceToken.name ? transportResourceToken.name : '';
 				let transportResourcePerc = document.createElement('input');
+				transportResourcePerc.classList.add('transport-resource-amount');
 				transportResourcePerc.setAttribute('type', 'text');
 				transportResourcePerc.placeholder = '0';
-				transportResourcePerc.style.width = '60px';
+				transportResourcePerc.style.width = '54px';
 				transportResourcePerc.value = savedEntry && savedEntry.amt ? savedEntry.amt : '';
+				let transportResourceTotal = document.createElement('input');
+				transportResourceTotal.classList.add('transport-resource-total');
+				transportResourceTotal.setAttribute('type', 'checkbox');
+				transportResourceTotal.title = 'Treat this cargo amount as a total to dispatch, not per roundtrip.';
+				transportResourceTotal.setAttribute('aria-label', 'Cargo total');
+				transportResourceTotal.checked = !!(savedEntry && savedEntry.cargoTotal);
 				let transportResourceDiv = document.createElement('div');
 				transportResourceDiv.classList.add('transport-resource-entry');
-				transportResourceDiv.appendChild(transportResource);
-				transportResourceDiv.appendChild(transportResourcePerc);
 				if(includeCrew) {
 					let transportResourceCrewBlock = document.createElement('div');
 					transportResourceCrewBlock.style.display = 'inline-block';
 					let transportResourceCrewText = document.createElement('span');
 					transportResourceCrewText.innerHTML = 'Crew:';
 					let transportResourceCrew = document.createElement('input');
+					transportResourceCrew.classList.add('transport-crew-amount');
 					transportResourceCrew.setAttribute('type', 'text');
 					transportResourceCrew.placeholder = '0';
-					transportResourceCrew.style.width = '50px';
+					transportResourceCrew.style.width = '46px';
 					transportResourceCrew.value = savedEntry && savedEntry.crew ? savedEntry.crew : '';
+					let transportResourceCrewTotal = document.createElement('input');
+					transportResourceCrewTotal.classList.add('transport-crew-total');
+					transportResourceCrewTotal.setAttribute('type', 'checkbox');
+					transportResourceCrewTotal.title = 'Treat this crew amount as a total to dispatch, not per roundtrip.';
+					transportResourceCrewTotal.setAttribute('aria-label', 'Crew total');
+					transportResourceCrewTotal.checked = !!(savedEntry && savedEntry.crewTotal);
 					transportResourceCrewBlock.appendChild(transportResourceCrewText);
 					transportResourceCrewBlock.appendChild(transportResourceCrew);
+					transportResourceCrewBlock.appendChild(transportResourceCrewTotal);
 					transportResourceDiv.appendChild(transportResourceCrewBlock);
 				}
+				transportResourceDiv.appendChild(transportResource);
+				transportResourceDiv.appendChild(transportResourcePerc);
+				transportResourceDiv.appendChild(transportResourceTotal);
 				return transportResourceDiv;
 			};
 			const padTransportPlusIndex = (index) => String(index).padStart(2, '0');
@@ -8086,11 +8182,17 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const readTransportPlusRouteBlock = (routeElem) => {
 				let routeSubwarpPref = parseInt(routeElem.querySelector('.transport-plus-movetype').value) || 0;
 				let manifest = Array.from(routeElem.querySelectorAll('.transport-resource-entry')).map((entryElem, entryIndex) => {
-					let resourceName = entryElem.children[0].value;
+					let resourceName = entryElem.querySelector('.transport-resource-select').value;
 					let resourceToken = resourceName !== '' ? cargoItems.find(r => r.name == resourceName).token : '';
-					let resourceAmt = parseIntKMG(entryElem.children[1].value) || 0;
-					let crewAmt = entryIndex == 0 && entryElem.children[2] ? parseIntKMG(entryElem.children[2].children[1].value) || 0 : 0;
-					return { res: resourceToken, amt: resourceAmt, crew: crewAmt };
+					let resourceAmt = parseIntKMG(entryElem.querySelector('.transport-resource-amount').value) || 0;
+					let crewAmt = entryIndex == 0 && entryElem.querySelector('.transport-crew-amount') ? parseIntKMG(entryElem.querySelector('.transport-crew-amount').value) || 0 : 0;
+					return {
+						res: resourceToken,
+						amt: resourceAmt,
+						crew: crewAmt,
+						cargoTotal: !!entryElem.querySelector('.transport-resource-total')?.checked,
+						crewTotal: entryIndex == 0 ? !!entryElem.querySelector('.transport-crew-total')?.checked : false
+					};
 				});
 				return {
 					subwarpPref: routeSubwarpPref,
@@ -8135,148 +8237,29 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				routeWrapper.appendChild(routeManifest);
 				return routeWrapper;
 			};
-			let transportResource1 = document.createElement('select');
-			transportResource1.innerHTML = transportOptStr;
-			let transportResource1Token = fleetParsedData && fleetParsedData.transportResource1 && fleetParsedData.transportResource1 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportResource1) : '';
-			transportResource1.value = transportResource1Token && transportResource1Token.name ? transportResource1Token.name : '';
-			let transportResource1Perc = document.createElement('input');
-			transportResource1Perc.setAttribute('type', 'text');
-			transportResource1Perc.placeholder = '0';
-			transportResource1Perc.style.width = '60px';
-			transportResource1Perc.value = fleetParsedData && fleetParsedData.transportResource1Perc ? fleetParsedData.transportResource1Perc : '';
-
-			let transportResource1CrewBlock = document.createElement('div');
-			transportResource1CrewBlock.style.display = 'inline-block';
-			let transportResource1CrewText = document.createElement('span');
-			transportResource1CrewText.innerHTML='Crew:';
-			let transportResource1Crew = document.createElement('input');
-			transportResource1Crew.setAttribute('type', 'text');
-			transportResource1Crew.placeholder = '0';
-			transportResource1Crew.style.width = '50px';
-			transportResource1Crew.style.marginRight = '10px';
-			transportResource1Crew.value = fleetParsedData && fleetParsedData.transportResource1Crew ? fleetParsedData.transportResource1Crew : '';
-
-			let transportResource1Div = document.createElement('div');
-			transportResource1Div.appendChild(transportResource1);
-			transportResource1Div.appendChild(transportResource1Perc);
-			transportResource1CrewBlock.appendChild(transportResource1CrewText);
-			transportResource1CrewBlock.appendChild(transportResource1Crew);
-			transportResource1Div.appendChild(transportResource1CrewBlock);
-
-			let transportResource2 = document.createElement('select');
-			transportResource2.innerHTML = transportOptStr;
-			let transportResource2Token = fleetParsedData && fleetParsedData.transportResource2 && fleetParsedData.transportResource2 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportResource2) : '';
-			transportResource2.value = transportResource2Token && transportResource2Token.name ? transportResource2Token.name : '';
-			let transportResource2Perc = document.createElement('input');
-			transportResource2Perc.setAttribute('type', 'text');
-			transportResource2Perc.placeholder = '0';
-			transportResource2Perc.style.width = '60px';
-			transportResource2Perc.style.marginRight = '10px';
-			transportResource2Perc.value = fleetParsedData && fleetParsedData.transportResource2Perc ? fleetParsedData.transportResource2Perc : '';
-			let transportResource2Div = document.createElement('div');
-			transportResource2Div.appendChild(transportResource2);
-			transportResource2Div.appendChild(transportResource2Perc);
-
-			let transportResource3 = document.createElement('select');
-			transportResource3.innerHTML = transportOptStr;
-			let transportResource3Token = fleetParsedData && fleetParsedData.transportResource3 && fleetParsedData.transportResource3 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportResource3) : '';
-			transportResource3.value = transportResource3Token && transportResource3Token.name ? transportResource3Token.name : '';
-			let transportResource3Perc = document.createElement('input');
-			transportResource3Perc.setAttribute('type', 'text');
-			transportResource3Perc.placeholder = '0';
-			transportResource3Perc.style.width = '60px';
-			transportResource3Perc.style.marginRight = '10px';
-			transportResource3Perc.value = fleetParsedData && fleetParsedData.transportResource3Perc ? fleetParsedData.transportResource3Perc : '';
-			let transportResource3Div = document.createElement('div');
-			transportResource3Div.appendChild(transportResource3);
-			transportResource3Div.appendChild(transportResource3Perc);
-
-			let transportResource4 = document.createElement('select');
-			transportResource4.innerHTML = transportOptStr;
-			let transportResource4Token = fleetParsedData && fleetParsedData.transportResource4 && fleetParsedData.transportResource4 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportResource4) : '';
-			transportResource4.value = transportResource4Token && transportResource4Token.name ? transportResource4Token.name : '';
-			let transportResource4Perc = document.createElement('input');
-			transportResource4Perc.setAttribute('type', 'text');
-			transportResource4Perc.placeholder = '0';
-			transportResource4Perc.style.width = '60px';
-			transportResource4Perc.value = fleetParsedData && fleetParsedData.transportResource4Perc ? fleetParsedData.transportResource4Perc : '';
-			let transportResource4Div = document.createElement('div');
-			transportResource4Div.appendChild(transportResource4);
-			transportResource4Div.appendChild(transportResource4Perc);
+			const createLegacyTransportResourceDiv = (prefix, includeCrew = false) => {
+				return createTransportResourceDiv({
+					res: fleetParsedData && fleetParsedData[prefix] ? fleetParsedData[prefix] : '',
+					amt: fleetParsedData && fleetParsedData[prefix + 'Perc'] ? fleetParsedData[prefix + 'Perc'] : '',
+					crew: fleetParsedData && fleetParsedData[prefix + 'Crew'] ? fleetParsedData[prefix + 'Crew'] : '',
+					cargoTotal: !!(fleetParsedData && fleetParsedData[prefix + 'Total']),
+					crewTotal: !!(fleetParsedData && fleetParsedData[prefix + 'CrewTotal'])
+				}, includeCrew);
+			};
+			let transportResource1Div = createLegacyTransportResourceDiv('transportResource1', true);
+			let transportResource2Div = createLegacyTransportResourceDiv('transportResource2');
+			let transportResource3Div = createLegacyTransportResourceDiv('transportResource3');
+			let transportResource4Div = createLegacyTransportResourceDiv('transportResource4');
 
 			let transportLabel2 = document.createElement('div');
 			transportLabel2.innerHTML = 'To Starbase:';
 			transportLabel2.style.width = '84px';
 			transportLabel2.style.minWidth = '84px';
 
-			let transportSBResource1 = document.createElement('select');
-			transportSBResource1.innerHTML = transportOptStr;
-			let transportSBResource1Token = fleetParsedData && fleetParsedData.transportSBResource1 && fleetParsedData.transportSBResource1 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportSBResource1) : '';
-			transportSBResource1.value = transportSBResource1Token && transportSBResource1Token.name ? transportSBResource1Token.name : '';
-			let transportSBResource1Perc = document.createElement('input');
-			transportSBResource1Perc.setAttribute('type', 'text');
-			transportSBResource1Perc.placeholder = '0';
-			transportSBResource1Perc.style.width = '60px';
-			transportSBResource1Perc.value = fleetParsedData && fleetParsedData.transportSBResource1Perc ? fleetParsedData.transportSBResource1Perc : '';
-
-			let transportSBResource1CrewBlock = document.createElement('div');
-			transportSBResource1CrewBlock.style.display = 'inline-block';
-			let transportSBResource1CrewText = document.createElement('span');
-			transportSBResource1CrewText.innerHTML='Crew:';
-			let transportSBResource1Crew = document.createElement('input');
-			transportSBResource1Crew.setAttribute('type', 'text');
-			transportSBResource1Crew.placeholder = '0';
-			transportSBResource1Crew.style.width = '50px';
-			transportSBResource1Crew.style.marginRight = '10px';
-			transportSBResource1Crew.value = fleetParsedData && fleetParsedData.transportSBResource1Crew ? fleetParsedData.transportSBResource1Crew : '';
-
-			let transportSBResource1Div = document.createElement('div');
-			transportSBResource1Div.appendChild(transportSBResource1);
-			transportSBResource1Div.appendChild(transportSBResource1Perc);
-			transportSBResource1CrewBlock.appendChild(transportSBResource1CrewText);
-			transportSBResource1CrewBlock.appendChild(transportSBResource1Crew);
-			transportSBResource1Div.appendChild(transportSBResource1CrewBlock);
-
-			let transportSBResource2 = document.createElement('select');
-			transportSBResource2.innerHTML = transportOptStr;
-			let transportSBResource2Token = fleetParsedData && fleetParsedData.transportSBResource2 && fleetParsedData.transportSBResource2 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportSBResource2) : '';
-			transportSBResource2.value = transportSBResource2Token && transportSBResource2Token.name ? transportSBResource2Token.name : '';
-			let transportSBResource2Perc = document.createElement('input');
-			transportSBResource2Perc.setAttribute('type', 'text');
-			transportSBResource2Perc.placeholder = '0';
-			transportSBResource2Perc.style.width = '60px';
-			transportSBResource2Perc.style.marginRight = '10px';
-			transportSBResource2Perc.value = fleetParsedData && fleetParsedData.transportSBResource2Perc ? fleetParsedData.transportSBResource2Perc : '';
-			let transportSBResource2Div = document.createElement('div');
-			transportSBResource2Div.appendChild(transportSBResource2);
-			transportSBResource2Div.appendChild(transportSBResource2Perc);
-
-			let transportSBResource3 = document.createElement('select');
-			transportSBResource3.innerHTML = transportOptStr;
-			let transportSBResource3Token = fleetParsedData && fleetParsedData.transportSBResource3 && fleetParsedData.transportSBResource3 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportSBResource3) : '';
-			transportSBResource3.value = transportSBResource3Token && transportSBResource3Token.name ? transportSBResource3Token.name : '';
-			let transportSBResource3Perc = document.createElement('input');
-			transportSBResource3Perc.setAttribute('type', 'text');
-			transportSBResource3Perc.placeholder = '0';
-			transportSBResource3Perc.style.width = '60px';
-			transportSBResource3Perc.style.marginRight = '10px';
-			transportSBResource3Perc.value = fleetParsedData && fleetParsedData.transportSBResource3Perc ? fleetParsedData.transportSBResource3Perc : '';
-			let transportSBResource3Div = document.createElement('div');
-			transportSBResource3Div.appendChild(transportSBResource3);
-			transportSBResource3Div.appendChild(transportSBResource3Perc);
-
-			let transportSBResource4 = document.createElement('select');
-			transportSBResource4.innerHTML = transportOptStr;
-			let transportSBResource4Token = fleetParsedData && fleetParsedData.transportSBResource4 && fleetParsedData.transportSBResource4 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportSBResource4) : '';
-			transportSBResource4.value = transportSBResource4Token && transportSBResource4Token.name ? transportSBResource4Token.name : '';
-			let transportSBResource4Perc = document.createElement('input');
-			transportSBResource4Perc.setAttribute('type', 'text');
-			transportSBResource4Perc.placeholder = '0';
-			transportSBResource4Perc.style.width = '60px';
-			transportSBResource4Perc.value = fleetParsedData && fleetParsedData.transportSBResource4Perc ? fleetParsedData.transportSBResource4Perc : '';
-			let transportSBResource4Div = document.createElement('div');
-			transportSBResource4Div.appendChild(transportSBResource4);
-			transportSBResource4Div.appendChild(transportSBResource4Perc);
+			let transportSBResource1Div = createLegacyTransportResourceDiv('transportSBResource1', true);
+			let transportSBResource2Div = createLegacyTransportResourceDiv('transportSBResource2');
+			let transportSBResource3Div = createLegacyTransportResourceDiv('transportSBResource3');
+			let transportSBResource4Div = createLegacyTransportResourceDiv('transportSBResource4');
 
 			let transportTd = document.createElement('td');
 			transportTd.setAttribute('colspan', '8');
@@ -8922,6 +8905,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 			let rowErrBool = false;
 			let fleetPK = row.getAttribute('pk');
+			let fleetSavedData = await GM.getValue(fleetPK, '{}');
+			let fleetParsedData = JSON.parse(fleetSavedData);
 			let fleetName = row.children[0].firstChild.innerText;
 			let fleetAssignment = row.children[1].firstChild.value;
 			//let fleetDestCoord = validateCoordInput(row.children[2].firstChild.value);	//fleetDestCoord = fleetDestCoord ? fleetDestCoord.replace('.', ',') : fleetDestCoord;
@@ -8950,11 +8935,17 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let transportPlusRoutes = Array.from(transportPlusRouteElems).map(routeElem => {
 				let routeSubwarpPref = parseInt(routeElem.querySelector('.transport-plus-movetype').value) || 0;
 				let manifest = Array.from(routeElem.querySelectorAll('.transport-resource-entry')).map((entryElem, entryIndex) => {
-					let resourceName = entryElem.children[0].value;
+					let resourceName = entryElem.querySelector('.transport-resource-select').value;
 					let resourceToken = resourceName !== '' ? cargoItems.find(r => r.name == resourceName).token : '';
-					let resourceAmt = parseIntKMG(entryElem.children[1].value) || 0;
-					let crewAmt = entryIndex == 0 && entryElem.children[2] ? parseIntKMG(entryElem.children[2].children[1].value) || 0 : 0;
-					return { res: resourceToken, amt: resourceAmt, crew: crewAmt };
+					let resourceAmt = parseIntKMG(entryElem.querySelector('.transport-resource-amount').value) || 0;
+					let crewAmt = entryIndex == 0 && entryElem.querySelector('.transport-crew-amount') ? parseIntKMG(entryElem.querySelector('.transport-crew-amount').value) || 0 : 0;
+					return {
+						res: resourceToken,
+						amt: resourceAmt,
+						crew: crewAmt,
+						cargoTotal: !!entryElem.querySelector('.transport-resource-total')?.checked,
+						crewTotal: entryIndex == 0 ? !!entryElem.querySelector('.transport-crew-total')?.checked : false
+					};
 				});
 				return {
 					subwarpPref: routeSubwarpPref,
@@ -8962,6 +8953,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					manifest: manifest
 				};
 			});
+			transportPlusRoutes = mergeTransportTotalState(transportPlusRoutes, fleetParsedData && fleetParsedData.transportPlusRoutes);
 			transportPlusRoutes = getTransportPlusRoutes({ transportPlusRoutes: transportPlusRoutes }, transportPlusTargetValues.length + 1);
 			const transportPlusTargetCoords = transportPlusTargetValues.map(coord => ConvertCoords(coord));
 
@@ -9035,39 +9027,31 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let fleetMineResource = mineRows[i].children[1].children[1].value;
 			fleetMineResource = fleetMineResource !== '' ? cargoItems.find(r => r.name == fleetMineResource).token : '';
 
+			const readTransportResourceEntry = (entryElem, includeCrew = false) => {
+				let resource = entryElem.querySelector('.transport-resource-select').value;
+				resource = resource !== '' ? cargoItems.find(r => r.name == resource).token : '';
+				return {
+					res: resource,
+					amt: parseIntKMG(entryElem.querySelector('.transport-resource-amount').value) || 0,
+					cargoTotal: !!entryElem.querySelector('.transport-resource-total')?.checked,
+					crew: includeCrew && entryElem.querySelector('.transport-crew-amount') ? parseIntKMG(entryElem.querySelector('.transport-crew-amount').value) || 0 : 0,
+					crewTotal: includeCrew ? !!entryElem.querySelector('.transport-crew-total')?.checked : false
+				};
+			};
+
 			let transportToTarget = transportRows[i].querySelectorAll(':scope > .transport-to-target > div');
-			let transportResource1 = transportToTarget[1].children[0].value;
-			transportResource1 = transportResource1 !== '' ? cargoItems.find(r => r.name == transportResource1).token : '';
-			let transportResource1Perc = parseIntKMG(transportToTarget[1].children[1].value) || 0;
-			let transportResource1Crew = parseIntKMG(transportToTarget[1].children[2].children[1].value) || 0;
-			let transportResource2 = transportToTarget[2].children[0].value;
-			transportResource2 = transportResource2 !== '' ? cargoItems.find(r => r.name == transportResource2).token : '';
-			let transportResource2Perc = parseIntKMG(transportToTarget[2].children[1].value) || 0;
-			let transportResource3 = transportToTarget[3].children[0].value;
-			transportResource3 = transportResource3 !== '' ? cargoItems.find(r => r.name == transportResource3).token : '';
-			let transportResource3Perc = parseIntKMG(transportToTarget[3].children[1].value) || 0;
-			let transportResource4 = transportToTarget[4].children[0].value;
-			transportResource4 = transportResource4 !== '' ? cargoItems.find(r => r.name == transportResource4).token : '';
-			let transportResource4Perc = parseIntKMG(transportToTarget[4].children[1].value) || 0;
+			let transportResource1Entry = readTransportResourceEntry(transportToTarget[1], true);
+			let transportResource2Entry = readTransportResourceEntry(transportToTarget[2]);
+			let transportResource3Entry = readTransportResourceEntry(transportToTarget[3]);
+			let transportResource4Entry = readTransportResourceEntry(transportToTarget[4]);
 
 			let transportToStarbase = transportRows[i].querySelectorAll(':scope > .transport-to-starbase > div');
-			let transportSBResource1 = transportToStarbase[1].children[0].value;
-			transportSBResource1 = transportSBResource1 !== '' ? cargoItems.find(r => r.name == transportSBResource1).token : '';
-			let transportSBResource1Perc = parseIntKMG(transportToStarbase[1].children[1].value) || 0;
-			let transportSBResource1Crew = parseIntKMG(transportToStarbase[1].children[2].children[1].value) || 0;
-			let transportSBResource2 = transportToStarbase[2].children[0].value;
-			transportSBResource2 = transportSBResource2 !== '' ? cargoItems.find(r => r.name == transportSBResource2).token : '';
-			let transportSBResource2Perc = parseIntKMG(transportToStarbase[2].children[1].value) || 0;
-			let transportSBResource3 = transportToStarbase[3].children[0].value;
-			transportSBResource3 = transportSBResource3 !== '' ? cargoItems.find(r => r.name == transportSBResource3).token : '';
-			let transportSBResource3Perc = parseIntKMG(transportToStarbase[3].children[1].value) || 0;
-			let transportSBResource4 = transportToStarbase[4].children[0].value;
-			transportSBResource4 = transportSBResource4 !== '' ? cargoItems.find(r => r.name == transportSBResource4).token : '';
-			let transportSBResource4Perc = parseIntKMG(transportToStarbase[4].children[1].value) || 0;
+			let transportSBResource1Entry = readTransportResourceEntry(transportToStarbase[1], true);
+			let transportSBResource2Entry = readTransportResourceEntry(transportToStarbase[2]);
+			let transportSBResource3Entry = readTransportResourceEntry(transportToStarbase[3]);
+			let transportSBResource4Entry = readTransportResourceEntry(transportToStarbase[4]);
 
 			if (rowErrBool === false) {
-				let fleetSavedData = await GM.getValue(fleetPK, '{}');
-				let fleetParsedData = JSON.parse(fleetSavedData);
 				let fleetMoveTarget = fleetParsedData && fleetParsedData.moveTarget ? fleetParsedData.moveTarget : '';
 				let fleetTransportPlusRouteIndex = getTransportPlusRouteIndex(fleetParsedData, transportPlusRoutes.length);
 				if(fleetAssignment !== 'Supply Chain') fleetTransportPlusRouteIndex = null;
@@ -9086,6 +9070,14 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				let scanBlock = buildScanBlock(destCoords[0], destCoords[1], scanPattern, scanPatternLength);
 
 				let fleetScanEnd = fleetParsedData && fleetParsedData.scanEnd ? fleetParsedData.scanEnd : 0;
+				const getLegacyCargoDispatched = (prefix, entry) => {
+					const key = getTransportTotalKey(entry.res, entry.amt);
+					return entry.cargoTotal && fleetParsedData && fleetParsedData[prefix + 'Total'] && fleetParsedData[prefix + 'TotalKey'] === key ? Math.max(0, Math.floor(Number(fleetParsedData[prefix + 'Dispatched'] || 0))) : 0;
+				};
+				const getLegacyCrewDispatched = (prefix, entry) => {
+					const key = getTransportCrewTotalKey(entry.crew);
+					return entry.crewTotal && fleetParsedData && fleetParsedData[prefix + 'CrewTotal'] && fleetParsedData[prefix + 'CrewTotalKey'] === key ? Math.max(0, Math.floor(Number(fleetParsedData[prefix + 'CrewDispatched'] || 0))) : 0;
+				};
 
 				//await GM.setValue(fleetPK, `{\"name\": \"${fleetName}\", \"assignment\": \"${fleetAssignment}\", \"mineResource\": \"${fleetMineResource}\", \"dest\": \"${fleetDestCoord}\", \"starbase\": \"${fleetStarbaseCoord}\", \"moveType\": \"${moveType}\", \"subwarpPref\": \"${subwarpPref}\", \"moveTarget\": \"${fleetMoveTarget}\", \"transportResource1\": \"${transportResource1}\", \"transportResource1Perc\": ${transportResource1Perc}, \"transportResource1Crew\": ${transportResource1Crew}, \"transportResource2\": \"${transportResource2}\", \"transportResource2Perc\": ${transportResource2Perc}, \"transportResource3\": \"${transportResource3}\", \"transportResource3Perc\": ${transportResource3Perc}, \"transportResource4\": \"${transportResource4}\", \"transportResource4Perc\": ${transportResource4Perc}, \"transportSBResource1\": \"${transportSBResource1}\", \"transportSBResource1Perc\": ${transportSBResource1Perc}, \"transportSBResource1Crew\": ${transportSBResource1Crew}, \"transportSBResource2\": \"${transportSBResource2}\", \"transportSBResource2Perc\": ${transportSBResource2Perc}, \"transportSBResource3\": \"${transportSBResource3}\", \"transportSBResource3Perc\": ${transportSBResource3Perc}, \"transportSBResource4\": \"${transportSBResource4}\", \"transportSBResource4Perc\": ${transportSBResource4Perc}, \"scanBlock\": ${JSON.stringify(scanBlock)}, \"scanMin\": ${scanMin}, \"scanMin2\": ${scanMin2}, \"scanMin3\": ${scanMin3}, \"scanSearchDist\": ${scanSearchDist}, \"scanClusterFactor\": ${scanClusterFactor}, \"scanNeighborhoodMinGood\": ${scanNeighborhoodMinGood}, \"scanCheckWhileCooldownLeft\": ${scanCheckWhileCooldownLeft}, \"scanBypassPercent\": ${scanBypassPercent}, \"scanHomeAtPercent\": ${scanHomeAtPercent}, \"scanPattern\": \"${scanPattern}\", \"scanPatternLength\": ${scanPatternLength}, \"scanMove\": \"${scanMove}\", \"scanEnd\": ${fleetScanEnd} }`);
 				let fleet = {
@@ -9097,24 +9089,54 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					moveType: moveType,
 					subwarpPref: subwarpPref,
 					moveTarget: fleetMoveTarget,
-					transportResource1: transportResource1,
-					transportResource1Perc: transportResource1Perc,
-					transportResource1Crew: transportResource1Crew,
-					transportResource2: transportResource2,
-					transportResource2Perc: transportResource2Perc,
-					transportResource3: transportResource3,
-					transportResource3Perc: transportResource3Perc,
-					transportResource4: transportResource4,
-					transportResource4Perc: transportResource4Perc,
-					transportSBResource1: transportSBResource1,
-					transportSBResource1Perc: transportSBResource1Perc,
-					transportSBResource1Crew: transportSBResource1Crew,
-					transportSBResource2: transportSBResource2,
-					transportSBResource2Perc: transportSBResource2Perc,
-					transportSBResource3: transportSBResource3,
-					transportSBResource3Perc: transportSBResource3Perc,
-					transportSBResource4: transportSBResource4,
-					transportSBResource4Perc: transportSBResource4Perc,
+					transportResource1: transportResource1Entry.res,
+					transportResource1Perc: transportResource1Entry.amt,
+					transportResource1Total: transportResource1Entry.cargoTotal,
+					transportResource1Dispatched: getLegacyCargoDispatched('transportResource1', transportResource1Entry),
+					transportResource1TotalKey: getTransportTotalKey(transportResource1Entry.res, transportResource1Entry.amt),
+					transportResource1Crew: transportResource1Entry.crew,
+					transportResource1CrewTotal: transportResource1Entry.crewTotal,
+					transportResource1CrewDispatched: getLegacyCrewDispatched('transportResource1', transportResource1Entry),
+					transportResource1CrewTotalKey: getTransportCrewTotalKey(transportResource1Entry.crew),
+					transportResource2: transportResource2Entry.res,
+					transportResource2Perc: transportResource2Entry.amt,
+					transportResource2Total: transportResource2Entry.cargoTotal,
+					transportResource2Dispatched: getLegacyCargoDispatched('transportResource2', transportResource2Entry),
+					transportResource2TotalKey: getTransportTotalKey(transportResource2Entry.res, transportResource2Entry.amt),
+					transportResource3: transportResource3Entry.res,
+					transportResource3Perc: transportResource3Entry.amt,
+					transportResource3Total: transportResource3Entry.cargoTotal,
+					transportResource3Dispatched: getLegacyCargoDispatched('transportResource3', transportResource3Entry),
+					transportResource3TotalKey: getTransportTotalKey(transportResource3Entry.res, transportResource3Entry.amt),
+					transportResource4: transportResource4Entry.res,
+					transportResource4Perc: transportResource4Entry.amt,
+					transportResource4Total: transportResource4Entry.cargoTotal,
+					transportResource4Dispatched: getLegacyCargoDispatched('transportResource4', transportResource4Entry),
+					transportResource4TotalKey: getTransportTotalKey(transportResource4Entry.res, transportResource4Entry.amt),
+					transportSBResource1: transportSBResource1Entry.res,
+					transportSBResource1Perc: transportSBResource1Entry.amt,
+					transportSBResource1Total: transportSBResource1Entry.cargoTotal,
+					transportSBResource1Dispatched: getLegacyCargoDispatched('transportSBResource1', transportSBResource1Entry),
+					transportSBResource1TotalKey: getTransportTotalKey(transportSBResource1Entry.res, transportSBResource1Entry.amt),
+					transportSBResource1Crew: transportSBResource1Entry.crew,
+					transportSBResource1CrewTotal: transportSBResource1Entry.crewTotal,
+					transportSBResource1CrewDispatched: getLegacyCrewDispatched('transportSBResource1', transportSBResource1Entry),
+					transportSBResource1CrewTotalKey: getTransportCrewTotalKey(transportSBResource1Entry.crew),
+					transportSBResource2: transportSBResource2Entry.res,
+					transportSBResource2Perc: transportSBResource2Entry.amt,
+					transportSBResource2Total: transportSBResource2Entry.cargoTotal,
+					transportSBResource2Dispatched: getLegacyCargoDispatched('transportSBResource2', transportSBResource2Entry),
+					transportSBResource2TotalKey: getTransportTotalKey(transportSBResource2Entry.res, transportSBResource2Entry.amt),
+					transportSBResource3: transportSBResource3Entry.res,
+					transportSBResource3Perc: transportSBResource3Entry.amt,
+					transportSBResource3Total: transportSBResource3Entry.cargoTotal,
+					transportSBResource3Dispatched: getLegacyCargoDispatched('transportSBResource3', transportSBResource3Entry),
+					transportSBResource3TotalKey: getTransportTotalKey(transportSBResource3Entry.res, transportSBResource3Entry.amt),
+					transportSBResource4: transportSBResource4Entry.res,
+					transportSBResource4Perc: transportSBResource4Entry.amt,
+					transportSBResource4Total: transportSBResource4Entry.cargoTotal,
+					transportSBResource4Dispatched: getLegacyCargoDispatched('transportSBResource4', transportSBResource4Entry),
+					transportSBResource4TotalKey: getTransportTotalKey(transportSBResource4Entry.res, transportSBResource4Entry.amt),
 					transportPlusTargetCount: transportPlusTargetCount,
 					transportPlusTarget2: transportPlusTargetValues[1] || '',
 					transportPlusTargets: transportPlusTargetValues,
@@ -10890,22 +10912,61 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		});
 	}
 
+	function getLegacyTransportManifestEntry(fleetParsedData, prefix, includeCrew = false) {
+		const res = fleetParsedData[prefix] || '';
+		const amt = fleetParsedData[prefix + 'Perc'] || 0;
+		const crew = includeCrew ? (fleetParsedData[prefix + 'Crew'] || 0) : 0;
+		const cargoTotalKey = getTransportTotalKey(res, amt);
+		const crewTotalKey = getTransportCrewTotalKey(crew);
+		return {
+			res: res,
+			amt: amt,
+			crew: crew,
+			totalPrefix: prefix,
+			cargoTotal: !!fleetParsedData[prefix + 'Total'],
+			cargoDispatched: getTransportSavedDispatched(fleetParsedData, prefix + 'Total', prefix + 'Dispatched', prefix + 'TotalKey', cargoTotalKey),
+			cargoTotalKey: cargoTotalKey,
+			crewTotal: includeCrew && !!fleetParsedData[prefix + 'CrewTotal'],
+			crewDispatched: includeCrew ? getTransportSavedDispatched(fleetParsedData, prefix + 'CrewTotal', prefix + 'CrewDispatched', prefix + 'CrewTotalKey', crewTotalKey) : 0,
+			crewTotalKey: crewTotalKey
+		};
+	}
+
+	async function persistLegacyTransportManifestTotals(i, manifest) {
+		const fleetPK = userFleets[i].publicKey.toString();
+		const fleetSavedData = await GM.getValue(fleetPK, '{}');
+		const fleetParsedData = JSON.parse(fleetSavedData);
+		for(const entry of manifest) {
+			if(!entry || !entry.totalPrefix) continue;
+			const prefix = entry.totalPrefix;
+			fleetParsedData[prefix + 'Total'] = !!entry.cargoTotal;
+			fleetParsedData[prefix + 'Dispatched'] = Math.max(0, Math.floor(Number(entry.cargoDispatched || 0)));
+			fleetParsedData[prefix + 'TotalKey'] = getTransportTotalKey(entry.res, entry.amt);
+			if(entry.crewTotal || Object.prototype.hasOwnProperty.call(fleetParsedData, prefix + 'CrewTotal')) {
+				fleetParsedData[prefix + 'CrewTotal'] = !!entry.crewTotal;
+				fleetParsedData[prefix + 'CrewDispatched'] = Math.max(0, Math.floor(Number(entry.crewDispatched || 0)));
+				fleetParsedData[prefix + 'CrewTotalKey'] = getTransportCrewTotalKey(entry.crew);
+			}
+		}
+		await GM.setValue(fleetPK, JSON.stringify(fleetParsedData));
+	}
+
     async function handleTransport(i, fleetState, fleetCoords) {
         const [destX, destY] = ConvertCoords(userFleets[i].destCoord);
         const [starbaseX, starbaseY] = ConvertCoords(userFleets[i].starbaseCoord);
 
         const fleetParsedData = JSON.parse(await GM.getValue(userFleets[i].publicKey.toString(), '{}'));
         let targetCargoManifest = [
-            {res: fleetParsedData.transportResource1, amt: fleetParsedData.transportResource1Perc, crew: fleetParsedData.transportResource1Crew },
-            {res: fleetParsedData.transportResource2, amt: fleetParsedData.transportResource2Perc,},
-            {res: fleetParsedData.transportResource3, amt: fleetParsedData.transportResource3Perc,},
-            {res: fleetParsedData.transportResource4, amt: fleetParsedData.transportResource4Perc,},
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource1', true),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource2'),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource3'),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource4'),
         ];
         let starbaseCargoManifest = [
-            {res: fleetParsedData.transportSBResource1, amt: fleetParsedData.transportSBResource1Perc, crew: fleetParsedData.transportSBResource1Crew},
-            {res: fleetParsedData.transportSBResource2, amt: fleetParsedData.transportSBResource2Perc,},
-            {res: fleetParsedData.transportSBResource3, amt: fleetParsedData.transportSBResource3Perc,},
-            {res: fleetParsedData.transportSBResource4, amt: fleetParsedData.transportSBResource4Perc,},
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource1', true),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource2'),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource3'),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource4'),
         ];
         const hasTargetManifest = hasTransportManifest(targetCargoManifest);
         const hasStarbaseManifest = hasTransportManifest(starbaseCargoManifest);
@@ -10916,25 +10977,27 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
             if (fleetCoords[0] == starbaseX && fleetCoords[1] == starbaseY) {
                 userFleets[i].resupplying = true;
 
-                let checkCargoResult = await checkCargo(starbaseCargoManifest, targetCargoManifest, userFleets[i]);
+				const targetTotalManifest = cloneTransportManifest(targetCargoManifest);
+				let targetLoadManifest = applyTransportTotalRemaining(targetTotalManifest);
+                let checkCargoResult = await checkCargo(starbaseCargoManifest, targetLoadManifest, userFleets[i]);
                 starbaseCargoManifest = checkCargoResult.currentManifest;
-                targetCargoManifest = checkCargoResult.destinationManifest;
+                targetLoadManifest = checkCargoResult.destinationManifest;
 
 		let needToUnloadCrew = 0;
 		if((starbaseCargoManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && (userFleets[i].crewCount - userFleets[i].requiredCrew > 0)) {
 			needToUnloadCrew = userFleets[i].crewCount - userFleets[i].requiredCrew;
 		}
 		let needToLoadCrew = 0;
-		if((targetCargoManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && ((userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount - needToUnloadCrew) > 0)) {
-			needToLoadCrew = Math.min(userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount, targetCargoManifest[0].crew);
+		if((targetLoadManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && ((userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount - needToUnloadCrew) > 0)) {
+			needToLoadCrew = Math.min(userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount, targetLoadManifest[0].crew);
 		}
-		if(starbaseCargoManifest[0].crew > 0 || targetCargoManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
+		if(starbaseCargoManifest[0].crew > 0 || targetLoadManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
 
                 const fuelData = await getFleetFuelData(userFleets[i], [starbaseX, starbaseY], [destX, destY], true);
 		//previously we only checked for "fuelData.fuelNeeded > 0" below, but fuelNeeded is always greater than 0 - it is just the fuel needed for the warp/subwarp.
 		//this broke the check if the fleet needs to do the dock/undock sequence and the sequence was always executed
 		//We need to explicitly calculate the needed fuel minus the available fuel, just like in handleTransportRefueling()
-		const fuelEntry = targetCargoManifest.find(e => e.res === sageGameAcct.account.mints.fuel.toString()) || {amt: 0};
+		const fuelEntry = targetLoadManifest.find(e => e.res === sageGameAcct.account.mints.fuel.toString()) || {amt: 0};
 		const totalFuel = fuelData.fuelNeeded + fuelEntry.amt;
 		let fuelToAdd = Math.min(fuelData.capacity, totalFuel) - fuelData.amount;
 		// Check for "Fuel to 100% for transporters" (roundTrip only = source starbase)
@@ -10948,6 +11011,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     let transportLoadUnloadSingleTx=globalSettings.transportLoadUnloadSingleTx;
                     let transactions = [];
                     let unloadedAmountInTransaction = 0;
+					let loadedCrew = 0;
+					let loadedCargo = {};
 
                     let resp = await execDock(userFleets[i], userFleets[i].starbaseCoord, transportLoadUnloadSingleTx);
                     if(transportLoadUnloadSingleTx && resp) {
@@ -10973,6 +11038,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			}
 			else if(transportLoadUnloadSingleTx && crewResp) {
 				transactions.push(crewResp);
+				loadedCrew = needToLoadCrew;
+			} else if(crewResp) {
+				loadedCrew = needToLoadCrew;
 			}
                     }
 
@@ -10993,7 +11061,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     } else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Unloading skipped - No resources specified`);
 
                     //Refueling at Starbase
-                    let refuelResp = await handleTransportRefueling(userFleets[i], userFleets[i].starbaseCoord, [starbaseX, starbaseY], [destX, destY], true, 0, targetCargoManifest, transportLoadUnloadSingleTx);
+                    let refuelResp = await handleTransportRefueling(userFleets[i], userFleets[i].starbaseCoord, [starbaseX, starbaseY], [destX, destY], true, 0, targetLoadManifest, transportLoadUnloadSingleTx);
                     if (refuelResp.status === 0) {
                         userFleets[i].state = refuelResp.detail;
                         return;
@@ -11001,18 +11069,18 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			transactions = transactions.concat(refuelResp.transactions);
                     }
 
-                    let fuelIndex = targetCargoManifest.findIndex(e => e.res === sageGameAcct.account.mints.fuel.toString());
+                    let fuelIndex = targetLoadManifest.findIndex(e => e.res === sageGameAcct.account.mints.fuel.toString());
                     if (fuelIndex > -1) {
-                        targetCargoManifest[fuelIndex].amt = targetCargoManifest[fuelIndex].amt - refuelResp.amount;
+                        targetLoadManifest[fuelIndex].amt = targetLoadManifest[fuelIndex].amt - refuelResp.amount;
                         //when using a combined load tx, we need to take into account the amount loaded into the fuel tank, because the starbase still reports the original amount (otherwise we may get an ix error instead a "NotEnoughResource" error)
-                        if(transportLoadUnloadSingleTx && refuelResp.alreadyLoaded) targetCargoManifest[fuelIndex].alreadyLoadedInTransaction = refuelResp.alreadyLoaded;
+                        if(transportLoadUnloadSingleTx && refuelResp.alreadyLoaded) targetLoadManifest[fuelIndex].alreadyLoadedInTransaction = refuelResp.alreadyLoaded;
                     }
 
                     //Loading at Starbase
-                    if (hasTargetManifest) {
-                        const loadedCargo = await handleTransportLoading(i, userFleets[i].starbaseCoord, targetCargoManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
-                        cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargo.success);
-                        if(!loadedCargo.success) {
+                    if (hasTransportManifest(targetLoadManifest)) {
+                        const loadedCargoResult = await handleTransportLoading(i, userFleets[i].starbaseCoord, targetLoadManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
+                        cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargoResult.success);
+                        if(!loadedCargoResult.success) {
                             //const newFleetState = `ERROR: No more cargo to load`;
                             //cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${newFleetState}`);
                             //userFleets[i].state = newFleetState;
@@ -11020,8 +11088,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                             userFleets[i].resupplying = false;
                             return;
                         } else if(transportLoadUnloadSingleTx) {
-                            transactions = transactions.concat(loadedCargo.transactions);
+                            transactions = transactions.concat(loadedCargoResult.transactions);
 			}
+						loadedCargo = loadedCargoResult.loadedCargo || {};
                     } else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Loading skipped - No resources specified`);
 
                     let undockResult = await execUndock(userFleets[i], userFleets[i].starbaseCoord, transportLoadUnloadSingleTx);
@@ -11033,6 +11102,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     }
                     //cLog(4,`${FleetTimeStamp(userFleets[i].label)} userFleets[i]: `, undockResult);
                     let fleetState = await solanaReadConnection.getAccountInfoAndContext(userFleets[i].publicKey, {minContextSlot: undockResult.slot});
+					applyTransportLoadedTotals(targetTotalManifest, loadedCargo, loadedCrew);
+					await persistLegacyTransportManifestTotals(i, targetTotalManifest);
                 }
                 userFleets[i].moveTarget = userFleets[i].destCoord;
                 userFleets[i].resupplying = false;
@@ -11043,24 +11114,26 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
             else if (fleetCoords[0] == destX && fleetCoords[1] == destY) {
                 userFleets[i].resupplying = true;
 
-                let checkCargoResult = await checkCargo(targetCargoManifest, starbaseCargoManifest, userFleets[i]);
+				const starbaseTotalManifest = cloneTransportManifest(starbaseCargoManifest);
+				let starbaseLoadManifest = applyTransportTotalRemaining(starbaseTotalManifest);
+                let checkCargoResult = await checkCargo(targetCargoManifest, starbaseLoadManifest, userFleets[i]);
                 targetCargoManifest = checkCargoResult.currentManifest;
-                starbaseCargoManifest = checkCargoResult.destinationManifest;
+                starbaseLoadManifest = checkCargoResult.destinationManifest;
 
 		let needToUnloadCrew = 0;
 		if((targetCargoManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && (userFleets[i].crewCount - userFleets[i].requiredCrew > 0)) {
 			needToUnloadCrew = userFleets[i].crewCount - userFleets[i].requiredCrew;
 		}
 		let needToLoadCrew = 0;
-		if((starbaseCargoManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && ((userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount - needToUnloadCrew) > 0)) {
-			needToLoadCrew = Math.min(userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount, starbaseCargoManifest[0].crew);
+		if((starbaseLoadManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && ((userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount - needToUnloadCrew) > 0)) {
+			needToLoadCrew = Math.min(userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount, starbaseLoadManifest[0].crew);
 		}
-		if(starbaseCargoManifest[0].crew > 0 || targetCargoManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
+		if(starbaseLoadManifest[0].crew > 0 || targetCargoManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
 
                 const fuelData = await getFleetFuelData(userFleets[i], [destX, destY], [starbaseX, starbaseY], false);
 		//previously we only checked for "fuelData.fuelNeeded > 0" below, but fuelNeeded is always greater than 0 - it is just the fuel needed for the warp/subwarp.
 		//We need to explicitly calculate the needed fuel minus the available fuel, just like in handleTransportRefueling()
-		const fuelEntry = starbaseCargoManifest.find(e => e.res === sageGameAcct.account.mints.fuel.toString()) || {amt: 0};
+		const fuelEntry = starbaseLoadManifest.find(e => e.res === sageGameAcct.account.mints.fuel.toString()) || {amt: 0};
 		const totalFuel = fuelData.fuelNeeded + fuelEntry.amt;
 		let fuelToAdd = Math.min(fuelData.capacity, totalFuel) - fuelData.amount;
 
@@ -11071,6 +11144,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     let transportLoadUnloadSingleTx=globalSettings.transportLoadUnloadSingleTx;
                     let transactions = [];
                     let unloadedAmountInTransaction = 0;
+					let loadedCrew = 0;
+					let loadedCargo = {};
 
                     let resp = await execDock(userFleets[i], userFleets[i].destCoord, transportLoadUnloadSingleTx);
                     if(transportLoadUnloadSingleTx && resp) {
@@ -11095,6 +11170,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				}
 			} else if(transportLoadUnloadSingleTx && crewResp) {
 				transactions.push(crewResp);
+				loadedCrew = needToLoadCrew;
+			} else if(crewResp) {
+				loadedCrew = needToLoadCrew;
 			}
                     }
 
@@ -11118,7 +11196,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     } else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Unloading skipped - No resources specified`);
 
                     //Refueling at Target
-                    let refuelResp = await handleTransportRefueling(userFleets[i], userFleets[i].destCoord, [destX, destY], [starbaseX, starbaseY], false, fuelUnloadDeficit, starbaseCargoManifest, transportLoadUnloadSingleTx);
+                    let refuelResp = await handleTransportRefueling(userFleets[i], userFleets[i].destCoord, [destX, destY], [starbaseX, starbaseY], false, fuelUnloadDeficit, starbaseLoadManifest, transportLoadUnloadSingleTx);
                     if (refuelResp.status === 0) {
                         userFleets[i].state = refuelResp.detail;
                         return;
@@ -11126,16 +11204,16 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			transactions = transactions.concat(refuelResp.transactions);
                     }
 
-                    let fuelIndex = starbaseCargoManifest.findIndex(e => e.res === sageGameAcct.account.mints.fuel.toString());
+                    let fuelIndex = starbaseLoadManifest.findIndex(e => e.res === sageGameAcct.account.mints.fuel.toString());
                     if (fuelIndex > -1) {
-                        starbaseCargoManifest[fuelIndex].amt = starbaseCargoManifest[fuelIndex].amt - refuelResp.amount;
+                        starbaseLoadManifest[fuelIndex].amt = starbaseLoadManifest[fuelIndex].amt - refuelResp.amount;
                     }
 
                     //Loading at Target
-                    if(hasStarbaseManifest) {
-                        const loadedCargo = await handleTransportLoading(i, userFleets[i].destCoord, starbaseCargoManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
-                        cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargo.success);
-                        if(!loadedCargo.success) {
+                    if(hasTransportManifest(starbaseLoadManifest)) {
+                        const loadedCargoResult = await handleTransportLoading(i, userFleets[i].destCoord, starbaseLoadManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
+                        cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargoResult.success);
+                        if(!loadedCargoResult.success) {
                             //const newFleetState = `ERROR: No more cargo to load`;
                             //cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${newFleetState}`);
                             //userFleets[i].state = newFleetState;
@@ -11143,8 +11221,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                             userFleets[i].resupplying = false;
                             return;
                         } else if(transportLoadUnloadSingleTx) {
-				transactions = transactions.concat(loadedCargo.transactions);
+				transactions = transactions.concat(loadedCargoResult.transactions);
 			}
+			loadedCargo = loadedCargoResult.loadedCargo || {};
                     } else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Loading skipped - No resources specified`);
 
                     let undockResult = await execUndock(userFleets[i], userFleets[i].destCoord, transportLoadUnloadSingleTx);
@@ -11156,6 +11235,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     }
                     //cLog(4,`${FleetTimeStamp(userFleets[i].label)} userFleets[i]: `, undockResult);
                     let fleetState = await solanaReadConnection.getAccountInfoAndContext(userFleets[i].publicKey, {minContextSlot: undockResult.slot});
+					applyTransportLoadedTotals(starbaseTotalManifest, loadedCargo, loadedCrew);
+					await persistLegacyTransportManifestTotals(i, starbaseTotalManifest);
                 }
                 userFleets[i].moveTarget = userFleets[i].starbaseCoord;
                 userFleets[i].resupplying = false;
@@ -11201,6 +11282,28 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		return transportPlusLegs;
 	}
 
+	async function persistTransportPlusRouteManifestTotals(i, routeIndex, manifest) {
+		if(routeIndex === null || routeIndex === undefined) return;
+		const fleetPK = userFleets[i].publicKey.toString();
+		const fleetSavedData = await GM.getValue(fleetPK, '{}');
+		const fleetParsedData = JSON.parse(fleetSavedData);
+		if(!Array.isArray(fleetParsedData.transportPlusRoutes) || !fleetParsedData.transportPlusRoutes[routeIndex]) return;
+		const routeManifest = Array.isArray(fleetParsedData.transportPlusRoutes[routeIndex].manifest) ? fleetParsedData.transportPlusRoutes[routeIndex].manifest : [];
+		for(let entryIndex=0; entryIndex<manifest.length; entryIndex++) {
+			const sourceEntry = manifest[entryIndex] || {};
+			const targetEntry = routeManifest[entryIndex] || {};
+			targetEntry.cargoTotal = !!sourceEntry.cargoTotal;
+			targetEntry.cargoDispatched = Math.max(0, Math.floor(Number(sourceEntry.cargoDispatched || 0)));
+			targetEntry.cargoTotalKey = getTransportTotalKey(sourceEntry.res, sourceEntry.amt);
+			targetEntry.crewTotal = !!sourceEntry.crewTotal;
+			targetEntry.crewDispatched = Math.max(0, Math.floor(Number(sourceEntry.crewDispatched || 0)));
+			targetEntry.crewTotalKey = getTransportCrewTotalKey(sourceEntry.crew);
+			routeManifest[entryIndex] = targetEntry;
+		}
+		fleetParsedData.transportPlusRoutes[routeIndex].manifest = routeManifest;
+		await GM.setValue(fleetPK, JSON.stringify(fleetParsedData));
+	}
+
 	async function handleTransportStop(i, sourceCoord, destCoord, currentManifest, destinationManifest, moveType, roundTrip, routeIndex = null) {
 		const sourceCoords = ConvertCoords(sourceCoord);
 		const destCoords = ConvertCoords(destCoord);
@@ -11208,7 +11311,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		userFleets[i].resupplying = true;
 
 		let sourceCargoManifest = cloneTransportManifest(currentManifest);
-		let destinationCargoManifest = cloneTransportManifest(destinationManifest);
+		const destinationTotalManifest = cloneTransportManifest(destinationManifest);
+		let destinationCargoManifest = applyTransportTotalRemaining(destinationTotalManifest);
 		const hasSourceManifest = hasTransportManifest(sourceCargoManifest);
 		const hasDestinationManifest = hasTransportManifest(destinationCargoManifest);
 
@@ -11238,6 +11342,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let transportLoadUnloadSingleTx=globalSettings.transportLoadUnloadSingleTx;
 			let transactions = [];
 			let unloadedAmountInTransaction = 0;
+			let loadedCrew = 0;
+			let loadedCargo = {};
 
 			let resp = await execDock(userFleets[i], sourceCoord, transportLoadUnloadSingleTx);
 			if(transportLoadUnloadSingleTx && resp) {
@@ -11262,6 +11368,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					}
 				} else if(transportLoadUnloadSingleTx && crewResp) {
 					transactions.push(crewResp);
+					loadedCrew = needToLoadCrew;
+				} else if(crewResp) {
+					loadedCrew = needToLoadCrew;
 				}
 			}
 
@@ -11290,15 +11399,16 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			}
 
 			if(hasDestinationManifest) {
-				const loadedCargo = await handleTransportLoading(i, sourceCoord, destinationCargoManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
-				cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargo.success);
-				if(!loadedCargo.success) {
+				const loadedCargoResult = await handleTransportLoading(i, sourceCoord, destinationCargoManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
+				cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargoResult.success);
+				if(!loadedCargoResult.success) {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} ERROR: Unexpected error on cargo load.`);
 					userFleets[i].resupplying = false;
 					return false;
 				} else if(transportLoadUnloadSingleTx) {
-					transactions = transactions.concat(loadedCargo.transactions);
+					transactions = transactions.concat(loadedCargoResult.transactions);
 				}
+				loadedCargo = loadedCargoResult.loadedCargo || {};
 			} else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Loading skipped - No resources specified`);
 
 			let undockResult = await execUndock(userFleets[i], sourceCoord, transportLoadUnloadSingleTx);
@@ -11309,6 +11419,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				updateFleetState(userFleets[i], 'Idle');
 			}
 			let fleetState = await solanaReadConnection.getAccountInfoAndContext(userFleets[i].publicKey, {minContextSlot: undockResult.slot});
+			applyTransportLoadedTotals(destinationTotalManifest, loadedCargo, loadedCrew);
+			await persistTransportPlusRouteManifestTotals(i, routeIndex, destinationTotalManifest);
 		}
 
 		await persistFleetTransportRouteState(i, moveType, destCoord, routeIndex);
@@ -11659,9 +11771,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 		//Use ammo banks if possible
 		const ammoEntry = globalSettings.transportUseAmmoBank ? transportManifest.find(e => e.res === sageGameAcct.account.mints.ammo.toString()) : undefined;
+		const ammoEntryIndex = ammoEntry ? transportManifest.findIndex(e => e === ammoEntry) : -1;
 		let resp = null;
 		let transactions = [];
+		let loadedCargo = {};
 		let ammoLoadingIntoAmmoBank = ammoEntry ? (resp = await execLoadFleetAmmo(userFleets[i], starbaseCoords, ammoEntry.amt, returnTx)).amountLoaded : 0;
+		if(ammoEntryIndex > -1 && ammoLoadingIntoAmmoBank > 0) loadedCargo[ammoEntryIndex] = (loadedCargo[ammoEntryIndex] || 0) + ammoLoadingIntoAmmoBank;
 		if(returnTx && resp && resp.transaction) {
 			transactions.push(resp.transaction);
 			//when using a combined load tx, we need to take into account the amount loaded into the fuel tank, because the starbase still reports the original amount (otherwise we may get an ix error instead a "NotEnoughResource" error)
@@ -11679,7 +11794,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
         cLog(2,`${FleetTimeStamp(userFleets[i].label)} cargoSpace remaining: ${cargoSpace}`);
 
 		let notEnoughInfo = '';
-		for (const entry of transportManifest) {
+		for (let entryIndex=0; entryIndex<transportManifest.length; entryIndex++) {
+			const entry = transportManifest[entryIndex];
 			if (entry.res && entry.amt > 0) {
 				if(cargoSpace < 1) {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Cargo full - remaining loading process skipped`);
@@ -11720,6 +11836,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					);
                     cLog(1,`${FleetTimeStamp(userFleets[i].label)} Loaded ${resp.amount} ${entry.res}: `, resp);
                     cargoSpace -= resp && resp.amount ? cargoItems.find(r => r.token == entry.res).size * resp.amount : 0;
+					if(resp && resp.amount) loadedCargo[entryIndex] = (loadedCargo[entryIndex] || 0) + resp.amount;
 
 					if (resp && resp.name == 'NotEnoughResource') {
 						const resShort = cargoItems.find(r => r.token == entry.res).name;
@@ -11744,7 +11861,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	            cLog(2,`${FleetTimeStamp(userFleets[i].label)} ERROR: No cargo loaded`);
 	            if(globalSettings.emailNoCargoLoaded) await sendEMail(userFleets[i].label + ' no cargo loaded', notEnoughInfo);
 	        }
-		return { success: !userFleets[i].state.includes('ERROR'), transactions: transactions};
+		return { success: !userFleets[i].state.includes('ERROR'), transactions: transactions, loadedCargo: loadedCargo};
 	}
 
 	function startupScanBlockCheck(i, fleetCoords) {
