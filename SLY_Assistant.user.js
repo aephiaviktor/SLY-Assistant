@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-48
+// @aephia-version 0.7.35-49
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-48'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-49'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -9391,7 +9391,14 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				};
 				await GM.setValue(fleetPK, JSON.stringify(fleet));
 
-				Object.assign(userFleets[userFleetIndex], fleet);
+				const transportConfigKeys = Object.keys(fleet).filter(key =>
+					key.indexOf('transportResource') === 0 ||
+					key.indexOf('transportSBResource') === 0 ||
+					key.indexOf('transportPlus') === 0
+				);
+				for(const key of transportConfigKeys) {
+					userFleets[userFleetIndex][key] = fleet[key];
+				}
 				userFleets[userFleetIndex].mineResource = fleetMineResource;
 				userFleets[userFleetIndex].destCoord = fleetDestCoord;
 				userFleets[userFleetIndex].starbaseCoord = fleetStarbaseCoord;
