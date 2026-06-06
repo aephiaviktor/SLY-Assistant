@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-42
+// @aephia-version 0.7.35-43
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-42'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-43'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -11227,6 +11227,11 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
                     if (hasStarbaseManifest || checkCargoResult.needToUnload) {
                         resp = await handleTransportUnloading(userFleets[i], userFleets[i].starbaseCoord, starbaseCargoManifest, transportLoadUnloadSingleTx);
+                        if(resp.error && globalSettings.transportStopOnError) {
+				cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - ${userFleets[i].state}`);
+				userFleets[i].resupplying = false;
+				return;
+			}
                         if(transportLoadUnloadSingleTx) {
 				transactions = transactions.concat(resp.transactions);
 				unloadedAmountInTransaction = resp.unloadedAmount;
@@ -11362,6 +11367,11 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     if (hasTargetManifest || checkCargoResult.needToUnload) {
                         const unloadResult = await handleTransportUnloading(userFleets[i], userFleets[i].destCoord, targetCargoManifest, transportLoadUnloadSingleTx);
                         fuelUnloadDeficit = unloadResult.fuelUnloadDeficit;
+                        if(unloadResult.error && globalSettings.transportStopOnError) {
+				cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - ${userFleets[i].state}`);
+				userFleets[i].resupplying = false;
+				return;
+			}
                         if(transportLoadUnloadSingleTx) {
 				transactions = transactions.concat(unloadResult.transactions);
 				unloadedAmountInTransaction = unloadResult.unloadedAmount;
@@ -11559,6 +11569,11 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			if (hasSourceManifest || checkCargoResult.needToUnload) {
 				const unloadResult = await handleTransportUnloading(userFleets[i], sourceCoord, sourceCargoManifest, transportLoadUnloadSingleTx);
 				fuelUnloadDeficit = unloadResult.fuelUnloadDeficit;
+				if(unloadResult.error && globalSettings.transportStopOnError) {
+					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - ${userFleets[i].state}`);
+					userFleets[i].resupplying = false;
+					return false;
+				}
 				if(transportLoadUnloadSingleTx) {
 					transactions = transactions.concat(unloadResult.transactions);
 					unloadedAmountInTransaction = unloadResult.unloadedAmount;
@@ -11894,6 +11909,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 		let transactions = [];
 		let unloadedAmount = 0;
+		let error = false;
 
 		//Unloading resources from manifest
 		let fuelUnloadDeficit = 0;
@@ -11918,6 +11934,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					if(isFuel) fuelUnloadDeficit -= amountToUnload;
 					if(isAmmo) ammoUnloadDeficit -= amountToUnload;
 					unloadedAmount += amountToUnload * cargoItems.find(r => r.token == entry.res).size;
+					if(fleet.state.includes('ERROR')) {
+						error = true;
+						break;
+					}
 				} else {
 					cLog(1,`${FleetTimeStamp(fleet.label)} Unload ${entry.res} skipped - none found in ship's cargo hold`);
 				}
@@ -11928,7 +11948,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 		//Ammo bank unloading
 		const ammoEntry = globalSettings.transportUseAmmoBank ? transportManifest.find(e => e.res === ammoMint) : undefined;
-		if (ammoEntry) {
+		if (!error && ammoEntry) {
 			let fleetCurrentAmmoBank = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.ammoBank, {programId: tokenProgramPK});
 			let currentAmmo = fleetCurrentAmmoBank.value.find(item => item.account.data.parsed.info.mint === ammoMint);
 			let currentAmmoCnt = currentAmmo ? currentAmmo.account.data.parsed.info.tokenAmount.uiAmount : 0;
@@ -11940,10 +11960,13 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				if(returnTx && resp) {
 					transactions.push(resp);
 				}
+				if(fleet.state.includes('ERROR')) {
+					error = true;
+				}
 			}
 		}
 
-		return { fuelUnloadDeficit, transactions, unloadedAmount };
+		return { fuelUnloadDeficit, transactions, unloadedAmount, error };
 	}
 
 	async function handleTransportLoading(i, starbaseCoords, transportManifest, returnTx, alreadyUnloadedInTransaction) {
