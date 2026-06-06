@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-44
+// @aephia-version 0.7.35-45
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-44'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-45'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -7702,7 +7702,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			}
 		}
 
-		return { amountLoaded, transaction };
+		return { amountLoaded, transaction, currentAmount: currentAmmoCnt };
 	}
 
 	function transportSubwarpPrefToMoveType(subwarpPref) {
@@ -11002,15 +11002,31 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		return false;
 	}
 
+	function getParsedTokenAmount(parsedTokenAccounts, mint) {
+		const tokenAccount = parsedTokenAccounts.value.find(item => item.account.data.parsed.info.mint === mint);
+		return tokenAccount ? tokenAccount.account.data.parsed.info.tokenAmount.uiAmount : 0;
+	}
+
+	async function getTransportAmmoBankAmount(fleet) {
+		if(!globalSettings.transportUseAmmoBank) return 0;
+		const ammoMint = sageGameAcct.account.mints.ammo.toString();
+		const fleetCurrentAmmoBank = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.ammoBank, {programId: tokenProgramPK});
+		return getParsedTokenAmount(fleetCurrentAmmoBank, ammoMint);
+	}
+
     async function checkCargo(currentManifest, destinationManifest, fleet) {
         const fleetCurrentCargo = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.cargoHold, {programId: tokenProgramPK});
         const cargoCnt = fleetCurrentCargo.value.reduce((n, {account}) => n + account.data.parsed.info.tokenAmount.uiAmount * cargoItems.find(r => r.token == account.data.parsed.info.mint).size, 0);
+		const ammoMint = sageGameAcct.account.mints.ammo.toString();
+		const destinationHasAmmo = destinationManifest.some(entry => entry.res === ammoMint && entry.amt > 0);
+		const ammoBankAmount = destinationHasAmmo ? await getTransportAmmoBankAmount(fleet) : 0;
         let needToLoad = false;
         let needToUnload = false;
         for (const entry of destinationManifest) {
             if (entry.res && entry.amt > 0) {
                 let currentCargoObj = fleetCurrentCargo.value.find(item => item.account.data.parsed.info.mint === entry.res);
                 let currentCargoResAmt = currentCargoObj ? currentCargoObj.account.data.parsed.info.tokenAmount.uiAmount : 0;
+				if(entry.res === ammoMint) currentCargoResAmt += ammoBankAmount;
                 if (currentCargoResAmt < entry.amt) needToLoad = true;
                 if (currentCargoResAmt > entry.amt) {
                     needToUnload = true;
@@ -12015,13 +12031,27 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		cLog(1,`${FleetTimeStamp(userFleets[i].label)} 📦 Loading Transport`);
 		updateFleetState(userFleets[i], 'Loading');
 
+		//Calculate remaining free cargo space
+		cLog(2,`${FleetTimeStamp(userFleets[i].label)} Calculating cargoSpace ...`);
+		const fleetCurrentCargo = await solanaReadConnection.getParsedTokenAccountsByOwner(userFleets[i].cargoHold, {programId: tokenProgramPK});
+
 		//Use ammo banks if possible
-		const ammoEntry = globalSettings.transportUseAmmoBank ? transportManifest.find(e => e.res === sageGameAcct.account.mints.ammo.toString()) : undefined;
+		const ammoMint = sageGameAcct.account.mints.ammo.toString();
+		const ammoEntry = globalSettings.transportUseAmmoBank ? transportManifest.find(e => e.res === ammoMint) : undefined;
 		const ammoEntryIndex = ammoEntry ? transportManifest.findIndex(e => e === ammoEntry) : -1;
 		let resp = null;
 		let transactions = [];
 		let loadedCargo = {};
-		let ammoLoadingIntoAmmoBank = ammoEntry ? (resp = await execLoadFleetAmmo(userFleets[i], starbaseCoords, ammoEntry.amt, returnTx)).amountLoaded : 0;
+		let ammoLoadingIntoAmmoBank = 0;
+		let ammoAlreadyInAmmoBank = 0;
+		if(ammoEntry) {
+			const ammoAlreadyInCargo = getParsedTokenAmount(fleetCurrentCargo, ammoMint);
+			const ammoBankTarget = Math.max(0, ammoEntry.amt - ammoAlreadyInCargo);
+			resp = await execLoadFleetAmmo(userFleets[i], starbaseCoords, ammoBankTarget, returnTx);
+			ammoLoadingIntoAmmoBank = resp.amountLoaded;
+			ammoAlreadyInAmmoBank = resp.currentAmount || 0;
+		}
+		const ammoInAmmoBankForManifest = ammoEntry ? Math.min(ammoEntry.amt, ammoAlreadyInAmmoBank + ammoLoadingIntoAmmoBank) : 0;
 		if(ammoEntryIndex > -1 && ammoLoadingIntoAmmoBank > 0) loadedCargo[ammoEntryIndex] = (loadedCargo[ammoEntryIndex] || 0) + ammoLoadingIntoAmmoBank;
 		if(returnTx && resp && resp.transaction) {
 			transactions.push(resp.transaction);
@@ -12029,9 +12059,6 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			ammoEntry.alreadyLoadedInTransaction = ammoLoadingIntoAmmoBank;
 		}
 
-        //Calculate remaining free cargo space
-        cLog(2,`${FleetTimeStamp(userFleets[i].label)} Calculating cargoSpace ...`);
-        const fleetCurrentCargo = await solanaReadConnection.getParsedTokenAccountsByOwner(userFleets[i].cargoHold, {programId: tokenProgramPK});
         const cargoCnt = fleetCurrentCargo.value.reduce((n, {account}) => n + account.data.parsed.info.tokenAmount.uiAmount * cargoItems.find(r => r.token == account.data.parsed.info.mint).size, 0);
         let cargoSpace = userFleets[i].cargoCapacity - cargoCnt;
         if(alreadyUnloadedInTransaction) cargoSpace += alreadyUnloadedInTransaction;
@@ -12062,9 +12089,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				const currentResAmt = currentRes ? currentRes.account.data.parsed.info.tokenAmount.uiAmount : 0;
 
 				//Deduct ammo already loaded into ammobank if applicable
-				const isAmmo = entry.res === sageGameAcct.account.mints.ammo.toString();
+				const isAmmo = entry.res === ammoMint;
 				//For ammo SLYA didn't check the ammo in the cargo room, added
-				const resMax = Math.floor(Math.min(cargoSpace / cargoItems.find(r => r.token == entry.res).size, isAmmo ? entry.amt - ammoLoadingIntoAmmoBank - currentResAmt : entry.amt - currentResAmt));
+				const missingCargoAmount = isAmmo ? entry.amt - ammoInAmmoBankForManifest - currentResAmt : entry.amt - currentResAmt;
+				const resMax = Math.floor(Math.min(cargoSpace / cargoItems.find(r => r.token == entry.res).size, Math.max(0, missingCargoAmount)));
 				expectedCnt += resMax;
 				if (resMax > 0) {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Attempting to load ${resMax} ${entry.res} from ${starbaseCoords}`);
