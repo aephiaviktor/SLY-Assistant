@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-47
+// @aephia-version 0.7.35-48
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-47'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-48'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -7798,13 +7798,16 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		}
 	}
 
-	function getTransportCrewLoadAmount(fleet, manifestCrew, needToUnloadCrew) {
-		const crewToLoad = Math.max(0, Math.floor(Number(manifestCrew || 0)));
-		if(crewToLoad <= 0 || !fleet || fleet.passengerCapacity <= 0) return 0;
+	function logTransportCrewDecision(fleet, legLabel, totalManifest, loadManifest, unloadManifest, needToLoadCrew, needToUnloadCrew) {
+		const totalCrewEntry = (totalManifest && totalManifest[0]) || {};
+		const loadCrewEntry = (loadManifest && loadManifest[0]) || {};
+		const unloadCrewEntry = (unloadManifest && unloadManifest[0]) || {};
+		const totalCrew = Math.max(0, Math.floor(Number(totalCrewEntry.crew || 0)));
+		const loadCrew = Math.max(0, Math.floor(Number(loadCrewEntry.crew || 0)));
+		const unloadCrew = Math.max(0, Math.floor(Number(unloadCrewEntry.crew || 0)));
+		if(totalCrew <= 0 && loadCrew <= 0 && unloadCrew <= 0 && needToLoadCrew <= 0 && needToUnloadCrew <= 0) return;
 
-		const crewAfterUnload = Math.max(0, Math.floor(Number(fleet.crewCount || 0)) - Math.max(0, Math.floor(Number(needToUnloadCrew || 0))));
-		const crewCapacityAfterUnload = Math.max(0, Math.floor(Number(fleet.requiredCrew || 0)) + Math.max(0, Math.floor(Number(fleet.passengerCapacity || 0))) - crewAfterUnload);
-		return Math.min(crewCapacityAfterUnload, crewToLoad);
+		cLog(1, `${FleetTimeStamp(fleet.label)} Transport crew decision ${legLabel}: totalCrew=${totalCrew}, remainingCrew=${loadCrew}, unloadManifestCrew=${unloadCrew}, crewTotal=${!!totalCrewEntry.crewTotal}, dispatched=${Math.max(0, Math.floor(Number(totalCrewEntry.crewDispatched || 0)))}, crewCount=${fleet.crewCount}, requiredCrew=${fleet.requiredCrew}, passengerCapacity=${fleet.passengerCapacity}, needToLoadCrew=${needToLoadCrew}, needToUnloadCrew=${needToUnloadCrew}`);
 	}
 
 	function mergeTransportTotalState(routes, savedRoutes, routeContexts = []) {
@@ -9388,6 +9391,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				};
 				await GM.setValue(fleetPK, JSON.stringify(fleet));
 
+				Object.assign(userFleets[userFleetIndex], fleet);
 				userFleets[userFleetIndex].mineResource = fleetMineResource;
 				userFleets[userFleetIndex].destCoord = fleetDestCoord;
 				userFleets[userFleetIndex].starbaseCoord = fleetStarbaseCoord;
@@ -11294,7 +11298,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			needToUnloadCrew = userFleets[i].crewCount - userFleets[i].requiredCrew;
 		}
 		let needToLoadCrew = 0;
-		needToLoadCrew = getTransportCrewLoadAmount(userFleets[i], targetLoadManifest[0].crew, needToUnloadCrew);
+		if((targetLoadManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && ((userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount - needToUnloadCrew) > 0)) {
+			needToLoadCrew = Math.min(userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount, targetLoadManifest[0].crew);
+		}
+		logTransportCrewDecision(userFleets[i], 'to target', targetTotalManifest, targetLoadManifest, starbaseCargoManifest, needToLoadCrew, needToUnloadCrew);
 		if(starbaseCargoManifest[0].crew > 0 || targetLoadManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
 
                 const fuelData = await getFleetFuelData(userFleets[i], [starbaseX, starbaseY], [destX, destY], true);
@@ -11434,7 +11441,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			needToUnloadCrew = userFleets[i].crewCount - userFleets[i].requiredCrew;
 		}
 		let needToLoadCrew = 0;
-		needToLoadCrew = getTransportCrewLoadAmount(userFleets[i], starbaseLoadManifest[0].crew, needToUnloadCrew);
+		if((starbaseLoadManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && ((userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount - needToUnloadCrew) > 0)) {
+			needToLoadCrew = Math.min(userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount, starbaseLoadManifest[0].crew);
+		}
+		logTransportCrewDecision(userFleets[i], 'to starbase', starbaseTotalManifest, starbaseLoadManifest, targetCargoManifest, needToLoadCrew, needToUnloadCrew);
 		if(starbaseLoadManifest[0].crew > 0 || targetCargoManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
 
                 const fuelData = await getFleetFuelData(userFleets[i], [destX, destY], [starbaseX, starbaseY], false);
@@ -11638,7 +11648,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			needToUnloadCrew = userFleets[i].crewCount - userFleets[i].requiredCrew;
 		}
 		let needToLoadCrew = 0;
-		needToLoadCrew = getTransportCrewLoadAmount(userFleets[i], destinationCargoManifest[0].crew, needToUnloadCrew);
+		if((destinationCargoManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && ((userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount - needToUnloadCrew) > 0)) {
+			needToLoadCrew = Math.min(userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount, destinationCargoManifest[0].crew);
+		}
+		logTransportCrewDecision(userFleets[i], `${sourceCoord} -> ${destCoord}`, destinationTotalManifest, destinationCargoManifest, sourceCargoManifest, needToLoadCrew, needToUnloadCrew);
 		if(sourceCargoManifest[0].crew > 0 || destinationCargoManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
 
 		const fuelData = await getFleetFuelData(userFleets[i], sourceCoords, destCoords, roundTrip);
