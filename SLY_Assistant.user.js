@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-45
+// @aephia-version 0.7.35-46
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-45'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-46'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -7720,12 +7720,42 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return manifest.map(entry => ({...entry}));
 	}
 
-	function getTransportTotalKey(res, amt) {
-		return String(res || '') + ':' + Math.max(0, Math.floor(Number(amt || 0)));
+	function getTransportCoordKey(coord) {
+		if(Array.isArray(coord)) return coord.map(value => String(value).trim()).join(',');
+		return String(coord || '').replace(/\s+/g, '');
 	}
 
-	function getTransportCrewTotalKey(crew) {
-		return String(Math.max(0, Math.floor(Number(crew || 0))));
+	function getTransportTotalKey(res, amt, sourceCoord = '', destCoord = '', routePrefix = '') {
+		const baseKey = String(res || '') + ':' + Math.max(0, Math.floor(Number(amt || 0)));
+		const sourceKey = getTransportCoordKey(sourceCoord);
+		const destKey = getTransportCoordKey(destCoord);
+		if(sourceKey || destKey || routePrefix) return String(routePrefix || 'route') + '|' + sourceKey + '>' + destKey + '|' + baseKey;
+		return baseKey;
+	}
+
+	function getTransportCrewTotalKey(crew, sourceCoord = '', destCoord = '', routePrefix = '') {
+		const baseKey = String(Math.max(0, Math.floor(Number(crew || 0))));
+		const sourceKey = getTransportCoordKey(sourceCoord);
+		const destKey = getTransportCoordKey(destCoord);
+		if(sourceKey || destKey || routePrefix) return String(routePrefix || 'route') + '|' + sourceKey + '>' + destKey + '|crew:' + baseKey;
+		return baseKey;
+	}
+
+	function getTransportTotalContext(sourceCoord, destCoord, routePrefix) {
+		return {
+			sourceCoord: sourceCoord || '',
+			destCoord: destCoord || '',
+			routePrefix: routePrefix || ''
+		};
+	}
+
+	function getLegacyTransportTotalContext(prefix, starbaseCoord, targetCoord) {
+		const toStarbase = String(prefix || '').indexOf('transportSBResource') === 0;
+		return getTransportTotalContext(
+			toStarbase ? targetCoord : starbaseCoord,
+			toStarbase ? starbaseCoord : targetCoord,
+			prefix
+		);
 	}
 
 	function getTransportSavedDispatched(savedEntry, enabledKey, dispatchedKey, keyKey, currentKey) {
@@ -7756,27 +7786,28 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					Math.max(0, Math.floor(Number(entry.amt || 0))),
 					Math.max(0, Math.floor(Number(entry.cargoDispatched || 0))) + Math.max(0, Math.floor(Number((loadedCargo || {})[entryIndex] || 0)))
 				);
-				entry.cargoTotalKey = getTransportTotalKey(entry.res, entry.amt);
+				entry.cargoTotalKey = entry.cargoTotalKey || getTransportTotalKey(entry.res, entry.amt);
 			}
 			if(entryIndex === 0 && entry.crewTotal) {
 				entry.crewDispatched = Math.min(
 					Math.max(0, Math.floor(Number(entry.crew || 0))),
 					Math.max(0, Math.floor(Number(entry.crewDispatched || 0))) + Math.max(0, Math.floor(Number(loadedCrew || 0)))
 				);
-				entry.crewTotalKey = getTransportCrewTotalKey(entry.crew);
+				entry.crewTotalKey = entry.crewTotalKey || getTransportCrewTotalKey(entry.crew);
 			}
 		}
 	}
 
-	function mergeTransportTotalState(routes, savedRoutes) {
+	function mergeTransportTotalState(routes, savedRoutes, routeContexts = []) {
 		return routes.map((route, routeIndex) => {
 			const savedRoute = Array.isArray(savedRoutes) ? (savedRoutes[routeIndex] || {}) : {};
 			const savedManifest = Array.isArray(savedRoute.manifest) ? savedRoute.manifest : [];
+			const totalContext = routeContexts[routeIndex] || {};
 			const manifest = (route.manifest || []).map((entry, entryIndex) => {
 				const savedEntry = savedManifest[entryIndex] || {};
 				const nextEntry = {...entry};
-				const cargoTotalKey = getTransportTotalKey(nextEntry.res, nextEntry.amt);
-				const crewTotalKey = getTransportCrewTotalKey(nextEntry.crew);
+				const cargoTotalKey = getTransportTotalKey(nextEntry.res, nextEntry.amt, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+				const crewTotalKey = getTransportCrewTotalKey(nextEntry.crew, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
 				nextEntry.cargoDispatched = nextEntry.cargoTotal && savedEntry.cargoTotal && savedEntry.cargoTotalKey === cargoTotalKey ? Math.max(0, Math.floor(Number(savedEntry.cargoDispatched || 0))) : 0;
 				nextEntry.cargoTotalKey = cargoTotalKey;
 				nextEntry.crewDispatched = entryIndex === 0 && nextEntry.crewTotal && savedEntry.crewTotal && savedEntry.crewTotalKey === crewTotalKey ? Math.max(0, Math.floor(Number(savedEntry.crewDispatched || 0))) : 0;
@@ -7817,21 +7848,33 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return targets;
 	}
 
-	function getTransportPlusRoutes(fleetParsedData, routeCount = 3) {
+	function getTransportPlusRouteContexts(starbaseCoord, targetCoordsOrValues) {
+		const targets = Array.isArray(targetCoordsOrValues) ? targetCoordsOrValues : [];
+		const contexts = [];
+		for(let routeIndex=0; routeIndex<targets.length + 1; routeIndex++) {
+			const sourceCoord = routeIndex === 0 ? starbaseCoord : targets[routeIndex - 1];
+			const destCoord = routeIndex < targets.length ? targets[routeIndex] : starbaseCoord;
+			contexts.push(getTransportTotalContext(sourceCoord, destCoord, 'transportPlusRoute' + routeIndex));
+		}
+		return contexts;
+	}
+
+	function getTransportPlusRoutes(fleetParsedData, routeCount = 3, routeContexts = []) {
 		const savedRoutes = fleetParsedData && Array.isArray(fleetParsedData.transportPlusRoutes) ? fleetParsedData.transportPlusRoutes : [];
 		const routes = [];
 		for(let routeIndex=0; routeIndex<routeCount; routeIndex++) {
 			const savedRoute = savedRoutes[routeIndex] || {};
 			const routeSubwarpPref = typeof savedRoute.subwarpPref != 'undefined' ? savedRoute.subwarpPref : transportMoveTypeToSubwarpPref(savedRoute.moveType);
 			const savedManifest = Array.isArray(savedRoute.manifest) ? savedRoute.manifest : [];
+			const totalContext = routeContexts[routeIndex] || {};
 			const manifest = [];
 			for(let manifestIndex=0; manifestIndex<4; manifestIndex++) {
 				const savedEntry = savedManifest[manifestIndex] || {};
 				const res = savedEntry.res || '';
 				const amt = savedEntry.amt || 0;
 				const crew = savedEntry.crew || 0;
-				const cargoTotalKey = getTransportTotalKey(res, amt);
-				const crewTotalKey = getTransportCrewTotalKey(crew);
+				const cargoTotalKey = getTransportTotalKey(res, amt, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+				const crewTotalKey = getTransportCrewTotalKey(crew, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
 				manifest.push({
 					res: res,
 					amt: amt,
@@ -7898,7 +7941,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let fleetParsedData = JSON.parse(fleetSavedData);
 			let transportPlusTargetCount = getTransportPlusTargetCount(fleetParsedData, fleetParsedData && fleetParsedData.dest ? fleetParsedData.dest : '');
 			let transportPlusTargetValues = getTransportPlusTargets(fleetParsedData, fleetParsedData && fleetParsedData.dest ? fleetParsedData.dest : '', transportPlusTargetCount);
-			let transportPlusRoutes = getTransportPlusRoutes(fleetParsedData, transportPlusTargetCount + 1);
+			let transportPlusRouteContexts = getTransportPlusRouteContexts(fleetParsedData && fleetParsedData.starbase ? fleetParsedData.starbase : '', transportPlusTargetValues);
+			let transportPlusRoutes = getTransportPlusRoutes(fleetParsedData, transportPlusTargetCount + 1, transportPlusRouteContexts);
 			let fleetRow = document.createElement('tr');
 			fleetRow.classList.add('assist-fleet-row');
 			fleetRow.setAttribute('pk', fleet.publicKey.toString());
@@ -8456,7 +8500,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const normalizeTransportPlusEditorState = () => {
 				transportPlusTargetCount = Math.max(1, Math.min(20, parseInt(transportPlusTargetCount) || 1));
 				transportPlusTargetValues = getTransportPlusTargets({ transportPlusTargets: transportPlusTargetValues }, fleetDestCoordSelect.value || transportPlusTargetValues[0] || '', transportPlusTargetCount);
-				transportPlusRoutes = getTransportPlusRoutes({ transportPlusRoutes: transportPlusRoutes }, transportPlusTargetCount + 1);
+				const routeContexts = getTransportPlusRouteContexts(fleetStarbaseCoordSelect.value || fleetParsedData.starbase || '', transportPlusTargetValues);
+				transportPlusRoutes = getTransportPlusRoutes({ transportPlusRoutes: transportPlusRoutes }, transportPlusTargetCount + 1, routeContexts);
 			};
 
 			const renderTransportPlusConfig = () => {
@@ -9096,6 +9141,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			});
 			transportPlusTargetValues = getTransportPlusTargets({ transportPlusTargets: transportPlusTargetValues }, fleetDestCoord, transportPlusTargetCount);
 			let transportPlusRouteElems = transportPlusRows[i].querySelectorAll('.assist-transport-plus-route');
+			const transportPlusRouteContexts = getTransportPlusRouteContexts(fleetStarbaseCoord, transportPlusTargetValues);
 			let transportPlusRoutes = Array.from(transportPlusRouteElems).map(routeElem => {
 				let routeSubwarpPref = parseInt(routeElem.querySelector('.transport-plus-movetype').value) || 0;
 				let manifest = Array.from(routeElem.querySelectorAll('.transport-resource-entry')).map((entryElem, entryIndex) => {
@@ -9117,8 +9163,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					manifest: manifest
 				};
 			});
-			transportPlusRoutes = mergeTransportTotalState(transportPlusRoutes, fleetParsedData && fleetParsedData.transportPlusRoutes);
-			transportPlusRoutes = getTransportPlusRoutes({ transportPlusRoutes: transportPlusRoutes }, transportPlusTargetValues.length + 1);
+			transportPlusRoutes = mergeTransportTotalState(transportPlusRoutes, fleetParsedData && fleetParsedData.transportPlusRoutes, transportPlusRouteContexts);
+			transportPlusRoutes = getTransportPlusRoutes({ transportPlusRoutes: transportPlusRoutes }, transportPlusTargetValues.length + 1, transportPlusRouteContexts);
 			const transportPlusTargetCoords = transportPlusTargetValues.map(coord => ConvertCoords(coord));
 
 			if(fleetAssignment !== '' && fleetAssignment !== 'Supply Chain') {
@@ -9235,12 +9281,22 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 				let fleetScanEnd = fleetParsedData && fleetParsedData.scanEnd ? fleetParsedData.scanEnd : 0;
 				const getLegacyCargoDispatched = (prefix, entry) => {
-					const key = getTransportTotalKey(entry.res, entry.amt);
+					const totalContext = getLegacyTransportTotalContext(prefix, fleetStarbaseCoord, fleetDestCoord);
+					const key = getTransportTotalKey(entry.res, entry.amt, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
 					return entry.cargoTotal && fleetParsedData && fleetParsedData[prefix + 'Total'] && fleetParsedData[prefix + 'TotalKey'] === key ? Math.max(0, Math.floor(Number(fleetParsedData[prefix + 'Dispatched'] || 0))) : 0;
 				};
 				const getLegacyCrewDispatched = (prefix, entry) => {
-					const key = getTransportCrewTotalKey(entry.crew);
+					const totalContext = getLegacyTransportTotalContext(prefix, fleetStarbaseCoord, fleetDestCoord);
+					const key = getTransportCrewTotalKey(entry.crew, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
 					return entry.crewTotal && fleetParsedData && fleetParsedData[prefix + 'CrewTotal'] && fleetParsedData[prefix + 'CrewTotalKey'] === key ? Math.max(0, Math.floor(Number(fleetParsedData[prefix + 'CrewDispatched'] || 0))) : 0;
+				};
+				const getLegacyCargoTotalKey = (prefix, entry) => {
+					const totalContext = getLegacyTransportTotalContext(prefix, fleetStarbaseCoord, fleetDestCoord);
+					return getTransportTotalKey(entry.res, entry.amt, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+				};
+				const getLegacyCrewTotalKey = (prefix, entry) => {
+					const totalContext = getLegacyTransportTotalContext(prefix, fleetStarbaseCoord, fleetDestCoord);
+					return getTransportCrewTotalKey(entry.crew, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
 				};
 
 				//await GM.setValue(fleetPK, `{\"name\": \"${fleetName}\", \"assignment\": \"${fleetAssignment}\", \"mineResource\": \"${fleetMineResource}\", \"dest\": \"${fleetDestCoord}\", \"starbase\": \"${fleetStarbaseCoord}\", \"moveType\": \"${moveType}\", \"subwarpPref\": \"${subwarpPref}\", \"moveTarget\": \"${fleetMoveTarget}\", \"transportResource1\": \"${transportResource1}\", \"transportResource1Perc\": ${transportResource1Perc}, \"transportResource1Crew\": ${transportResource1Crew}, \"transportResource2\": \"${transportResource2}\", \"transportResource2Perc\": ${transportResource2Perc}, \"transportResource3\": \"${transportResource3}\", \"transportResource3Perc\": ${transportResource3Perc}, \"transportResource4\": \"${transportResource4}\", \"transportResource4Perc\": ${transportResource4Perc}, \"transportSBResource1\": \"${transportSBResource1}\", \"transportSBResource1Perc\": ${transportSBResource1Perc}, \"transportSBResource1Crew\": ${transportSBResource1Crew}, \"transportSBResource2\": \"${transportSBResource2}\", \"transportSBResource2Perc\": ${transportSBResource2Perc}, \"transportSBResource3\": \"${transportSBResource3}\", \"transportSBResource3Perc\": ${transportSBResource3Perc}, \"transportSBResource4\": \"${transportSBResource4}\", \"transportSBResource4Perc\": ${transportSBResource4Perc}, \"scanBlock\": ${JSON.stringify(scanBlock)}, \"scanMin\": ${scanMin}, \"scanMin2\": ${scanMin2}, \"scanMin3\": ${scanMin3}, \"scanSearchDist\": ${scanSearchDist}, \"scanClusterFactor\": ${scanClusterFactor}, \"scanNeighborhoodMinGood\": ${scanNeighborhoodMinGood}, \"scanCheckWhileCooldownLeft\": ${scanCheckWhileCooldownLeft}, \"scanBypassPercent\": ${scanBypassPercent}, \"scanHomeAtPercent\": ${scanHomeAtPercent}, \"scanPattern\": \"${scanPattern}\", \"scanPatternLength\": ${scanPatternLength}, \"scanMove\": \"${scanMove}\", \"scanEnd\": ${fleetScanEnd} }`);
@@ -9257,50 +9313,50 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					transportResource1Perc: transportResource1Entry.amt,
 					transportResource1Total: transportResource1Entry.cargoTotal,
 					transportResource1Dispatched: getLegacyCargoDispatched('transportResource1', transportResource1Entry),
-					transportResource1TotalKey: getTransportTotalKey(transportResource1Entry.res, transportResource1Entry.amt),
+					transportResource1TotalKey: getLegacyCargoTotalKey('transportResource1', transportResource1Entry),
 					transportResource1Crew: transportResource1Entry.crew,
 					transportResource1CrewTotal: transportResource1Entry.crewTotal,
 					transportResource1CrewDispatched: getLegacyCrewDispatched('transportResource1', transportResource1Entry),
-					transportResource1CrewTotalKey: getTransportCrewTotalKey(transportResource1Entry.crew),
+					transportResource1CrewTotalKey: getLegacyCrewTotalKey('transportResource1', transportResource1Entry),
 					transportResource2: transportResource2Entry.res,
 					transportResource2Perc: transportResource2Entry.amt,
 					transportResource2Total: transportResource2Entry.cargoTotal,
 					transportResource2Dispatched: getLegacyCargoDispatched('transportResource2', transportResource2Entry),
-					transportResource2TotalKey: getTransportTotalKey(transportResource2Entry.res, transportResource2Entry.amt),
+					transportResource2TotalKey: getLegacyCargoTotalKey('transportResource2', transportResource2Entry),
 					transportResource3: transportResource3Entry.res,
 					transportResource3Perc: transportResource3Entry.amt,
 					transportResource3Total: transportResource3Entry.cargoTotal,
 					transportResource3Dispatched: getLegacyCargoDispatched('transportResource3', transportResource3Entry),
-					transportResource3TotalKey: getTransportTotalKey(transportResource3Entry.res, transportResource3Entry.amt),
+					transportResource3TotalKey: getLegacyCargoTotalKey('transportResource3', transportResource3Entry),
 					transportResource4: transportResource4Entry.res,
 					transportResource4Perc: transportResource4Entry.amt,
 					transportResource4Total: transportResource4Entry.cargoTotal,
 					transportResource4Dispatched: getLegacyCargoDispatched('transportResource4', transportResource4Entry),
-					transportResource4TotalKey: getTransportTotalKey(transportResource4Entry.res, transportResource4Entry.amt),
+					transportResource4TotalKey: getLegacyCargoTotalKey('transportResource4', transportResource4Entry),
 					transportSBResource1: transportSBResource1Entry.res,
 					transportSBResource1Perc: transportSBResource1Entry.amt,
 					transportSBResource1Total: transportSBResource1Entry.cargoTotal,
 					transportSBResource1Dispatched: getLegacyCargoDispatched('transportSBResource1', transportSBResource1Entry),
-					transportSBResource1TotalKey: getTransportTotalKey(transportSBResource1Entry.res, transportSBResource1Entry.amt),
+					transportSBResource1TotalKey: getLegacyCargoTotalKey('transportSBResource1', transportSBResource1Entry),
 					transportSBResource1Crew: transportSBResource1Entry.crew,
 					transportSBResource1CrewTotal: transportSBResource1Entry.crewTotal,
 					transportSBResource1CrewDispatched: getLegacyCrewDispatched('transportSBResource1', transportSBResource1Entry),
-					transportSBResource1CrewTotalKey: getTransportCrewTotalKey(transportSBResource1Entry.crew),
+					transportSBResource1CrewTotalKey: getLegacyCrewTotalKey('transportSBResource1', transportSBResource1Entry),
 					transportSBResource2: transportSBResource2Entry.res,
 					transportSBResource2Perc: transportSBResource2Entry.amt,
 					transportSBResource2Total: transportSBResource2Entry.cargoTotal,
 					transportSBResource2Dispatched: getLegacyCargoDispatched('transportSBResource2', transportSBResource2Entry),
-					transportSBResource2TotalKey: getTransportTotalKey(transportSBResource2Entry.res, transportSBResource2Entry.amt),
+					transportSBResource2TotalKey: getLegacyCargoTotalKey('transportSBResource2', transportSBResource2Entry),
 					transportSBResource3: transportSBResource3Entry.res,
 					transportSBResource3Perc: transportSBResource3Entry.amt,
 					transportSBResource3Total: transportSBResource3Entry.cargoTotal,
 					transportSBResource3Dispatched: getLegacyCargoDispatched('transportSBResource3', transportSBResource3Entry),
-					transportSBResource3TotalKey: getTransportTotalKey(transportSBResource3Entry.res, transportSBResource3Entry.amt),
+					transportSBResource3TotalKey: getLegacyCargoTotalKey('transportSBResource3', transportSBResource3Entry),
 					transportSBResource4: transportSBResource4Entry.res,
 					transportSBResource4Perc: transportSBResource4Entry.amt,
 					transportSBResource4Total: transportSBResource4Entry.cargoTotal,
 					transportSBResource4Dispatched: getLegacyCargoDispatched('transportSBResource4', transportSBResource4Entry),
-					transportSBResource4TotalKey: getTransportTotalKey(transportSBResource4Entry.res, transportSBResource4Entry.amt),
+					transportSBResource4TotalKey: getLegacyCargoTotalKey('transportSBResource4', transportSBResource4Entry),
 					transportPlusTargetCount: transportPlusTargetCount,
 					transportPlusTarget2: transportPlusTargetValues[1] || '',
 					transportPlusTargets: transportPlusTargetValues,
@@ -11151,12 +11207,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		});
 	}
 
-	function getLegacyTransportManifestEntry(fleetParsedData, prefix, includeCrew = false) {
+	function getLegacyTransportManifestEntry(fleetParsedData, prefix, includeCrew = false, totalContext = {}) {
 		const res = fleetParsedData[prefix] || '';
 		const amt = fleetParsedData[prefix + 'Perc'] || 0;
 		const crew = includeCrew ? (fleetParsedData[prefix + 'Crew'] || 0) : 0;
-		const cargoTotalKey = getTransportTotalKey(res, amt);
-		const crewTotalKey = getTransportCrewTotalKey(crew);
+		const cargoTotalKey = getTransportTotalKey(res, amt, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+		const crewTotalKey = getTransportCrewTotalKey(crew, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
 		return {
 			res: res,
 			amt: amt,
@@ -11180,11 +11236,11 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			const prefix = entry.totalPrefix;
 			fleetParsedData[prefix + 'Total'] = !!entry.cargoTotal;
 			fleetParsedData[prefix + 'Dispatched'] = Math.max(0, Math.floor(Number(entry.cargoDispatched || 0)));
-			fleetParsedData[prefix + 'TotalKey'] = getTransportTotalKey(entry.res, entry.amt);
+			fleetParsedData[prefix + 'TotalKey'] = entry.cargoTotalKey || getTransportTotalKey(entry.res, entry.amt);
 			if(entry.crewTotal || Object.prototype.hasOwnProperty.call(fleetParsedData, prefix + 'CrewTotal')) {
 				fleetParsedData[prefix + 'CrewTotal'] = !!entry.crewTotal;
 				fleetParsedData[prefix + 'CrewDispatched'] = Math.max(0, Math.floor(Number(entry.crewDispatched || 0)));
-				fleetParsedData[prefix + 'CrewTotalKey'] = getTransportCrewTotalKey(entry.crew);
+				fleetParsedData[prefix + 'CrewTotalKey'] = entry.crewTotalKey || getTransportCrewTotalKey(entry.crew);
 			}
 		}
 		await GM.setValue(fleetPK, JSON.stringify(fleetParsedData));
@@ -11195,17 +11251,19 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
         const [starbaseX, starbaseY] = ConvertCoords(userFleets[i].starbaseCoord);
 
         const fleetParsedData = JSON.parse(await GM.getValue(userFleets[i].publicKey.toString(), '{}'));
+		const targetTotalContext = getLegacyTransportTotalContext('transportResource1', userFleets[i].starbaseCoord, userFleets[i].destCoord);
+		const starbaseTotalContext = getLegacyTransportTotalContext('transportSBResource1', userFleets[i].starbaseCoord, userFleets[i].destCoord);
         let targetCargoManifest = [
-            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource1', true),
-            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource2'),
-            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource3'),
-            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource4'),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource1', true, targetTotalContext),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource2', false, getLegacyTransportTotalContext('transportResource2', userFleets[i].starbaseCoord, userFleets[i].destCoord)),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource3', false, getLegacyTransportTotalContext('transportResource3', userFleets[i].starbaseCoord, userFleets[i].destCoord)),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource4', false, getLegacyTransportTotalContext('transportResource4', userFleets[i].starbaseCoord, userFleets[i].destCoord)),
         ];
         let starbaseCargoManifest = [
-            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource1', true),
-            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource2'),
-            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource3'),
-            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource4'),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource1', true, starbaseTotalContext),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource2', false, getLegacyTransportTotalContext('transportSBResource2', userFleets[i].starbaseCoord, userFleets[i].destCoord)),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource3', false, getLegacyTransportTotalContext('transportSBResource3', userFleets[i].starbaseCoord, userFleets[i].destCoord)),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource4', false, getLegacyTransportTotalContext('transportSBResource4', userFleets[i].starbaseCoord, userFleets[i].destCoord)),
         ];
         const hasTargetManifest = hasTransportManifest(targetCargoManifest);
         const hasStarbaseManifest = hasTransportManifest(starbaseCargoManifest);
@@ -11510,7 +11568,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	function getTransportPlusLegs(fleetParsedData, starbaseCoord, target1Coord) {
 		const transportPlusTargets = getTransportPlusTargets(fleetParsedData, target1Coord);
 		if(transportPlusTargets.length < 1) return [];
-		const transportPlusRoutes = getTransportPlusRoutes(fleetParsedData, transportPlusTargets.length + 1);
+		const transportPlusRouteContexts = getTransportPlusRouteContexts(starbaseCoord, transportPlusTargets);
+		const transportPlusRoutes = getTransportPlusRoutes(fleetParsedData, transportPlusTargets.length + 1, transportPlusRouteContexts);
 		const transportPlusLegs = [];
 
 		for(let routeIndex=0; routeIndex<transportPlusRoutes.length; routeIndex++) {
@@ -11543,10 +11602,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			const targetEntry = routeManifest[entryIndex] || {};
 			targetEntry.cargoTotal = !!sourceEntry.cargoTotal;
 			targetEntry.cargoDispatched = Math.max(0, Math.floor(Number(sourceEntry.cargoDispatched || 0)));
-			targetEntry.cargoTotalKey = getTransportTotalKey(sourceEntry.res, sourceEntry.amt);
+			targetEntry.cargoTotalKey = sourceEntry.cargoTotalKey || getTransportTotalKey(sourceEntry.res, sourceEntry.amt);
 			targetEntry.crewTotal = !!sourceEntry.crewTotal;
 			targetEntry.crewDispatched = Math.max(0, Math.floor(Number(sourceEntry.crewDispatched || 0)));
-			targetEntry.crewTotalKey = getTransportCrewTotalKey(sourceEntry.crew);
+			targetEntry.crewTotalKey = sourceEntry.crewTotalKey || getTransportCrewTotalKey(sourceEntry.crew);
 			routeManifest[entryIndex] = targetEntry;
 		}
 		fleetParsedData.transportPlusRoutes[routeIndex].manifest = routeManifest;
