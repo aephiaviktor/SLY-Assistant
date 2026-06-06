@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-43
+// @aephia-version 0.7.35-44
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-43'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-44'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -8908,6 +8908,48 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
         }
 	}
 
+	const TRANSPORT_UNLOAD_RETRY_DELAY_MS = 120000;
+	const TRANSPORT_UNLOAD_RETRY_MAX = 3;
+	const TRANSPORT_UNLOAD_RETRY_MARKER = 'Transport unload retry';
+
+	function getTransportUnloadRetry(fleet) {
+		if(!fleet || !fleet.state || !fleet.state.includes(TRANSPORT_UNLOAD_RETRY_MARKER)) return null;
+		return {
+			retryAt: Number(fleet.transportUnloadRetryAt || 0),
+			count: Number(fleet.transportUnloadRetryCount || 0),
+			coord: fleet.transportUnloadRetryCoord || ''
+		};
+	}
+
+	function clearTransportUnloadRetry(fleet) {
+		if(!fleet) return;
+		fleet.transportUnloadRetryAt = 0;
+		fleet.transportUnloadRetryCount = 0;
+		fleet.transportUnloadRetryCoord = '';
+		fleet.transportUnloadRetryError = '';
+	}
+
+	function scheduleTransportUnloadRetry(fleet, unloadResult, unloadCoord) {
+		if(!globalSettings.transportStopOnError || !unloadResult || !unloadResult.error) return false;
+
+		const retryCount = Number(fleet.transportUnloadRetryCount || 0) + 1;
+		if(retryCount > TRANSPORT_UNLOAD_RETRY_MAX) {
+			clearTransportUnloadRetry(fleet);
+			cLog(1,`${FleetTimeStamp(fleet.label)} Transporting - ${fleet.state} (unload retry limit reached)`);
+			return true;
+		}
+
+		const retryAt = Date.now() + TRANSPORT_UNLOAD_RETRY_DELAY_MS;
+		const retryError = fleet.state || 'ERROR: Transport unload failed';
+		fleet.transportUnloadRetryAt = retryAt;
+		fleet.transportUnloadRetryCount = retryCount;
+		fleet.transportUnloadRetryCoord = unloadCoord;
+		fleet.transportUnloadRetryError = retryError;
+		updateFleetState(fleet, `${retryError} | ${TRANSPORT_UNLOAD_RETRY_MARKER} ${retryCount}/${TRANSPORT_UNLOAD_RETRY_MAX} ⌛ ${TimeToStr(new Date(retryAt))}`, true);
+		cLog(1,`${FleetTimeStamp(fleet.label)} ${TRANSPORT_UNLOAD_RETRY_MARKER} scheduled in ${Math.round(TRANSPORT_UNLOAD_RETRY_DELAY_MS / 1000)}s (${retryCount}/${TRANSPORT_UNLOAD_RETRY_MAX})`);
+		return true;
+	}
+
 	function buildScanBlock(destX, destY, overridePattern, overridePatternLength) {
 		let { scanBlockPattern, scanBlockLength }  = globalSettings;
 		if(typeof overridePattern != "undefined" && overridePattern != '') {
@@ -11227,11 +11269,11 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
                     if (hasStarbaseManifest || checkCargoResult.needToUnload) {
                         resp = await handleTransportUnloading(userFleets[i], userFleets[i].starbaseCoord, starbaseCargoManifest, transportLoadUnloadSingleTx);
-                        if(resp.error && globalSettings.transportStopOnError) {
-				cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - ${userFleets[i].state}`);
+                        if(scheduleTransportUnloadRetry(userFleets[i], resp, userFleets[i].starbaseCoord)) {
 				userFleets[i].resupplying = false;
 				return;
 			}
+			clearTransportUnloadRetry(userFleets[i]);
                         if(transportLoadUnloadSingleTx) {
 				transactions = transactions.concat(resp.transactions);
 				unloadedAmountInTransaction = resp.unloadedAmount;
@@ -11367,11 +11409,11 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     if (hasTargetManifest || checkCargoResult.needToUnload) {
                         const unloadResult = await handleTransportUnloading(userFleets[i], userFleets[i].destCoord, targetCargoManifest, transportLoadUnloadSingleTx);
                         fuelUnloadDeficit = unloadResult.fuelUnloadDeficit;
-                        if(unloadResult.error && globalSettings.transportStopOnError) {
-				cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - ${userFleets[i].state}`);
+                        if(scheduleTransportUnloadRetry(userFleets[i], unloadResult, userFleets[i].destCoord)) {
 				userFleets[i].resupplying = false;
 				return;
 			}
+			clearTransportUnloadRetry(userFleets[i]);
                         if(transportLoadUnloadSingleTx) {
 				transactions = transactions.concat(unloadResult.transactions);
 				unloadedAmountInTransaction = unloadResult.unloadedAmount;
@@ -11569,11 +11611,11 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			if (hasSourceManifest || checkCargoResult.needToUnload) {
 				const unloadResult = await handleTransportUnloading(userFleets[i], sourceCoord, sourceCargoManifest, transportLoadUnloadSingleTx);
 				fuelUnloadDeficit = unloadResult.fuelUnloadDeficit;
-				if(unloadResult.error && globalSettings.transportStopOnError) {
-					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - ${userFleets[i].state}`);
+				if(scheduleTransportUnloadRetry(userFleets[i], unloadResult, sourceCoord)) {
 					userFleets[i].resupplying = false;
 					return false;
 				}
+				clearTransportUnloadRetry(userFleets[i]);
 				if(transportLoadUnloadSingleTx) {
 					transactions = transactions.concat(unloadResult.transactions);
 					unloadedAmountInTransaction = unloadResult.unloadedAmount;
@@ -12190,8 +12232,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	async function operateFleet(i) {
         if (globalErrorTracker.errorCount > 9) toggleAssistant('ERROR');
 
+		const transportUnloadRetry = getTransportUnloadRetry(userFleets[i]);
+		if(transportUnloadRetry) {
+			if(!transportUnloadRetry.retryAt || Date.now() < transportUnloadRetry.retryAt) return;
+		}
 		//Don't run fleets in an error state
-		if (userFleets[i].state.includes('ERROR')) return;
+		else if (userFleets[i].state.includes('ERROR')) return;
 
 		userFleets[i].lastOp = Date.now();
 
@@ -12235,6 +12281,18 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				let fleetCoords = fleetState == 'Idle' ? extra : [];
 				let fleetMining = fleetState == 'MineAsteroid' ? extra : null;
 				userFleets[i].startingCoords = fleetCoords;
+
+				if(transportUnloadRetry) {
+					const retryCoords = transportUnloadRetry.coord ? ConvertCoords(transportUnloadRetry.coord) : [];
+					if(fleetState != 'Idle' || !CoordsEqual(fleetCoords, retryCoords)) {
+						const retryError = userFleets[i].transportUnloadRetryError || 'ERROR: Transport unload retry state mismatch';
+						clearTransportUnloadRetry(userFleets[i]);
+						updateFleetState(userFleets[i], `${retryError} | retry blocked: fleet moved/state changed`, true);
+						return;
+					}
+					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Retrying transport unload after cooldown`);
+					updateFleetState(userFleets[i], 'Retrying transport unload', true);
+				}
 
 				//Correct rare fleet state mismatch bug
 				if(moving && fleetState == 'Idle') {
