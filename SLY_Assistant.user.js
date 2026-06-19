@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-52
+// @aephia-version 0.7.35-53
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-52'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-53'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -12187,41 +12187,57 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		//Unloading resources from manifest
 		let fuelUnloadDeficit = 0;
 		let ammoUnloadDeficit = 0;
+		const unloadEntriesByMint = new Map();
 		for (const entry of transportManifest) {
-			if (entry.res !== '' && entry.amt > 0) {
-				const isFuel = entry.res === sageGameAcct.account.mints.fuel.toString();
-				const isAmmo = entry.res === ammoMint;
-				const currentRes = fleetCurrentCargo.value.find(item => item.account.data.parsed.info.mint === entry.res);
-				const currentResCnt = currentRes ? currentRes.account.data.parsed.info.tokenAmount.uiAmount : 0;
-
-				if(isFuel) fuelUnloadDeficit = entry.amt;
-				if(isAmmo) ammoUnloadDeficit = entry.amt;
-				let amountToUnload = entry.extra ? Math.min(currentResCnt, entry.amt) : currentResCnt;
-				if(globalSettings.transportKeep1 && amountToUnload > 0) { amountToUnload -= 1; }
-				if (amountToUnload > 0) {
-					cLog(1,`${FleetTimeStamp(fleet.label)} Unloading ${amountToUnload} ${entry.res}`);
-					let resp = await execCargoFromFleetToStarbase(fleet, fleet.cargoHold, entry.res, starbaseCoord, amountToUnload, returnTx);
-					if(returnTx && resp) {
-						transactions.push(resp);
-					}
-					if(isFuel) fuelUnloadDeficit -= amountToUnload;
-					if(isAmmo) ammoUnloadDeficit -= amountToUnload;
-					unloadedAmount += amountToUnload * cargoItems.find(r => r.token == entry.res).size;
-					unloadedResources.push(entry.res);
-					if(fleet.state.includes('ERROR')) {
-						error = true;
-						break;
-					}
-				} else {
-					cLog(1,`${FleetTimeStamp(fleet.label)} Unload ${entry.res} skipped - none found in ship's cargo hold`);
-				}
-				//if (resource == sageGameAcct.account.mints.fuel.toString() && resMax < resAmt) extraFuel = resAmt - resMax;
-				//if (resource == ammoMint.toString() && resMax < resAmt) ammoToUnload = resAmt - resMax;
+			if (!entry || entry.res === '' || !(entry.amt > 0)) continue;
+			let unloadEntry = unloadEntriesByMint.get(entry.res);
+			if(!unloadEntry) {
+				unloadEntry = { res: entry.res, plannedAmount: 0, extraAmount: 0, unloadAll: false, count: 0 };
+				unloadEntriesByMint.set(entry.res, unloadEntry);
+			}
+			unloadEntry.count++;
+			if(entry.extra) {
+				unloadEntry.extraAmount += Number(entry.amt || 0);
+			} else {
+				unloadEntry.plannedAmount += Number(entry.amt || 0);
+				unloadEntry.unloadAll = true;
 			}
 		}
 
+		for (const entry of unloadEntriesByMint.values()) {
+			const isFuel = entry.res === sageGameAcct.account.mints.fuel.toString();
+			const isAmmo = entry.res === ammoMint;
+			const currentRes = fleetCurrentCargo.value.find(item => item.account.data.parsed.info.mint === entry.res);
+			const currentResCnt = currentRes ? currentRes.account.data.parsed.info.tokenAmount.uiAmount : 0;
+			if(entry.count > 1) cLog(1,`${FleetTimeStamp(fleet.label)} Merged duplicate unload entries for ${entry.res}`);
+
+			let amountToUnload = entry.unloadAll ? currentResCnt : Math.min(currentResCnt, entry.extraAmount);
+			if(globalSettings.transportKeep1 && amountToUnload > 0) { amountToUnload -= 1; }
+			if (amountToUnload > 0) {
+				cLog(1,`${FleetTimeStamp(fleet.label)} Unloading ${amountToUnload} ${entry.res}`);
+				let resp = await execCargoFromFleetToStarbase(fleet, fleet.cargoHold, entry.res, starbaseCoord, amountToUnload, returnTx);
+				if(returnTx && resp) {
+					transactions.push(resp);
+				}
+				if(isFuel) fuelUnloadDeficit = Math.max(0, entry.plannedAmount - amountToUnload);
+				if(isAmmo) ammoUnloadDeficit = Math.max(0, entry.plannedAmount - amountToUnload);
+				unloadedAmount += amountToUnload * cargoItems.find(r => r.token == entry.res).size;
+				unloadedResources.push(entry.res);
+				if(fleet.state.includes('ERROR')) {
+					error = true;
+					break;
+				}
+			} else {
+				cLog(1,`${FleetTimeStamp(fleet.label)} Unload ${entry.res} skipped - none found in ship's cargo hold`);
+				if(isFuel) fuelUnloadDeficit = entry.plannedAmount;
+				if(isAmmo) ammoUnloadDeficit = entry.plannedAmount;
+			}
+			//if (resource == sageGameAcct.account.mints.fuel.toString() && resMax < resAmt) extraFuel = resAmt - resMax;
+			//if (resource == ammoMint.toString() && resMax < resAmt) ammoToUnload = resAmt - resMax;
+		}
+
 		//Ammo bank unloading
-		const ammoEntry = globalSettings.transportUseAmmoBank ? transportManifest.find(e => e.res === ammoMint) : undefined;
+		const ammoEntry = globalSettings.transportUseAmmoBank ? unloadEntriesByMint.get(ammoMint) : undefined;
 		if (!error && ammoEntry) {
 			let fleetCurrentAmmoBank = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.ammoBank, {programId: tokenProgramPK});
 			let currentAmmo = fleetCurrentAmmoBank.value.find(item => item.account.data.parsed.info.mint === ammoMint);
