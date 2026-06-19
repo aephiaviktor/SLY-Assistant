@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-51
+// @aephia-version 0.7.35-52
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-51'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-52'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -11101,21 +11101,28 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		return unloadResult.unloadedResources.filter(res => loadResources.has(res));
 	}
 
+	async function flushTransportBundle(fleet, transactions, reason, nextState = 'Loading') {
+		if(transactions.length < 1) return { transactions, flushed: false };
+
+		cLog(1,`${FleetTimeStamp(fleet.label)} Split bundled load/unload ${reason}`);
+		updateFleetState(fleet, 'Exec tx bundle');
+		await txSliceAndSend(transactions, fleet, 'LOAD/UNLOAD', 100, 5);
+		if(fleet.state.includes('ERROR')) return { transactions: [], flushed: true, error: true };
+
+		await wait(1000);
+		if(nextState) updateFleetState(fleet, nextState);
+		return { transactions: [], flushed: true };
+	}
+
 	async function flushTransportBundleForCargoOverlap(fleet, transactions, unloadResult, loadManifest, splitForAnyFollowup = false) {
 		const overlap = transportUnloadLoadOverlap(unloadResult, loadManifest);
 		const hasCargoUnload = unloadResult && Array.isArray(unloadResult.unloadedResources) && unloadResult.unloadedResources.length > 0;
 		if(transactions.length < 1 || (!splitForAnyFollowup && overlap.length < 1) || (splitForAnyFollowup && !hasCargoUnload && overlap.length < 1)) return { transactions, flushed: false };
 
 		const splitReason = overlap.length > 0 ? `before reloading same cargo: ${overlap.join(', ')}` : 'before loading after cargo unload';
-		cLog(1,`${FleetTimeStamp(fleet.label)} Split bundled load/unload ${splitReason}`);
-		updateFleetState(fleet, 'Exec tx bundle');
-		await txSliceAndSend(transactions, fleet, 'LOAD/UNLOAD', 100, 5);
-		if(fleet.state.includes('ERROR')) return { transactions: [], flushed: true, error: true };
-
-		await wait(1000);
+		const result = await flushTransportBundle(fleet, transactions, splitReason, 'Loading');
 		if(typeof clearTransportUnloadRetry === 'function') clearTransportUnloadRetry(fleet);
-		updateFleetState(fleet, 'Loading');
-		return { transactions: [], flushed: true };
+		return result;
 	}
 
 	function getParsedTokenAmount(parsedTokenAccounts, mint) {
@@ -11414,7 +11421,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				unloadedAmountInTransaction = resp.unloadedAmount;
 					const splitResult = await flushTransportBundleForCargoOverlap(userFleets[i], transactions, resp, targetLoadManifest, checkCargoResult.needToLoad || fuelToAdd > 0);
 				transactions = splitResult.transactions;
-				if(splitResult.flushed) unloadedAmountInTransaction = 0;
+				if(splitResult.flushed) {
+					unloadedAmountInTransaction = 0;
+				}
 				if(splitResult.error) {
 					userFleets[i].resupplying = false;
 					return;
@@ -11437,6 +11446,18 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                         return;
                     } else if(transportLoadUnloadSingleTx && refuelResp && refuelResp.transactions) {
 			transactions = transactions.concat(refuelResp.transactions);
+			if(refuelResp.transactions.length > 0) {
+				const splitResult = await flushTransportBundle(userFleets[i], transactions, 'after fuel refuel before cargo load/undock', 'Loading');
+				transactions = splitResult.transactions;
+				if(splitResult.flushed) {
+					unloadedAmountInTransaction = 0;
+					refuelResp.alreadyLoaded = 0;
+				}
+				if(splitResult.error) {
+					userFleets[i].resupplying = false;
+					return;
+				}
+			}
                     }
 
                     let fuelIndex = targetLoadManifest.findIndex(e => e.res === sageGameAcct.account.mints.fuel.toString());
@@ -11459,6 +11480,14 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                             return;
                         } else if(transportLoadUnloadSingleTx) {
                             transactions = transactions.concat(loadedCargoResult.transactions);
+				if(loadedCargoResult.transactions.length > 0) {
+					const splitResult = await flushTransportBundle(userFleets[i], transactions, 'after cargo load before undock', 'Loading');
+					transactions = splitResult.transactions;
+					if(splitResult.error) {
+						userFleets[i].resupplying = false;
+						return;
+					}
+				}
 			}
 						loadedCargo = loadedCargoResult.loadedCargo || {};
                     } else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Loading skipped - No resources specified`);
@@ -11585,6 +11614,18 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                         return;
                     } else if(transportLoadUnloadSingleTx && refuelResp && refuelResp.transactions) {
 			transactions = transactions.concat(refuelResp.transactions);
+			if(refuelResp.transactions.length > 0) {
+				const splitResult = await flushTransportBundle(userFleets[i], transactions, 'after fuel refuel before cargo load/undock', 'Loading');
+				transactions = splitResult.transactions;
+				if(splitResult.flushed) {
+					unloadedAmountInTransaction = 0;
+					refuelResp.alreadyLoaded = 0;
+				}
+				if(splitResult.error) {
+					userFleets[i].resupplying = false;
+					return;
+				}
+			}
                     }
 
                     let fuelIndex = starbaseLoadManifest.findIndex(e => e.res === sageGameAcct.account.mints.fuel.toString());
@@ -11605,6 +11646,14 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                             return;
                         } else if(transportLoadUnloadSingleTx) {
 				transactions = transactions.concat(loadedCargoResult.transactions);
+				if(loadedCargoResult.transactions.length > 0) {
+					const splitResult = await flushTransportBundle(userFleets[i], transactions, 'after cargo load before undock', 'Loading');
+					transactions = splitResult.transactions;
+					if(splitResult.error) {
+						userFleets[i].resupplying = false;
+						return;
+					}
+				}
 			}
 			loadedCargo = loadedCargoResult.loadedCargo || {};
                     } else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Loading skipped - No resources specified`);
@@ -11773,7 +11822,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					unloadedAmountInTransaction = unloadResult.unloadedAmount;
 					const splitResult = await flushTransportBundleForCargoOverlap(userFleets[i], transactions, unloadResult, destinationCargoManifest, checkCargoResult.needToLoad || fuelToAdd > 0);
 					transactions = splitResult.transactions;
-					if(splitResult.flushed) unloadedAmountInTransaction = 0;
+					if(splitResult.flushed) {
+						unloadedAmountInTransaction = 0;
+					}
 					if(splitResult.error) {
 						userFleets[i].resupplying = false;
 						return false;
@@ -11787,6 +11838,18 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				return false;
 			} else if(transportLoadUnloadSingleTx && refuelResp && refuelResp.transactions) {
 				transactions = transactions.concat(refuelResp.transactions);
+				if(refuelResp.transactions.length > 0) {
+					const splitResult = await flushTransportBundle(userFleets[i], transactions, 'after fuel refuel before cargo load/undock', 'Loading');
+					transactions = splitResult.transactions;
+					if(splitResult.flushed) {
+						unloadedAmountInTransaction = 0;
+						refuelResp.alreadyLoaded = 0;
+					}
+					if(splitResult.error) {
+						userFleets[i].resupplying = false;
+						return false;
+					}
+				}
 			}
 
 			let fuelIndex = destinationCargoManifest.findIndex(e => e.res === sageGameAcct.account.mints.fuel.toString());
@@ -11804,6 +11867,14 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					return false;
 				} else if(transportLoadUnloadSingleTx) {
 					transactions = transactions.concat(loadedCargoResult.transactions);
+					if(loadedCargoResult.transactions.length > 0) {
+						const splitResult = await flushTransportBundle(userFleets[i], transactions, 'after cargo load before undock', 'Loading');
+						transactions = splitResult.transactions;
+						if(splitResult.error) {
+							userFleets[i].resupplying = false;
+							return false;
+						}
+					}
 				}
 				loadedCargo = loadedCargoResult.loadedCargo || {};
 			} else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Loading skipped - No resources specified`);
