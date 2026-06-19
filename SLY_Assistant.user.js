@@ -11078,6 +11078,35 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		return false;
 	}
 
+	function transportManifestResourceSet(manifest) {
+		const resources = new Set();
+		for(const entry of manifest || []) {
+			if(entry && entry.res && Number(entry.amt || 0) > 0) resources.add(entry.res);
+		}
+		return resources;
+	}
+
+	function transportUnloadLoadOverlap(unloadResult, loadManifest) {
+		if(!unloadResult || !Array.isArray(unloadResult.unloadedResources) || unloadResult.unloadedResources.length < 1) return [];
+		const loadResources = transportManifestResourceSet(loadManifest);
+		return unloadResult.unloadedResources.filter(res => loadResources.has(res));
+	}
+
+	async function flushTransportBundleForCargoOverlap(fleet, transactions, unloadResult, loadManifest) {
+		const overlap = transportUnloadLoadOverlap(unloadResult, loadManifest);
+		if(overlap.length < 1 || transactions.length < 1) return { transactions, flushed: false };
+
+		cLog(1,`${FleetTimeStamp(fleet.label)} Split bundled load/unload before reloading same cargo: ${overlap.join(', ')}`);
+		updateFleetState(fleet, 'Exec tx bundle');
+		await txSliceAndSend(transactions, fleet, 'LOAD/UNLOAD', 100, 5);
+		if(fleet.state.includes('ERROR')) return { transactions: [], flushed: true, error: true };
+
+		await wait(1000);
+		if(typeof clearTransportUnloadRetry === 'function') clearTransportUnloadRetry(fleet);
+		updateFleetState(fleet, 'Loading');
+		return { transactions: [], flushed: true };
+	}
+
 	function getParsedTokenAmount(parsedTokenAccounts, mint) {
 		const tokenAccount = parsedTokenAccounts.value.find(item => item.account.data.parsed.info.mint === mint);
 		return tokenAccount ? tokenAccount.account.data.parsed.info.tokenAmount.uiAmount : 0;
@@ -11372,6 +11401,13 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                         if(transportLoadUnloadSingleTx) {
 				transactions = transactions.concat(resp.transactions);
 				unloadedAmountInTransaction = resp.unloadedAmount;
+				const splitResult = await flushTransportBundleForCargoOverlap(userFleets[i], transactions, resp, targetLoadManifest, userFleets[i].starbaseCoord);
+				transactions = splitResult.transactions;
+				if(splitResult.flushed) unloadedAmountInTransaction = 0;
+				if(splitResult.error) {
+					userFleets[i].resupplying = false;
+					return;
+				}
 				/*
 				if(hasTargetManifest) {
 					//if we need to load something, make sure we execute the unload transactions first
@@ -11513,6 +11549,13 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                         if(transportLoadUnloadSingleTx) {
 				transactions = transactions.concat(unloadResult.transactions);
 				unloadedAmountInTransaction = unloadResult.unloadedAmount;
+				const splitResult = await flushTransportBundleForCargoOverlap(userFleets[i], transactions, unloadResult, starbaseLoadManifest, userFleets[i].destCoord);
+				transactions = splitResult.transactions;
+				if(splitResult.flushed) unloadedAmountInTransaction = 0;
+				if(splitResult.error) {
+					userFleets[i].resupplying = false;
+					return;
+				}
 				/*
 				if(hasStarbaseManifest) {
 					//if we need to load something, make sure we execute the unload transactions first
@@ -11717,6 +11760,13 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				if(transportLoadUnloadSingleTx) {
 					transactions = transactions.concat(unloadResult.transactions);
 					unloadedAmountInTransaction = unloadResult.unloadedAmount;
+					const splitResult = await flushTransportBundleForCargoOverlap(userFleets[i], transactions, unloadResult, destinationCargoManifest, sourceCoord);
+					transactions = splitResult.transactions;
+					if(splitResult.flushed) unloadedAmountInTransaction = 0;
+					if(splitResult.error) {
+						userFleets[i].resupplying = false;
+						return false;
+					}
 				}
 			} else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Unloading skipped - No resources specified`);
 
@@ -12049,6 +12099,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 		let transactions = [];
 		let unloadedAmount = 0;
+		let unloadedResources = [];
 		let error = false;
 
 		//Unloading resources from manifest
@@ -12074,6 +12125,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					if(isFuel) fuelUnloadDeficit -= amountToUnload;
 					if(isAmmo) ammoUnloadDeficit -= amountToUnload;
 					unloadedAmount += amountToUnload * cargoItems.find(r => r.token == entry.res).size;
+					unloadedResources.push(entry.res);
 					if(fleet.state.includes('ERROR')) {
 						error = true;
 						break;
@@ -12100,13 +12152,14 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				if(returnTx && resp) {
 					transactions.push(resp);
 				}
+				unloadedResources.push(ammoMint);
 				if(fleet.state.includes('ERROR')) {
 					error = true;
 				}
 			}
 		}
 
-		return { fuelUnloadDeficit, transactions, unloadedAmount, error };
+		return { fuelUnloadDeficit, transactions, unloadedAmount, unloadedResources: Array.from(new Set(unloadedResources)), error };
 	}
 
 	async function handleTransportLoading(i, starbaseCoords, transportManifest, returnTx, alreadyUnloadedInTransaction) {
