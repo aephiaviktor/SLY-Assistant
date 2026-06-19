@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-50
+// @aephia-version 0.7.35-51
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-50'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-51'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -10195,6 +10195,15 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 							//await wait(2000);
 						}
 					}
+					if(minerSupplySingleTx && unloadAmount > 0 && transactions.length > 0) {
+						cLog(1,`${FleetTimeStamp(userFleets[i].label)} Split bundled miner resupply before loading after cargo unload`);
+						updateFleetState(userFleets[i], `Executing resupply tx`);
+						await txSliceAndSend(transactions, userFleets[i], 'RESUPPLY', 100, 6);
+						transactions = [];
+						if(userFleets[i].state.includes('ERROR')) return;
+						await wait(1000);
+						updateFleetState(userFleets[i], `Loading`);
+					}
 
 					//if (currentFuelCnt < userFleets[i].fuelCapacity) {
 					if (currentFuelCnt < fuelNeeded) {
@@ -10362,11 +10371,13 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		return unloadResult.unloadedResources.filter(res => loadResources.has(res));
 	}
 
-	async function flushTransportBundleForCargoOverlap(fleet, transactions, unloadResult, loadManifest) {
+	async function flushTransportBundleForCargoOverlap(fleet, transactions, unloadResult, loadManifest, splitForAnyFollowup = false) {
 		const overlap = transportUnloadLoadOverlap(unloadResult, loadManifest);
-		if(overlap.length < 1 || transactions.length < 1) return { transactions, flushed: false };
+		const hasCargoUnload = unloadResult && Array.isArray(unloadResult.unloadedResources) && unloadResult.unloadedResources.length > 0;
+		if(transactions.length < 1 || (!splitForAnyFollowup && overlap.length < 1) || (splitForAnyFollowup && !hasCargoUnload && overlap.length < 1)) return { transactions, flushed: false };
 
-		cLog(1,`${FleetTimeStamp(fleet.label)} Split bundled load/unload before reloading same cargo: ${overlap.join(', ')}`);
+		const splitReason = overlap.length > 0 ? `before reloading same cargo: ${overlap.join(', ')}` : 'before loading after cargo unload';
+		cLog(1,`${FleetTimeStamp(fleet.label)} Split bundled load/unload ${splitReason}`);
 		updateFleetState(fleet, 'Exec tx bundle');
 		await txSliceAndSend(transactions, fleet, 'LOAD/UNLOAD', 100, 5);
 		if(fleet.state.includes('ERROR')) return { transactions: [], flushed: true, error: true };
@@ -10601,7 +10612,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                         if(transportLoadUnloadSingleTx) {
 				transactions = transactions.concat(resp.transactions);
 				unloadedAmountInTransaction = resp.unloadedAmount;
-				const splitResult = await flushTransportBundleForCargoOverlap(userFleets[i], transactions, resp, targetCargoManifest, userFleets[i].starbaseCoord);
+					const splitResult = await flushTransportBundleForCargoOverlap(userFleets[i], transactions, resp, targetCargoManifest, checkCargoResult.needToLoad || fuelToAdd > 0);
 				transactions = splitResult.transactions;
 				if(splitResult.flushed) unloadedAmountInTransaction = 0;
 				if(splitResult.error) {
@@ -10733,7 +10744,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                         if(transportLoadUnloadSingleTx) {
 				transactions = transactions.concat(unloadResult.transactions);
 				unloadedAmountInTransaction = unloadResult.unloadedAmount;
-				const splitResult = await flushTransportBundleForCargoOverlap(userFleets[i], transactions, unloadResult, starbaseCargoManifest, userFleets[i].destCoord);
+					const splitResult = await flushTransportBundleForCargoOverlap(userFleets[i], transactions, unloadResult, starbaseCargoManifest, checkCargoResult.needToLoad || fuelToAdd > 0);
 				transactions = splitResult.transactions;
 				if(splitResult.flushed) unloadedAmountInTransaction = 0;
 				if(splitResult.error) {
