@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-55
+// @aephia-version 0.7.35-56
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-55'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-56'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -1988,7 +1988,7 @@
 				}))
 			};
 			globalSettings.upgradeAutomationNeutralPhaseSnapshot = JSON.stringify(neutralPhaseSnapshot);
-			await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
+			await saveGlobalSettings('phase-snapshot-activate');
 		}
 		const activeNeutralPhaseSnapshot = (neutralPhaseSnapshot && neutralPhaseSnapshot.key === neutralPhaseSnapshotKey) ? neutralPhaseSnapshot : null;
 		if (activeNeutralPhaseSnapshot) {
@@ -2001,7 +2001,7 @@
 			}
 		} else if (!requestedNeutralPhaseMode && globalSettings?.upgradeAutomationNeutralPhaseSnapshot) {
 			delete globalSettings.upgradeAutomationNeutralPhaseSnapshot;
-			await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
+			await saveGlobalSettings('phase-snapshot-clear');
 		}
 		const neutralLpTarget = finalPlan.neutralLpTargetTotal;
 		const requestedLpTargetOpt = finalPlan.targetFinalLp;
@@ -3486,9 +3486,101 @@
 		});
 	}
 
+	let slyaPrevSecretKeyLen = 0;
+	let slyaPrevSaveProfile = true;
+	let slyaSettingsResetSuspected = false;
+
+	function redactSettingsForLog(obj) {
+		try {
+			const copy = JSON.parse(JSON.stringify(obj || {}));
+			if (copy.mySecretKey) copy.mySecretKey = '[REDACTED len=' + (copy.mySecretKey || '').length + ']';
+			if (copy.aephiaApiKey) copy.aephiaApiKey = '[REDACTED len=' + (copy.aephiaApiKey || '').length + ']';
+			if (copy.influxAuth) copy.influxAuth = '[REDACTED len=' + (copy.influxAuth || '').length + ']';
+			if (copy.lpTargetHistoryInfluxAuth) copy.lpTargetHistoryInfluxAuth = '[REDACTED len=' + (copy.lpTargetHistoryInfluxAuth || '').length + ']';
+			if (copy.customKey) copy.customKey = '[REDACTED len=' + (copy.customKey || '').length + ']';
+			if (copy.secretKey) copy.secretKey = '[REDACTED len=' + (copy.secretKey || '').length + ']';
+			return copy;
+		} catch (e) { return { redactError: String(e?.message || e) }; }
+	}
+
+	async function saveGlobalSettings(reason) {
+		try {
+			const before = {
+				saveProfile: !!slyaPrevSaveProfile,
+				savedProfileLength: Number(Array.isArray(globalSettings?.savedProfile) ? globalSettings.savedProfile.length : 0),
+				mySecretKeyLen: slyaPrevSecretKeyLen,
+				keyCount: Object.keys(globalSettings || {}).length,
+			};
+			const after = {
+				saveProfile: !!globalSettings?.saveProfile,
+				savedProfileLength: Number(Array.isArray(globalSettings?.savedProfile) ? globalSettings.savedProfile.length : 0),
+				mySecretKeyLen: (globalSettings?.mySecretKey || '').length,
+				keyCount: Object.keys(globalSettings || {}).length,
+			};
+			const warnings = [];
+			if (before.saveProfile === true && after.saveProfile === false) {
+				warnings.push('saveProfile flipped TRUE->FALSE');
+			}
+			if (before.mySecretKeyLen > 0 && after.mySecretKeyLen === 0) {
+				warnings.push('mySecretKey CLEARED (was ' + before.mySecretKeyLen + ' chars, now 0)');
+			}
+			const logLine = '[SETTINGS][SAVE] reason=' + String(reason || 'unknown')
+				+ ' keys=' + before.keyCount + '->' + after.keyCount
+				+ ' saveProfile=' + before.saveProfile + '->' + after.saveProfile
+				+ ' savedProfileLen=' + before.savedProfileLength + '->' + after.savedProfileLength
+				+ ' mySecretKeyLen=' + before.mySecretKeyLen + '->' + after.mySecretKeyLen
+				+ (warnings.length ? ' WARN=' + warnings.join(';') : '');
+			try { cLog(2, logLine); } catch (e) {}
+			try { await appendUpgradeAutomationLog(logLine); } catch (e) {}
+			if (warnings.length) {
+				const warnLine = '[SETTINGS][WARN] ' + warnings.join('; ') + ' reason=' + String(reason || 'unknown');
+				try { console.warn(warnLine, { before, after, redacted: redactSettingsForLog(globalSettings) }); } catch (e) {}
+				try { await appendUpgradeAutomationLog(warnLine); } catch (e) {}
+			}
+			slyaPrevSaveProfile = after.saveProfile;
+			slyaPrevSecretKeyLen = after.mySecretKeyLen;
+		} catch (e) {
+			try { await appendUpgradeAutomationLog('[SETTINGS][SAVE-LOG-ERROR] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {}
+		}
+		await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
+	}
+
 	async function loadGlobalSettings() {
 		const rawSettingsData = await GM.getValue(settingsGmKey, '{}');
 		globalSettings = JSON.parse(rawSettingsData);
+		try {
+			const loadedKeyCount = Object.keys(globalSettings || {}).length;
+			const loadedKeyLen = (globalSettings?.mySecretKey || '').length;
+			slyaPrevSecretKeyLen = loadedKeyLen;
+			slyaPrevSaveProfile = !!globalSettings?.saveProfile;
+			const looksLikeFreshDefaults = (
+				loadedKeyCount > 0
+				&& loadedKeyCount <= 70
+				&& (globalSettings?.customRPC === undefined || globalSettings?.customRPC === null || globalSettings?.customRPC === false)
+				&& (globalSettings?.profileSettings === undefined || globalSettings?.profileSettings === null)
+				&& (globalSettings?.playerProfile === undefined || globalSettings?.playerProfile === null)
+				&& (globalSettings?.slyOwnerProfileKey === undefined || globalSettings?.slyOwnerProfileKey === null)
+				&& loadedKeyLen === 0
+			);
+			const startupLine = '[SETTINGS][LOAD] keys=' + loadedKeyCount
+				+ ' mySecretKeyLen=' + loadedKeyLen
+				+ ' saveProfile=' + !!globalSettings?.saveProfile
+				+ ' savedProfileLen=' + (Array.isArray(globalSettings?.savedProfile) ? globalSettings.savedProfile.length : 0)
+				+ ' heliusRpcURL=' + (globalSettings?.heliusRpcURL ? 'set' : 'empty')
+				+ ' customRPC=' + !!globalSettings?.customRPC
+				+ ' profileSettings=' + (globalSettings?.profileSettings ? 'set' : 'empty')
+				+ ' looksLikeFreshDefaults=' + looksLikeFreshDefaults;
+			try { cLog(2, startupLine); } catch (e) {}
+			try { await appendUpgradeAutomationLog(startupLine); } catch (e) {}
+			if (looksLikeFreshDefaults) {
+				slyaSettingsResetSuspected = true;
+				const warnLine = '[SETTINGS][WARN] loaded globalSettings looks like SLYA defaults (small key set, no secret key, no custom keys). If you did not intentionally reset, your leveldb may have been wiped. Check the previous SETTINGS entries in upgrade-automation.log for the last write.';
+				try { console.warn(warnLine, { redacted: redactSettingsForLog(globalSettings) }); } catch (e) {}
+				try { await appendUpgradeAutomationLog(warnLine); } catch (e) {}
+			}
+		} catch (e) {
+			try { await appendUpgradeAutomationLog('[SETTINGS][LOAD-LOG-ERROR] err=' + String(e?.message || e)); } catch (e2) {}
+		}
 		globalSettings = {
 			// Priority Fee added to each transaction in Lamports. Set to 0 (zero) to disable priority fees. 1 Lamport = 0.000000001 SOL
 			priorityFee: parseIntDefault(globalSettings.priorityFee, 1),
@@ -4018,7 +4110,7 @@
 				lpAutomationEnabledToggle.dataset.bound = '1';
 				lpAutomationEnabledToggle.addEventListener('change', async () => {
 					globalSettings.upgradeAutomationEnabled = !!lpAutomationEnabledToggle.checked;
-					await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
+					await saveGlobalSettings('lp-automation-enabled-toggle');
 					renderLpAutomationContent();
 				});
 			}
@@ -4057,7 +4149,7 @@
 				const absAggrMultiplier = Math.max(0, parseLocaleFloat(upgradeAutomationAbsAggrMultiplier?.value, 1));
 				globalSettings.upgradeAutomationAbsAggrMultiplier = absAggrMultiplier;
 				globalSettings.upgradeAutomationPoolSkewMultiplier = poolSkewMultiplier;
-				await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
+				await saveGlobalSettings('aggressiveness-settings-apply');
 				await refreshUpgradeAutomationInfluxStats();
 				await refreshUpgradeAutomationExecutionSummary();
 				renderLpAutomationContent();
@@ -4121,7 +4213,7 @@
 				lpAutomationStartCraftSlot.dataset.bound = '1';
 				lpAutomationStartCraftSlot.addEventListener('change', async () => {
 					globalSettings.upgradeAutomationStartCraftSlot = parseIntDefault(lpAutomationStartCraftSlot.value, 1);
-					await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
+					await saveGlobalSettings('start-craft-slot-toggle');
 					renderLpAutomationContent();
 				});
 			}
@@ -4130,7 +4222,7 @@
 				phantomCrewUnlimitedToggle.dataset.bound = '1';
 				phantomCrewUnlimitedToggle.addEventListener('change', async () => {
 					globalSettings.upgradeAutomationPhantomCrewUnlimited = !!phantomCrewUnlimitedToggle.checked;
-					await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
+					await saveGlobalSettings('phantom-crew-unlimited-toggle');
 					const maxCrewField = el.querySelector('#upgradeAutomationMaxPhantomCrew');
 					if (maxCrewField) maxCrewField.disabled = !!phantomCrewUnlimitedToggle.checked;
 					renderLpAutomationContent();
@@ -4144,7 +4236,7 @@
 					const clamped = Math.max(0, rawVal);
 					upgradeAutomationMaxPhantomCrew.value = clamped;
 					globalSettings.upgradeAutomationMaxPhantomCrew = clamped;
-					await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
+					await saveGlobalSettings('max-phantom-crew-input');
 				});
 			}
 		}
@@ -9823,7 +9915,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		if(globalSettings.automaticFeeMax > 50000) globalSettings.automaticFeeMax = 50000;
 		if(globalSettings.priorityFee > 50000) globalSettings.priorityFee = 50000;
 
-		await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
+		await saveGlobalSettings('global-settings-modal-save');
 		rebuildRpcPools();
 		aephiaApiKeyValidation = { status: 'unknown', message: 'Aephia API key changed; validation required.', checkedAt: 0, tokenKey: '' };
 		refreshLpAutomationMenuAccess(true);
@@ -13557,7 +13649,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     */
                     globalSettings.savedProfile = [userProfileAcct.toString(), userProfileKeyIdx, pointsProfileKeyIdx];
 
-                    await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
+                    await saveGlobalSettings('profile-selection-save');
                 }
             }
 
