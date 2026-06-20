@@ -2,20 +2,29 @@ const { ipcMain, session, app, BrowserWindow } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 
+const APP_ROOT = __dirname
+
+function getInstallInstanceName()
+{
+	const baseName = path.basename(APP_ROOT)
+	const match = baseName.match(/^SLYA\s*-\s*(.+)$/i)
+	return match ? match[1].trim() : ''
+}
+
 function readInstanceConfig()
 {
-        const configPath = path.join(__dirname, 'instance-config.json')
-        try {
-                if (!fs.existsSync(configPath)) return {}
-                return JSON.parse(fs.readFileSync(configPath, 'utf8'))
-        } catch (error) {
-                console.error('Failed to read instance-config.json:', error)
-                return {}
-        }
+	const configPath = path.join(APP_ROOT, 'instance-config.json')
+	try {
+		if (!fs.existsSync(configPath)) return {}
+		return JSON.parse(fs.readFileSync(configPath, 'utf8'))
+	} catch (error) {
+		console.error('Failed to read instance-config.json:', error)
+		return {}
+	}
 }
 
 const instanceConfig = readInstanceConfig()
-const APP_INSTANCE_NAME = String(instanceConfig.instanceName || '').replace(/[<>]/g, '').trim()
+const APP_INSTANCE_NAME = String(instanceConfig.instanceName || getInstallInstanceName()).replace(/[<>]/g, '').trim()
 const APP_NAME = APP_INSTANCE_NAME ? `SLYA - ${APP_INSTANCE_NAME}` : 'SLYA'
 const APP_ID = APP_INSTANCE_NAME ? `slya.${APP_INSTANCE_NAME.toLowerCase().replace(/[^a-z0-9]+/g, '')}` : 'slya'
 
@@ -30,10 +39,10 @@ const AEP_WRAPPER_UPDATE_FILES = [
 ]
 app.setName(APP_NAME)
 app.setAppUserModelId(APP_ID)
-app.setPath('userData',path.join(__dirname, 'data'))
+app.setPath('userData', path.join(APP_ROOT, 'data'))
 
 const loadApp = (win, version, aephiaVersion) => {
-	win.loadFile('app/index.html', { query: { version: version, aephiaVersion: aephiaVersion, appInstanceName: APP_INSTANCE_NAME } } )
+	win.loadFile(path.join(APP_ROOT, 'app', 'index.html'), { query: { version: version, aephiaVersion: aephiaVersion, appInstanceName: APP_INSTANCE_NAME } } )
 }
 
 const createWindow = (version, aephiaVersion) => {
@@ -41,10 +50,10 @@ const createWindow = (version, aephiaVersion) => {
     title: APP_NAME,
     width: 800,
     height: 600,
-    icon: path.join(__dirname, 'app/icons/128.png'),
+    icon: path.join(APP_ROOT, 'app/icons/128.png'),
     autoHideMenuBar: true,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js')
+      preload: path.join(APP_ROOT, 'preload.js')
     }    
   })
   //win.webContents.openDevTools()  
@@ -64,7 +73,7 @@ function readUserscriptMeta(file, key)
 
 function readInstalledSLYAMeta()
 {
-	const file = fs.readFileSync("app/SLY_Assistant.user.js").toString()
+	const file = fs.readFileSync(path.join(APP_ROOT, 'app', 'SLY_Assistant.user.js')).toString()
 	return {
 		file,
 		version: readUserscriptMeta(file, 'version'),
@@ -90,16 +99,14 @@ async function fetchSLYA(sourceUrl)
 function preserveElectronMainIdentity(file)
 {
 	return file
-		.replace(/const APP_NAME = '[^']+'/, `const APP_NAME = '${APP_NAME}'`)
-		.replace(/const APP_ID = '[^']+'/, `const APP_ID = '${APP_ID}'`)
 }
 
 function preserveElectronIndexIdentity(file)
 {
 	return file
 		.replace(/<title>[^<]+<\/title>/, `<title>${APP_NAME}</title>`)
-		.replace(/appInstanceName'\) \|\| '[^']+'/, `appInstanceName') || ''`)
-                .replace(/This SLYA - [^<]+ standalone version/g, `This SLYA standalone version`)
+		.replace(/appInstanceName'\) \|\| '[^']*'/, `appInstanceName') || '${APP_INSTANCE_NAME.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`)
+		.replace(/This SLYA(?:\s*-\s*[^<]+)? standalone version/g, `This ${APP_NAME} standalone version`)
 }
 
 function writeUpdateFile(target, file)
@@ -140,7 +147,7 @@ function wait(ms) {	return new Promise(resolve => {	setTimeout(resolve, ms); });
 
 app.whenReady().then(async () => {
 try {
-  const startupLogPath = path.join(__dirname, 'data', 'upgrade-automation.log');
+  const startupLogPath = path.join(APP_ROOT, 'data', 'upgrade-automation.log');
   fs.appendFileSync(startupLogPath, `[${new Date().toISOString()}] [ELECTRON] main startup\n`, 'utf8');
 } catch (e) {}
 const filter = {
@@ -156,7 +163,7 @@ var version
 var aephiaVersion
 
 var firstinit=false;
-if(!fs.existsSync("app/SLY_Assistant.user.js"))
+if(!fs.existsSync(path.join(APP_ROOT, 'app', 'SLY_Assistant.user.js')))
 {
 	win = createWindow(version, aephiaVersion)
 	await wait(500);
@@ -193,7 +200,7 @@ else
 	try { originalLatest = await fetchSLYA(ORIGINAL_UPDATE_URL); originalVersion = originalLatest.version } catch (error) { originalVersion = 'unavailable' }
 	try { viktorLatest = await fetchSLYA(AEP_UPDATE_URL); viktorVersion = viktorLatest.aephiaVersion !== 'unknown' ? viktorLatest.aephiaVersion : viktorLatest.version } catch (error) { viktorVersion = 'unavailable' }
 	try {
-		const currentFile = fs.readFileSync("app/SLY_Assistant.user.js").toString()
+		const currentFile = fs.readFileSync(path.join(APP_ROOT, 'app', 'SLY_Assistant.user.js')).toString()
 		const currentAephiaVersion = readUserscriptMeta(currentFile, 'aephia-version')
 		currentVersion = currentAephiaVersion !== 'unknown' ? currentAephiaVersion : readUserscriptMeta(currentFile, 'version')
 		currentLabel = currentAephiaVersion !== 'unknown' ? `AEP v${currentVersion}` : `SLYA v${currentVersion}`
@@ -218,7 +225,7 @@ else
 
   ipcMain.handle('appendUpgradeAutomationLogFile', async (event, line) => {
 	try {
-		const logPath = path.join(__dirname, 'data', 'upgrade-automation.log');
+		const logPath = path.join(APP_ROOT, 'data', 'upgrade-automation.log');
 		const stamped = `[${new Date().toISOString()}] ${String(line || '')}\n`;
 		fs.appendFileSync(logPath, stamped, 'utf8');
 		return { ok: true, path: logPath };
