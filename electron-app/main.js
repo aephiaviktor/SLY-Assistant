@@ -147,6 +147,7 @@ function wait(ms) {	return new Promise(resolve => {	setTimeout(resolve, ms); });
 
 const LEVELDB_DIR = path.join(APP_ROOT, 'data', 'Local Storage', 'leveldb')
 const LEVELDB_BAK_DIR = path.join(APP_ROOT, 'data', 'Local Storage', 'leveldb.bak')
+const LEVELDB_PREV_BAK_DIR = path.join(APP_ROOT, 'data', 'Local Storage', 'leveldb.bak.prev')
 
 function logToUpgradeLog(line)
 {
@@ -177,18 +178,99 @@ function auditLeveldb(targetDir)
 	}
 }
 
+function getLeveldbSettingsHealth(targetDir)
+{
+	const result = {
+		hasConfiguredSettings: false,
+		hasAnySettings: false,
+		keyCount: 0,
+		hasSecret: false,
+		hasInstanceName: false,
+		hasRpc: false,
+		hasInflux: false,
+		saveProfile: false,
+		savedProfileLength: 0,
+		craftingJobs: 0,
+		upgradeAutomationEnabled: false
+	}
+	try {
+		if (!fs.existsSync(targetDir)) return result
+		const settingsObjects = []
+		let combinedText = ''
+		for (const name of fs.readdirSync(targetDir)) {
+			if (!/\.(ldb|log)$/i.test(name)) continue
+			const filePath = path.join(targetDir, name)
+			let text = ''
+			try { text = fs.readFileSync(filePath).toString('latin1') } catch (e) { continue }
+			combinedText += '\n' + text
+			const re = /\{[^{}]*"priorityFee"[^{}]*"mySecretKey"\s*:\s*"[^"]*"[^{}]*\}/g
+			let match
+			while ((match = re.exec(text))) {
+				try { settingsObjects.push(JSON.parse(match[0])) } catch (e) {}
+			}
+		}
+		if (!settingsObjects.length) {
+			result.hasAnySettings = combinedText.includes('globalSettings') || combinedText.includes('"priorityFee"') || combinedText.includes('"mySecretKey"')
+			result.hasSecret = /"mySecretKey"\s*:\s*"[^"]{10,}"/.test(combinedText)
+			result.hasInstanceName = /"slyInstanceName"\s*:\s*"[^"]+"/.test(combinedText)
+			result.hasRpc = /"heliusRpcURL"\s*:\s*"[^"]{10,}"/.test(combinedText)
+			result.hasInflux = /"influxURL"\s*:\s*"[^"]{10,}"/.test(combinedText) && /"influxAuth"\s*:\s*"[^"]{10,}"/.test(combinedText)
+			const savedProfileMatch = combinedText.match(/"savedProfile"\s*:\s*\[([^\]]*)\]/)
+			result.savedProfileLength = savedProfileMatch && savedProfileMatch[1].trim() ? savedProfileMatch[1].split(',').length : 0
+			result.saveProfile = /"saveProfile"\s*:\s*true/.test(combinedText)
+			const craftingJobsMatch = combinedText.match(/"craftingJobs"\s*:\s*(\d+)/)
+			result.craftingJobs = craftingJobsMatch ? Number(craftingJobsMatch[1]) : 0
+			result.upgradeAutomationEnabled = /"upgradeAutomationEnabled"\s*:\s*true/.test(combinedText)
+			result.hasConfiguredSettings = result.hasAnySettings && (result.hasSecret || result.hasRpc || result.hasInflux || result.hasInstanceName || result.savedProfileLength > 0)
+			return result
+		}
+		const settings = settingsObjects[settingsObjects.length - 1]
+		const savedProfile = Array.isArray(settings.savedProfile) ? settings.savedProfile : []
+		result.hasAnySettings = true
+		result.keyCount = Object.keys(settings || {}).length
+		result.hasSecret = !!String(settings.mySecretKey || '').trim()
+		result.hasInstanceName = !!String(settings.slyInstanceName || '').trim()
+		result.hasRpc = !!String(settings.heliusRpcURL || '').trim()
+		result.hasInflux = !!String(settings.influxURL || '').trim() && !!String(settings.influxAuth || '').trim() && !!String(settings.influxDB || '').trim()
+		result.saveProfile = !!settings.saveProfile
+		result.savedProfileLength = savedProfile.length
+		result.craftingJobs = Number(settings.craftingJobs || 0)
+		result.upgradeAutomationEnabled = !!settings.upgradeAutomationEnabled
+		result.hasConfiguredSettings = result.keyCount >= 20 && (result.hasSecret || result.hasRpc || result.hasInflux || result.hasInstanceName || result.savedProfileLength > 0)
+		return result
+	} catch (e) {
+		result.error = String(e?.message || e)
+		return result
+	}
+}
+
+function formatSettingsHealth(health)
+{
+	return `configured=${!!health.hasConfiguredSettings} any=${!!health.hasAnySettings} keys=${Number(health.keyCount || 0)} secret=${!!health.hasSecret} instance=${!!health.hasInstanceName} rpc=${!!health.hasRpc} influx=${!!health.hasInflux} saveProfile=${!!health.saveProfile} savedProfileLen=${Number(health.savedProfileLength || 0)} craftingJobs=${Number(health.craftingJobs || 0)} lpEnabled=${!!health.upgradeAutomationEnabled}`
+}
+
 function snapshotLeveldbToBackup()
 {
 	try {
 		if (!fs.existsSync(LEVELDB_DIR)) return { ok: false, error: 'leveldb dir missing' }
 		const live = auditLeveldb(LEVELDB_DIR)
 		if (!live.exists || live.totalSize === 0) return { ok: false, error: 'live leveldb is empty, skipping snapshot' }
+		const liveHealth = getLeveldbSettingsHealth(LEVELDB_DIR)
+		if (!liveHealth.hasConfiguredSettings) {
+			logToUpgradeLog(`[ELECTRON][LEVELDB-BAK] snapshot skipped unhealthy live ${formatSettingsHealth(liveHealth)}`)
+			return { ok: false, skipped: true, error: 'live leveldb has no configured globalSettings', live, liveHealth }
+		}
+		if (fs.existsSync(LEVELDB_BAK_DIR)) {
+			try { fs.rmSync(LEVELDB_PREV_BAK_DIR, { recursive: true, force: true }) } catch (e) {}
+			try { fs.cpSync(LEVELDB_BAK_DIR, LEVELDB_PREV_BAK_DIR, { recursive: true, force: true }) } catch (e) {}
+		}
 		// Remove old backup then copy live -> bak (synchronous, simple)
 		try { fs.rmSync(LEVELDB_BAK_DIR, { recursive: true, force: true }) } catch (e) {}
 		fs.cpSync(LEVELDB_DIR, LEVELDB_BAK_DIR, { recursive: true, force: true })
 		const bak = auditLeveldb(LEVELDB_BAK_DIR)
-		logToUpgradeLog(`[ELECTRON][LEVELDB-BAK] snapshot ok liveFiles=${live.count} liveSize=${live.totalSize} bakFiles=${bak.count} bakSize=${bak.totalSize}`)
-		return { ok: true, live, bak }
+		const bakHealth = getLeveldbSettingsHealth(LEVELDB_BAK_DIR)
+		logToUpgradeLog(`[ELECTRON][LEVELDB-BAK] snapshot ok liveFiles=${live.count} liveSize=${live.totalSize} bakFiles=${bak.count} bakSize=${bak.totalSize} ${formatSettingsHealth(bakHealth)}`)
+		return { ok: true, live, bak, liveHealth, bakHealth }
 	} catch (e) {
 		logToUpgradeLog(`[ELECTRON][LEVELDB-BAK] snapshot error=${String(e?.message || e)}`)
 		return { ok: false, error: String(e?.message || e) }
@@ -218,17 +300,20 @@ function maybeAutoRestoreLeveldb()
 	try {
 		const live = auditLeveldb(LEVELDB_DIR)
 		const bak = auditLeveldb(LEVELDB_BAK_DIR)
+		const liveHealth = getLeveldbSettingsHealth(LEVELDB_DIR)
+		const bakHealth = getLeveldbSettingsHealth(LEVELDB_BAK_DIR)
 		// Trigger auto-restore only if live is suspiciously small (Chromium-fresh defaults)
-		// AND bak has meaningful content
+		// or does not contain configured settings, AND bak has configured settings.
 		const liveLooksFresh = !live.exists || live.totalSize < 4096
-		const bakHasContent = bak.exists && bak.totalSize >= 4096
-		if (liveLooksFresh && bakHasContent) {
+		const liveNeedsRestore = liveLooksFresh || !liveHealth.hasConfiguredSettings
+		const bakHasContent = bak.exists && bak.totalSize >= 4096 && bakHealth.hasConfiguredSettings
+		if (liveNeedsRestore && bakHasContent) {
 			const result = restoreLeveldbFromBackup()
-			logToUpgradeLog(`[ELECTRON][LEVELDB-AUTO-RESTORE] triggered liveSize=${live.totalSize} bakSize=${bak.totalSize} result=${result.ok ? 'ok' : 'fail:' + result.error}`)
+			logToUpgradeLog(`[ELECTRON][LEVELDB-AUTO-RESTORE] triggered liveSize=${live.totalSize} bakSize=${bak.totalSize} liveHealth=[${formatSettingsHealth(liveHealth)}] bakHealth=[${formatSettingsHealth(bakHealth)}] result=${result.ok ? 'ok' : 'fail:' + result.error}`)
 			return result
 		} else {
-			logToUpgradeLog(`[ELECTRON][LEVELDB-AUTO-RESTORE] skipped liveSize=${live.totalSize} bakSize=${bak.totalSize} liveLooksFresh=${liveLooksFresh} bakHasContent=${bakHasContent}`)
-			return { ok: false, skipped: true, live, bak }
+			logToUpgradeLog(`[ELECTRON][LEVELDB-AUTO-RESTORE] skipped liveSize=${live.totalSize} bakSize=${bak.totalSize} liveLooksFresh=${liveLooksFresh} liveHealth=[${formatSettingsHealth(liveHealth)}] bakHasContent=${bakHasContent} bakHealth=[${formatSettingsHealth(bakHealth)}]`)
+			return { ok: false, skipped: true, live, bak, liveHealth, bakHealth }
 		}
 	} catch (e) {
 		logToUpgradeLog(`[ELECTRON][LEVELDB-AUTO-RESTORE] error=${String(e?.message || e)}`)
