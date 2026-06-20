@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-57
+// @aephia-version 0.7.35-58
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-57'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-58'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -1300,14 +1300,14 @@
 		const scheduledCraftLabels = new Set();
 		const targetFinishAtUtc = String(schedule?.targetFinishAtUtc || '');
 		const writeSlotState = async (craftLabel, existing, amount, crew) => {
-			await GM.setValue(craftLabel, JSON.stringify({
+			await saveCraftConfig(craftLabel, {
 				...(existing || {}),
 				amount,
 				crew,
 				lpAutomationManaged: true,
 				lpAutomationUpdatedAt: now.toISOString(),
 				lpAutomationCycleStamp: cycleStamp
-			}));
+			}, 'lp-auto-slot-state-write');
 		};
 
 		// Viktor: Write pre-computed nextAmount and nextCrew from optimizer output
@@ -1341,14 +1341,14 @@
 		for (const craftLabel of managedCraftLabels) {
 			if (scheduledCraftLabels.has(craftLabel)) continue;
 			const existing = await getUpgradeAutomationCraftSlotState(craftLabel);
-			await GM.setValue(craftLabel, JSON.stringify({
+			await saveCraftConfig(craftLabel, {
 				...(existing || {}),
 				amount: 0,
 				crew: 0,
 				lpAutomationManaged: false,
 				lpAutomationUpdatedAt: now.toISOString(),
 				lpAutomationCycleStamp: cycleStamp
-			}));
+			}, 'lp-auto-slot-clear');
 		}
 
 		upgradeAutomationSchedulerDebug = JSON.stringify({
@@ -3432,6 +3432,58 @@
 			}
 		} catch (e) { try { await appendUpgradeAutomationLog('[SETTINGS][BAK-ERROR] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
 		await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
+		try {
+			if (typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
+				await window.electronAPI.snapshotLeveldbToBackup();
+			}
+		} catch (e) { try { await appendUpgradeAutomationLog('[SETTINGS][BAK-ERROR-POST] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
+	}
+
+	async function saveFleetConfig(fleetPK, fleetData, reason) {
+		const dataStr = JSON.stringify(fleetData || {});
+		const dataLen = dataStr.length;
+		const fleetLabel = String(fleetPK || 'unknown').slice(0, 12);
+		try {
+			const logLine = '[FLEET][SAVE] fleet=' + fleetLabel + '... reason=' + String(reason || 'unknown') + ' dataLen=' + dataLen;
+			try { cLog(2, logLine); } catch (e) {}
+			try { await appendUpgradeAutomationLog(logLine); } catch (e) {}
+		} catch (e) {
+			try { await appendUpgradeAutomationLog('[FLEET][SAVE-LOG-ERROR] fleet=' + fleetLabel + '... reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {}
+		}
+		await GM.setValue(fleetPK, dataStr);
+		try {
+			if (typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
+				await window.electronAPI.snapshotLeveldbToBackup();
+			}
+		} catch (e) { try { await appendUpgradeAutomationLog('[FLEET][BAK-ERROR] fleet=' + fleetLabel + '... reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
+	}
+
+	async function saveCraftConfig(craftIndexOrLabel, craftData, reason) {
+		let key;
+		let slotLabel;
+		if (typeof craftIndexOrLabel === 'string') {
+			key = craftIndexOrLabel;
+			const m = String(craftIndexOrLabel).match(/(\d+)/);
+			slotLabel = m ? m[1] : craftIndexOrLabel;
+		} else {
+			key = 'craft' + craftIndexOrLabel;
+			slotLabel = String(craftIndexOrLabel);
+		}
+		const dataStr = JSON.stringify(craftData || {});
+		const dataLen = dataStr.length;
+		try {
+			const logLine = '[CRAFT][SAVE] slot=' + slotLabel + ' reason=' + String(reason || 'unknown') + ' dataLen=' + dataLen;
+			try { cLog(2, logLine); } catch (e) {}
+			try { await appendUpgradeAutomationLog(logLine); } catch (e) {}
+		} catch (e) {
+			try { await appendUpgradeAutomationLog('[CRAFT][SAVE-LOG-ERROR] slot=' + slotLabel + ' reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {}
+		}
+		await GM.setValue(key, dataStr);
+		try {
+			if (typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
+				await window.electronAPI.snapshotLeveldbToBackup();
+			}
+		} catch (e) { try { await appendUpgradeAutomationLog('[CRAFT][BAK-ERROR] slot=' + slotLabel + ' reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
 	}
 
 	async function loadGlobalSettings() {
@@ -4178,14 +4230,14 @@ function renderAssistStats() {
 				for (const craftLabel of managedCraftLabels) {
 					const existing = await getUpgradeAutomationCraftSlotState(craftLabel);
 					if (existing && (Number(existing.amount || 0) > 0 || existing.lpAutomationManaged)) {
-						await GM.setValue(craftLabel, JSON.stringify({
+						await saveCraftConfig(craftLabel, {
 							...(existing || {}),
 							amount: 0,
 							crew: 0,
 							lpAutomationManaged: false,
 							lpAutomationUpdatedAt: now.toISOString(),
 							lpAutomationCycleStamp: getUpgradeAutomationCycleStamp(now, globalSettings)
-						}));
+						}, 'lp-auto-clear-staged-min-54');
 					}
 				}
 				window.schedulerLastClearedHour = currentHour;
@@ -8601,6 +8653,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	}
 
 	function updateFleetState(fleet, newState, overrideError) {
+        if (!fleet || typeof fleet !== 'object') return;
         if ((typeof fleet.state == 'undefined') || !fleet.state.includes('ERROR') || overrideError) {
             fleet.state = newState;
             updateAssistStatus(fleet);
@@ -8881,7 +8934,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					scanMove: scanMove,
 					scanEnd: fleetScanEnd
 				};
-				await GM.setValue(fleetPK, JSON.stringify(fleet));
+				await saveFleetConfig(fleetPK, fleet, 'fleet-config-modal-save');
 
 				userFleets[userFleetIndex].mineResource = fleetMineResource;
 				userFleets[userFleetIndex].destCoord = fleetDestCoord;
@@ -8942,7 +8995,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
             }
             console.log('craft: ', craft);
 
-            await GM.setValue(craftPK, JSON.stringify(craft));
+            await saveCraftConfig(craftPK, craft, 'craft-config-modal-save');
         }
 
 		if (errBool === false) {
@@ -9621,7 +9674,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 								const fleetSavedData = await GM.getValue(fleetPK, '{}');
 								const fleetParsedData = JSON.parse(fleetSavedData);
 								fleetParsedData.moveTarget = userFleets[i].moveTarget;
-								await GM.setValue(fleetPK, JSON.stringify(fleetParsedData));
+								await saveFleetConfig(fleetPK, fleetParsedData, 'subwarp-target-save');
 							}
 						}
 						forceSubwarp = true;
@@ -9664,7 +9717,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 						//const fleetParsedData = JSON.parse(fleetSavedData);
 						//cLog(3, `${FleetTimeStamp(userFleets[i].label)} moveTargets`, fleetParsedData.moveTarget, userFleets[i].moveTarget);
 						fleetParsedData.moveTarget = userFleets[i].moveTarget;
-						await GM.setValue(fleetPK, JSON.stringify(fleetParsedData));
+						await saveFleetConfig(fleetPK, fleetParsedData, 'warp-target-save');
 
 						//Update distance based on new warp target
 						moveDist = calculateMovementDistance(extra, [moveX,moveY]);
@@ -9754,7 +9807,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 						let fleetParsedData = JSON.parse(fleetSavedData);
 						let fleetPK = userFleets[i].publicKey.toString();
 						fleetParsedData.moveTarget = userFleets[i].moveTarget;
-						await GM.setValue(fleetPK, JSON.stringify(fleetParsedData));
+						await saveFleetConfig(fleetPK, fleetParsedData, 'warp-target-clear');
 				}
 		}
 
@@ -9766,7 +9819,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		const fleetSavedData = await GM.getValue(fleetPK, '{}');
 		const fleetParsedData = JSON.parse(fleetSavedData);
 		fleetParsedData.scanEnd = userFleets[i].scanEnd;
-		await GM.setValue(fleetPK, JSON.stringify(fleetParsedData));
+		await saveFleetConfig(fleetPK, fleetParsedData, 'scan-end-save');
 	}
 
 	async function handleScan(i, fleetCoords, destCoords) {
@@ -11815,14 +11868,14 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
         craftParsedData.craftingCoords = userCraft.craftingCoords;
         craftParsedData.feeAtlas = userCraft.feeAtlas;
 	craftParsedData.errorCount = userCraft.errorCount;
-        await GM.setValue(userCraft.label, JSON.stringify(craftParsedData));
+        await saveCraftConfig(userCraft.label, craftParsedData, 'craft-update-state');
     }
 
     async function craftTimeoutAfterError(userCraft) {
 		let craftSavedData = await GM.getValue(userCraft.label, '{}');
         let craftParsedData = JSON.parse(craftSavedData);
 		craftParsedData.errorCount = (typeof craftParsedData.errorCount == "undefined" ? 1 : craftParsedData.errorCount + 1);
-        await GM.setValue(userCraft.label, JSON.stringify(craftParsedData));
+        await saveCraftConfig(userCraft.label, craftParsedData, 'craft-timeout-after-error');
         const waitMinutes = Math.min(20, craftParsedData.errorCount * 2 - 1);
         updateFleetState(userCraft, userCraft.state + " (" + waitMinutes + "m)", true);
         return waitMinutes * 60000;
@@ -12186,7 +12239,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
             if(!craftParsedData.label && !craftParsedData.state) {
 		craftParsedData.label = 'craft' + i;
 		craftParsedData.state = 'Idle';
-		await GM.setValue('craft'+i, JSON.stringify(craftParsedData));
+		await saveCraftConfig(i, craftParsedData, 'craft-init');
             }
             //if (craftParsedData.item && craftParsedData.coordinates) startCraft(craftParsedData);
 
