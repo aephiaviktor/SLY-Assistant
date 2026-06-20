@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-53
+// @aephia-version 0.7.35-54
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-53'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-54'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -5544,6 +5544,14 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return normalized === 'LOAD' || normalized.includes('UPGRADE');
 	}
 
+	const WARP_COOLDOWN_RETRY_BUFFER_MS = 5000;
+
+	function isWarpCooldownInstructionError(code, errorName, opName) {
+		const normalizedName = String(errorName || '').toLowerCase();
+		const normalizedOp = String(opName || '').toUpperCase();
+		return normalizedOp.includes('WARP') && (Number(code) === 6084 || normalizedName === 'warpisoncooldown');
+	}
+
 	function getFriendlyInstructionErrorStatus(code, errorName, opName) {
 		const normalizedName = String(errorName || '').toLowerCase();
 		const normalizedOp = String(opName || '').toUpperCase();
@@ -5569,6 +5577,13 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		}
 		const anchorMatch = joinedLogs.match(/Error Code:\s*([^.]+)\.\s*Error Number:\s*(\d+)\.\s*Error Message:\s*([^\n]+)/i);
 		if (anchorMatch) {
+			if (isWarpCooldownInstructionError(anchorMatch[2], anchorMatch[1], opName)) {
+				return {
+					status: 'Warp C/D',
+					detail: `${anchorMatch[2]} ${anchorMatch[1]}: ${anchorMatch[3].trim()}`,
+					recoverable: 'warpCooldown'
+				};
+			}
 			const friendlyStatus = getFriendlyInstructionErrorStatus(anchorMatch[2], anchorMatch[1], opName);
 			return {
 				status: (friendlyStatus || `ERROR: Ix ${anchorMatch[2]} ${anchorMatch[1]}`).slice(0, 64),
@@ -5584,6 +5599,13 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				.filter(match => match.error);
 			if (matches.length === 1) {
 				const match = matches[0];
+				if (isWarpCooldownInstructionError(code, match.error.name, opName)) {
+					return {
+						status: 'Warp C/D',
+						detail: `${code} ${match.idl}.${match.error.name}: ${match.error.msg || ''}`.trim(),
+						recoverable: 'warpCooldown'
+					};
+				}
 				const friendlyStatus = getFriendlyInstructionErrorStatus(code, match.error.name, opName);
 				return {
 					status: (friendlyStatus || `ERROR: Ix ${code} ${match.error.name}`).slice(0, 64),
@@ -5709,23 +5731,30 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				let txResult = txHash ? await solanaReadConnection.getTransaction(txHash, {commitment: 'confirmed', maxSupportedTransactionVersion: 1}) : undefined;
                 const instructionError = getTransactionInstructionError(confirmation, txResult);
                 if (instructionError) {
-                    if (globalErrorTracker.firstErrorTime === 0) globalErrorTracker.firstErrorTime = Date.now();
-                    if (Date.now() < globalErrorTracker.firstErrorTime + 600000) {
-                        globalErrorTracker.errorCount++
-                    } else {
-                        globalErrorTracker.firstErrorTime = Date.now();
-                        globalErrorTracker.errorCount = 1;
-                    }
                     const ixErrorDetail = describeInstructionError(confirmation, txResult, instructions, opName);
-                    updateFleetState(fleet, ixErrorDetail.status);
-                    cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> ERROR ❌ ${ixErrorDetail.detail}`);
-                    let ixError = txResult && txResult.meta && txResult.meta.logMessages ? txResult.meta.logMessages : 'Unknown';
-                    console.log(FleetTimeStamp(fleetName), ' txResult.logMessages: ', ixError);
-                    logError(`ix error: ${ixErrorDetail.detail}; tx: ${txHash || 'unknown'}; logs: ${ixError}`, fleetName);
-                    if(fleet.publicKey) {
-                    	if(globalSettings.emailFleetIxErrors) await sendEMail(fleetName + ' ix error', ixError);
+                    if (ixErrorDetail.recoverable === 'warpCooldown' && fleet && fleet.publicKey) {
+                        if(!txResult) txResult = { meta: { fee: 0, err: { InstructionError: instructionError } } };
+                        txResult.slyaRecoverableWarpCooldown = true;
+                        cLog(1,`${FleetTimeStamp(fleetName)} <${opName}> recoverable ix error: ${ixErrorDetail.detail}`);
+                        txResult.slyaWarpCooldownRetryAt = await handleRecoverableWarpCooldownError(fleet);
                     } else {
-                    	if(globalSettings.emailCraftIxErrors) await sendEMail(fleetName + ' ix error', ixError);
+                        if (globalErrorTracker.firstErrorTime === 0) globalErrorTracker.firstErrorTime = Date.now();
+                        if (Date.now() < globalErrorTracker.firstErrorTime + 600000) {
+                            globalErrorTracker.errorCount++
+                        } else {
+                            globalErrorTracker.firstErrorTime = Date.now();
+                            globalErrorTracker.errorCount = 1;
+                        }
+                        updateFleetState(fleet, ixErrorDetail.status);
+                        cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> ERROR ❌ ${ixErrorDetail.detail}`);
+                        let ixError = txResult && txResult.meta && txResult.meta.logMessages ? txResult.meta.logMessages : 'Unknown';
+                        console.log(FleetTimeStamp(fleetName), ' txResult.logMessages: ', ixError);
+                        logError(`ix error: ${ixErrorDetail.detail}; tx: ${txHash || 'unknown'}; logs: ${ixError}`, fleetName);
+                        if(fleet.publicKey) {
+                            if(globalSettings.emailFleetIxErrors) await sendEMail(fleetName + ' ix error', ixError);
+                        } else {
+                            if(globalSettings.emailCraftIxErrors) await sendEMail(fleetName + ' ix error', ixError);
+                        }
                     }
                 }
 
@@ -6030,12 +6059,16 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
             updateFleetState(fleet, 'Warping');
 
             let txResult = await txSignAndSend(tx, fleet, 'WARP', 100);
+            if(txResult && txResult.slyaRecoverableWarpCooldown) {
+                resolve({txResult, warpCooldownFinished: txResult.slyaWarpCooldownRetryAt || 0, warpCooldownRetry: true});
+                return;
+            }
 
             const travelEndTime = TimeToStr(new Date(Date.now()+(moveTime * 1000 + 10000)));
             const newFleetState = `Warp ${coordStr} ${travelEndTime}`;
             updateFleetState(fleet, newFleetState);
 
-            fleet.warpCoolDownFinish = Date.now() + fleet.warpCooldown * 1000 + 2000;
+            fleet.warpCoolDownFinish = Date.now() + fleet.warpCooldown * 1000 + WARP_COOLDOWN_RETRY_BUFFER_MS;
 
             resolve({txResult, warpCooldownFinished: fleet.warpCoolDownFinish});
         });
@@ -8477,6 +8510,27 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
         }
 	}
 
+	async function handleRecoverableWarpCooldownError(fleet) {
+		let retryAt = Date.now() + WARP_COOLDOWN_RETRY_BUFFER_MS;
+		try {
+			const fleetAcctInfo = await getAccountInfo(fleet.label, 'full fleet info', fleet.publicKey);
+			const fleetAcctData = sageProgram.coder.accounts.decode('fleet', fleetAcctInfo.data);
+			const warpCooldownExpiresAt = fleetAcctData.warpCooldownExpiresAt.toNumber() * 1000;
+			if(Number.isFinite(warpCooldownExpiresAt) && warpCooldownExpiresAt > 0) {
+				retryAt = Math.max(retryAt, warpCooldownExpiresAt + WARP_COOLDOWN_RETRY_BUFFER_MS);
+			}
+		} catch(e) {
+			cLog(2, `${FleetTimeStamp(fleet.label)} Unable to refresh warp cooldown after recoverable ix error`, e);
+		}
+
+		const warpCDExpireTimeStr = `[${TimeToStr(new Date(retryAt))}]`;
+		cLog(1, `${FleetTimeStamp(fleet.label)} Warp cooldown race, retrying after ${warpCDExpireTimeStr}`);
+		updateFleetState(fleet, `Warp C/D ${warpCDExpireTimeStr}`, true);
+		await wait(Math.max(1000, retryAt - Date.now()));
+		if(fleet.state && fleet.state.includes('Warp C/D')) updateFleetState(fleet, 'Idle', true);
+		return retryAt;
+	}
+
 	function buildScanBlock(destX, destY, overridePattern, overridePatternLength) {
 		let { scanBlockPattern, scanBlockLength }  = globalSettings;
 		if(typeof overridePattern != "undefined" && overridePattern != '') {
@@ -9496,7 +9550,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 						else await wait(5000);
 						if(userFleets[i].stopping) return;
 					}
-					await wait(2000); //Extra wait to ensure accuracy
+					await wait(WARP_COOLDOWN_RETRY_BUFFER_MS); //Extra wait to ensure accuracy
 
 					const fleetPK = userFleets[i].publicKey.toString();
 					const fleetSavedData = await GM.getValue(fleetPK, '{}');
@@ -9521,6 +9575,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 					moveTime = calculateWarpTime(userFleets[i], moveDist);
 					const warpResult = await execWarp(userFleets[i], moveX, moveY, moveTime);
+					if(warpResult && warpResult.warpCooldownRetry) return warpResult.warpCooldownFinished;
 					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${assignment} type="warp",burnedFuel=${moveDist*(userFleets[i].warpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}`);
 					if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].warpFuelConsumptionRate/100);
 					warpCooldownFinished = warpResult.warpCooldownFinished;
