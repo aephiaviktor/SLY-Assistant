@@ -7,6 +7,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     updateToLatestAep: () => ipcRenderer.send('updateToLatestAep', ''),
     appendUpgradeAutomationLogFile: (line) => ipcRenderer.invoke('appendUpgradeAutomationLogFile', line),
     testUpgradeAutomationLogFile: () => ipcRenderer.invoke('appendUpgradeAutomationLogFile', '[ELECTRON] preload test call'),
+    snapshotLeveldbToBackup: () => ipcRenderer.invoke('snapshotLeveldbToBackup'),
+    restoreLeveldbFromBackup: () => ipcRenderer.invoke('restoreLeveldbFromBackup'),
+    auditLeveldb: () => ipcRenderer.invoke('auditLeveldb'),
 })
 
 ipcRenderer.on('firstinitdone', (event, data) => {

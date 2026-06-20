@@ -145,7 +145,111 @@ function restartApp()
 function wait(ms) {	return new Promise(resolve => {	setTimeout(resolve, ms); }); }
 
 
+const LEVELDB_DIR = path.join(APP_ROOT, 'data', 'Local Storage', 'leveldb')
+const LEVELDB_BAK_DIR = path.join(APP_ROOT, 'data', 'Local Storage', 'leveldb.bak')
+
+function logToUpgradeLog(line)
+{
+	try {
+		const logPath = path.join(APP_ROOT, 'data', 'upgrade-automation.log')
+		fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${String(line || '')}\n`, 'utf8')
+	} catch (e) {}
+}
+
+function auditLeveldb(targetDir)
+{
+	const dir = targetDir || LEVELDB_DIR
+	try {
+		if (!fs.existsSync(dir)) return { exists: false, files: [], totalSize: 0 }
+		const entries = fs.readdirSync(dir, { withFileTypes: true })
+			.filter(e => e.isFile())
+			.map(e => {
+				try {
+					const stat = fs.statSync(path.join(dir, e.name))
+					return { name: e.name, size: stat.size, mtime: stat.mtimeMs }
+				} catch (e) { return { name: e.name, size: 0, mtime: 0 } }
+			})
+			.sort((a, b) => a.name.localeCompare(b.name))
+		const totalSize = entries.reduce((sum, f) => sum + f.size, 0)
+		return { exists: true, dir, files: entries, totalSize, count: entries.length }
+	} catch (e) {
+		return { exists: false, files: [], totalSize: 0, error: String(e?.message || e) }
+	}
+}
+
+function snapshotLeveldbToBackup()
+{
+	try {
+		if (!fs.existsSync(LEVELDB_DIR)) return { ok: false, error: 'leveldb dir missing' }
+		const live = auditLeveldb(LEVELDB_DIR)
+		if (!live.exists || live.totalSize === 0) return { ok: false, error: 'live leveldb is empty, skipping snapshot' }
+		// Remove old backup then copy live -> bak (synchronous, simple)
+		try { fs.rmSync(LEVELDB_BAK_DIR, { recursive: true, force: true }) } catch (e) {}
+		fs.cpSync(LEVELDB_DIR, LEVELDB_BAK_DIR, { recursive: true, force: true })
+		const bak = auditLeveldb(LEVELDB_BAK_DIR)
+		logToUpgradeLog(`[ELECTRON][LEVELDB-BAK] snapshot ok liveFiles=${live.count} liveSize=${live.totalSize} bakFiles=${bak.count} bakSize=${bak.totalSize}`)
+		return { ok: true, live, bak }
+	} catch (e) {
+		logToUpgradeLog(`[ELECTRON][LEVELDB-BAK] snapshot error=${String(e?.message || e)}`)
+		return { ok: false, error: String(e?.message || e) }
+	}
+}
+
+function restoreLeveldbFromBackup()
+{
+	try {
+		const bak = auditLeveldb(LEVELDB_BAK_DIR)
+		if (!bak.exists || bak.totalSize === 0) return { ok: false, error: 'no backup leveldb to restore from' }
+		// Overwrite live with bak contents
+		try { fs.rmSync(LEVELDB_DIR, { recursive: true, force: true }) } catch (e) {}
+		fs.mkdirSync(LEVELDB_DIR, { recursive: true })
+		fs.cpSync(LEVELDB_BAK_DIR, LEVELDB_DIR, { recursive: true, force: true })
+		const live = auditLeveldb(LEVELDB_DIR)
+		logToUpgradeLog(`[ELECTRON][LEVELDB-RESTORE] restored from backup bakFiles=${bak.count} bakSize=${bak.totalSize} liveFiles=${live.count} liveSize=${live.totalSize}`)
+		return { ok: true, bak, live }
+	} catch (e) {
+		logToUpgradeLog(`[ELECTRON][LEVELDB-RESTORE] error=${String(e?.message || e)}`)
+		return { ok: false, error: String(e?.message || e) }
+	}
+}
+
+function maybeAutoRestoreLeveldb()
+{
+	try {
+		const live = auditLeveldb(LEVELDB_DIR)
+		const bak = auditLeveldb(LEVELDB_BAK_DIR)
+		// Trigger auto-restore only if live is suspiciously small (Chromium-fresh defaults)
+		// AND bak has meaningful content
+		const liveLooksFresh = !live.exists || live.totalSize < 4096
+		const bakHasContent = bak.exists && bak.totalSize >= 4096
+		if (liveLooksFresh && bakHasContent) {
+			const result = restoreLeveldbFromBackup()
+			logToUpgradeLog(`[ELECTRON][LEVELDB-AUTO-RESTORE] triggered liveSize=${live.totalSize} bakSize=${bak.totalSize} result=${result.ok ? 'ok' : 'fail:' + result.error}`)
+			return result
+		} else {
+			logToUpgradeLog(`[ELECTRON][LEVELDB-AUTO-RESTORE] skipped liveSize=${live.totalSize} bakSize=${bak.totalSize} liveLooksFresh=${liveLooksFresh} bakHasContent=${bakHasContent}`)
+			return { ok: false, skipped: true, live, bak }
+		}
+	} catch (e) {
+		logToUpgradeLog(`[ELECTRON][LEVELDB-AUTO-RESTORE] error=${String(e?.message || e)}`)
+		return { ok: false, error: String(e?.message || e) }
+	}
+}
+
+
 app.whenReady().then(async () => {
+// Wrapper-level leveldb audit and auto-restore (before any SLYA save could overwrite evidence)
+try {
+  const liveAudit = auditLeveldb(LEVELDB_DIR);
+  const bakAudit = auditLeveldb(LEVELDB_BAK_DIR);
+  const liveNames = liveAudit.files.map(f => f.name).join(',');
+  const bakNames = bakAudit.files.map(f => f.name).join(',');
+  logToUpgradeLog(`[ELECTRON][LEVELDB-AUDIT] liveCount=${liveAudit.count} liveSize=${liveAudit.totalSize} liveFiles=[${liveNames}] bakCount=${bakAudit.count} bakSize=${bakAudit.totalSize} bakFiles=[${bakNames}]`);
+  // Auto-restore if live is suspiciously fresh/empty and bak has content
+  maybeAutoRestoreLeveldb();
+} catch (e) {
+  logToUpgradeLog(`[ELECTRON][LEVELDB-AUDIT] error=${String(e?.message || e)}`);
+}
 try {
   const startupLogPath = path.join(APP_ROOT, 'data', 'upgrade-automation.log');
   fs.appendFileSync(startupLogPath, `[${new Date().toISOString()}] [ELECTRON] main startup\n`, 'utf8');
@@ -232,6 +336,20 @@ else
 	} catch (error) {
 		return { ok: false, error: String(error?.message || error) };
 	}
+  })
+
+  ipcMain.handle('snapshotLeveldbToBackup', async () => {
+	return snapshotLeveldbToBackup();
+  })
+
+  ipcMain.handle('restoreLeveldbFromBackup', async () => {
+	return restoreLeveldbFromBackup();
+  })
+
+  ipcMain.handle('auditLeveldb', async () => {
+	const live = auditLeveldb(LEVELDB_DIR);
+	const bak = auditLeveldb(LEVELDB_BAK_DIR);
+	return { live, bak };
   })
   
   
