@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-61
+// @aephia-version 0.7.35-62
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -9881,6 +9881,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 		const scanBlockPattern = document.querySelector('#scanBlockPattern').value;
         const saveProfile = document.querySelector('#saveProfile').checked;
+		const existingSavedProfile = Array.isArray(globalSettings?.savedProfile) ? globalSettings.savedProfile : [];
+		const selectedSavedProfile = (userProfileAcct && userProfileKeyIdx !== undefined && userProfileKeyIdx !== null)
+			? [userProfileAcct.toString(), userProfileKeyIdx, pointsProfileKeyIdx]
+			: existingSavedProfile;
 
 		globalSettings = {
 			priorityFee: parseIntDefault(document.querySelector('#priorityFee').value, 1),
@@ -9930,7 +9934,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 			//lowPriorityFeeMultiplier: parseIntDefault(document.querySelector('#lowPriorityFeeMultiplier').value, 10),
             saveProfile: saveProfile,
-            savedProfile: saveProfile ? (userProfileAcct && userProfileKeyIdx) ? [userProfileAcct.toString(), userProfileKeyIdx, pointsProfileKeyIdx] : [] : [],
+            savedProfile: saveProfile ? selectedSavedProfile : [],
 			confirmationCheckingDelay: parseIntDefault(document.querySelector('#confirmationCheckingDelay').value, 2000),
 			debugLogLevel: parseIntDefault(document.querySelector('#debugLogLevel').value, 3),
             craftingJobs: parseIntDefault(document.querySelector('#craftingJobs').value, 4),
