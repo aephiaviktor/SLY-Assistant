@@ -125,6 +125,7 @@ async function updateSLYA(sourceUrl = AEP_UPDATE_URL)
 
 async function updateAepFromGitHub()
 {
+	preserveLeveldbBeforeUpdate()
 	const latest = await updateSLYA(AEP_UPDATE_URL)
 	for (const updateFile of AEP_WRAPPER_UPDATE_FILES) {
 		let file = await fetchText(updateFile.url)
@@ -148,6 +149,11 @@ function wait(ms) {	return new Promise(resolve => {	setTimeout(resolve, ms); });
 const LEVELDB_DIR = path.join(APP_ROOT, 'data', 'Local Storage', 'leveldb')
 const LEVELDB_BAK_DIR = path.join(APP_ROOT, 'data', 'Local Storage', 'leveldb.bak')
 const LEVELDB_PREV_BAK_DIR = path.join(APP_ROOT, 'data', 'Local Storage', 'leveldb.bak.prev')
+
+function leveldbTimestamp()
+{
+	return new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-')
+}
 
 function logToUpgradeLog(line)
 {
@@ -249,6 +255,67 @@ function formatSettingsHealth(health)
 	return `configured=${!!health.hasConfiguredSettings} any=${!!health.hasAnySettings} keys=${Number(health.keyCount || 0)} secret=${!!health.hasSecret} instance=${!!health.hasInstanceName} rpc=${!!health.hasRpc} influx=${!!health.hasInflux} saveProfile=${!!health.saveProfile} savedProfileLen=${Number(health.savedProfileLength || 0)} craftingJobs=${Number(health.craftingJobs || 0)} lpEnabled=${!!health.upgradeAutomationEnabled}`
 }
 
+function copyLeveldbSnapshot(targetDir, label)
+{
+	try {
+		const live = auditLeveldb(LEVELDB_DIR)
+		if (!live.exists || live.totalSize === 0) return { ok: false, skipped: true, error: 'live leveldb is empty', live }
+		try { fs.rmSync(targetDir, { recursive: true, force: true }) } catch (e) {}
+		fs.mkdirSync(path.dirname(targetDir), { recursive: true })
+		fs.cpSync(LEVELDB_DIR, targetDir, { recursive: true, force: true })
+		const copy = auditLeveldb(targetDir)
+		logToUpgradeLog(`[ELECTRON][LEVELDB-${label}] copied liveFiles=${live.count} liveSize=${live.totalSize} copyFiles=${copy.count} copySize=${copy.totalSize} target=${targetDir}`)
+		return { ok: true, live, copy, target: targetDir }
+	} catch (e) {
+		logToUpgradeLog(`[ELECTRON][LEVELDB-${label}] error=${String(e?.message || e)} target=${targetDir}`)
+		return { ok: false, error: String(e?.message || e), target: targetDir }
+	}
+}
+
+function seedInitialLeveldbBackup()
+{
+	try {
+		const live = auditLeveldb(LEVELDB_DIR)
+		const bak = auditLeveldb(LEVELDB_BAK_DIR)
+		const liveHealth = getLeveldbSettingsHealth(LEVELDB_DIR)
+		if (!live.exists || live.totalSize < 4096 || bak.exists) {
+			return { ok: false, skipped: true, live, bak, liveHealth }
+		}
+		if (!liveHealth.hasAnySettings && !liveHealth.hasConfiguredSettings) {
+			logToUpgradeLog(`[ELECTRON][LEVELDB-SEED-BAK] skipped live has no settings ${formatSettingsHealth(liveHealth)}`)
+			return { ok: false, skipped: true, live, bak, liveHealth }
+		}
+		const result = copyLeveldbSnapshot(LEVELDB_BAK_DIR, 'SEED-BAK')
+		logToUpgradeLog(`[ELECTRON][LEVELDB-SEED-BAK] ${result.ok ? 'ok' : 'fail'} liveHealth=[${formatSettingsHealth(liveHealth)}]`)
+		return { ...result, liveHealth }
+	} catch (e) {
+		logToUpgradeLog(`[ELECTRON][LEVELDB-SEED-BAK] error=${String(e?.message || e)}`)
+		return { ok: false, error: String(e?.message || e) }
+	}
+}
+
+function preserveLeveldbBeforeUpdate()
+{
+	try {
+		const live = auditLeveldb(LEVELDB_DIR)
+		if (!live.exists || live.totalSize < 4096) {
+			logToUpgradeLog(`[ELECTRON][LEVELDB-PRE-UPDATE] skipped liveSize=${live.totalSize || 0}`)
+			return { ok: false, skipped: true, live }
+		}
+		const timestampedDir = path.join(APP_ROOT, 'data', 'Local Storage', `leveldb.pre-aep-update-${leveldbTimestamp()}`)
+		const preUpdate = copyLeveldbSnapshot(timestampedDir, 'PRE-UPDATE')
+		const bak = auditLeveldb(LEVELDB_BAK_DIR)
+		let seededBak = { ok: false, skipped: true }
+		if (!bak.exists || bak.totalSize === 0) {
+			seededBak = copyLeveldbSnapshot(LEVELDB_BAK_DIR, 'PRE-UPDATE-BAK')
+		}
+		return { ok: preUpdate.ok, preUpdate, seededBak }
+	} catch (e) {
+		logToUpgradeLog(`[ELECTRON][LEVELDB-PRE-UPDATE] error=${String(e?.message || e)}`)
+		return { ok: false, error: String(e?.message || e) }
+	}
+}
+
 function snapshotLeveldbToBackup()
 {
 	try {
@@ -330,6 +397,7 @@ try {
   const liveNames = liveAudit.files.map(f => f.name).join(',');
   const bakNames = bakAudit.files.map(f => f.name).join(',');
   logToUpgradeLog(`[ELECTRON][LEVELDB-AUDIT] liveCount=${liveAudit.count} liveSize=${liveAudit.totalSize} liveFiles=[${liveNames}] bakCount=${bakAudit.count} bakSize=${bakAudit.totalSize} bakFiles=[${bakNames}]`);
+  seedInitialLeveldbBackup();
   // Auto-restore if live is suspiciously fresh/empty and bak has content
   maybeAutoRestoreLeveldb();
 } catch (e) {
