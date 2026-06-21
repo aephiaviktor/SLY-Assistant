@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-59
+// @aephia-version 0.7.35-60
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-59'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-60'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -11593,13 +11593,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     if(needToLoadCrew) {
 			let crewResp = await handleCrewLoading(userFleets[i], userFleets[i].starbaseCoord, needToLoadCrew, transportLoadUnloadSingleTx);
 			if (crewResp && crewResp.name == 'NotEnoughCrew') {
-				if(globalSettings.transportStopOnError) {
-					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - ERROR: Not enough crew`);
-					updateFleetState(userFleets[i], 'ERROR: Not enough crew');
-					return;
-				} else {
-					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Not enough crew`);
-				}
+				cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - WARNING: Not enough crew`);
+				updateFleetState(userFleets[i], 'WARNING: Not enough crew');
 			}
 			else if(transportLoadUnloadSingleTx && crewResp) {
 				transactions.push(crewResp);
@@ -11761,13 +11756,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     if(needToLoadCrew) {
 			let crewResp = await handleCrewLoading(userFleets[i], userFleets[i].destCoord, needToLoadCrew, transportLoadUnloadSingleTx);
 			if (crewResp && crewResp.name == 'NotEnoughCrew') {
-				if(globalSettings.transportStopOnError) {
-					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - ERROR: Not enough crew`);
-					updateFleetState(userFleets[i], 'ERROR: Not enough crew');
-					return;
-				} else {
-					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Not enough crew`);
-				}
+				cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - WARNING: Not enough crew`);
+				updateFleetState(userFleets[i], 'WARNING: Not enough crew');
 			} else if(transportLoadUnloadSingleTx && crewResp) {
 				transactions.push(crewResp);
 				loadedCrew = needToLoadCrew;
@@ -11993,13 +11983,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			if(needToLoadCrew) {
 				let crewResp = await handleCrewLoading(userFleets[i], sourceCoord, needToLoadCrew, transportLoadUnloadSingleTx);
 				if (crewResp && crewResp.name == 'NotEnoughCrew') {
-					if(globalSettings.transportStopOnError) {
-						cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - ERROR: Not enough crew`);
-						updateFleetState(userFleets[i], 'ERROR: Not enough crew');
-						return false;
-					} else {
-						cLog(1,`${FleetTimeStamp(userFleets[i].label)} Not enough crew`);
-					}
+					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - WARNING: Not enough crew`);
+					updateFleetState(userFleets[i], 'WARNING: Not enough crew');
 				} else if(transportLoadUnloadSingleTx && crewResp) {
 					transactions.push(crewResp);
 					loadedCrew = needToLoadCrew;
