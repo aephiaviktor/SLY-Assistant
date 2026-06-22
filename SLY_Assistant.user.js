@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-64
+// @aephia-version 0.7.35-65
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-64'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-65'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -95,6 +95,11 @@
 	let upgradeAutomationAephiaSummaryCache = { fetchedAt: 0, tokenKey: '', data: null };
 	const recoveredCraftingProcessSlots = new Map();
 	const settingsGmKey = 'globalSettings';
+	const UPGRADE_AUTOMATION_LOG_KEY = 'upgradeAutomationLog';
+	const SLYA_STATE_BACKUP_SCHEMA_VERSION = 1;
+	let slyaStateBackupTimer = null;
+	let slyaStateBackupInFlight = false;
+	let slyaStateBackupCache = null;
 	// Viktor: Simple capture-at-xx:58 / write-at-xx:59 state tracking
 	let upgradeAutomationPendingPlanRows = null;
 	let upgradeAutomationPendingCaptureHour = null;
@@ -292,7 +297,6 @@
 	};
 	const UPGRADE_AUTOMATION_EXCLUDED_COMPONENTS = new Set(['INK']);
 	const UPGRADE_AUTOMATION_STATE_PREFIX = 'upgradeAutomationState:';
-	const UPGRADE_AUTOMATION_LOG_KEY = 'upgradeAutomationLog';
 
 	function utcDayProgress(date = new Date()) {
 		const start = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
@@ -384,11 +388,6 @@
 		await saveUpgradeAutomationEvents(events);
 		try { renderAssistStats(); } catch (e) {}
 	}
-
-	const SLYA_STATE_BACKUP_SCHEMA_VERSION = 1;
-	let slyaStateBackupTimer = null;
-	let slyaStateBackupInFlight = false;
-	let slyaStateBackupCache = null;
 
 	function cloneForSlyaStateBackup(value) {
 		try { return JSON.parse(JSON.stringify(value || {})); } catch (e) { return {}; }
