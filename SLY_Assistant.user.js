@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-62
+// @aephia-version 0.7.35-64
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-62'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-64'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -93,6 +93,7 @@
 	let globalSettings;
 	let aephiaApiKeyValidation = { status: 'unknown', message: 'Aephia API key has not been checked yet.', checkedAt: 0, tokenKey: '' };
 	let upgradeAutomationAephiaSummaryCache = { fetchedAt: 0, tokenKey: '', data: null };
+	const recoveredCraftingProcessSlots = new Map();
 	const settingsGmKey = 'globalSettings';
 	// Viktor: Simple capture-at-xx:58 / write-at-xx:59 state tracking
 	let upgradeAutomationPendingPlanRows = null;
@@ -370,6 +371,7 @@
 
 	async function saveUpgradeAutomationEvents(events) {
 		await GM.setValue(UPGRADE_AUTOMATION_EVENTS_KEY, JSON.stringify(events.slice(-5000)));
+		scheduleSlyaStateBackup('upgrade-automation-events');
 	}
 
 	async function recordUpgradeAutomationEvent(evt) {
@@ -381,6 +383,176 @@
 		upgradeAutomationRecentEvents = events.filter(e => Number(e?.ts || 0) >= (now - 24 * 3600 * 1000));
 		await saveUpgradeAutomationEvents(events);
 		try { renderAssistStats(); } catch (e) {}
+	}
+
+	const SLYA_STATE_BACKUP_SCHEMA_VERSION = 1;
+	let slyaStateBackupTimer = null;
+	let slyaStateBackupInFlight = false;
+	let slyaStateBackupCache = null;
+
+	function cloneForSlyaStateBackup(value) {
+		try { return JSON.parse(JSON.stringify(value || {})); } catch (e) { return {}; }
+	}
+
+	async function getGmValueKeys() {
+		try {
+			if (typeof GM !== 'undefined' && typeof GM.listValues === 'function') return await GM.listValues();
+			if (typeof GM_listValues === 'function') return GM_listValues();
+		} catch (error) {
+			cLog(1, '[SLYA-STATE-BAK] failed to list GM values', error);
+		}
+		return [];
+	}
+
+	async function getParsedGmValue(key, fallback = null) {
+		try {
+			const raw = await GM.getValue(key, '');
+			if (!raw) return fallback;
+			return JSON.parse(raw);
+		} catch (error) {
+			return fallback;
+		}
+	}
+
+	function getSlyaBackupSettingsStrength(settings) {
+		if (!settings || typeof settings !== 'object') return 0;
+		let score = Math.min(80, Object.keys(settings).length);
+		if (String(settings.mySecretKey || '').trim()) score += 25;
+		if (String(settings.slyInstanceName || '').trim()) score += 25;
+		if (String(settings.heliusRpcURL || '').trim()) score += 10;
+		if (Number(settings.craftingJobs || 0) > 0) score += 15;
+		if (settings.upgradeAutomationEnabled) score += 20;
+		if (Array.isArray(settings.savedProfile) && settings.savedProfile.length) score += 10;
+		return score;
+	}
+
+	async function buildSlyaStateBackupPayload(reason) {
+		const keys = await getGmValueKeys();
+		const keySet = new Set(keys);
+		const settings = cloneForSlyaStateBackup(globalSettings);
+		const fleetConfigs = {};
+		const craftConfigs = {};
+		const extraState = {};
+		let fleetsForBackup = [];
+		try { fleetsForBackup = Array.isArray(userFleets) ? userFleets : []; } catch (e) { fleetsForBackup = []; }
+
+		if (fleetsForBackup.length) {
+			for (const fleet of fleetsForBackup) {
+				const key = fleet?.publicKey?.toString ? fleet.publicKey.toString() : String(fleet?.publicKey || '');
+				if (!key) continue;
+				const data = await getParsedGmValue(key, null);
+				if (data) fleetConfigs[key] = data;
+			}
+		}
+
+		let maxCraftSlot = Number(settings.craftingJobs || 0);
+		for (const key of keySet) {
+			const match = String(key).match(/^craft(\d+)$/);
+			if (match) maxCraftSlot = Math.max(maxCraftSlot, Number(match[1] || 0));
+		}
+		for (let i = 1; i <= maxCraftSlot; i++) {
+			const key = 'craft' + i;
+			const data = await getParsedGmValue(key, null);
+			if (data) craftConfigs[key] = data;
+		}
+
+		for (const key of keySet) {
+			const shouldCapture = key === UPGRADE_AUTOMATION_EVENTS_KEY
+				|| key === 'upgradeAutomationSchedulerObservedState'
+				|| String(key).startsWith(UPGRADE_AUTOMATION_STATE_PREFIX)
+				|| String(key).startsWith(UPGRADE_TELEMETRY_PREFIX);
+			if (!shouldCapture) continue;
+			const data = await getParsedGmValue(key, null);
+			if (data) extraState[key] = data;
+		}
+
+		return {
+			schemaVersion: SLYA_STATE_BACKUP_SCHEMA_VERSION,
+			reason: String(reason || 'unknown'),
+			aephiaVersion: AEPHIA_SLYA_VERSION,
+			writtenAt: new Date().toISOString(),
+			settings,
+			fleetConfigs,
+			craftConfigs,
+			extraState,
+			activeCrafting: Object.values(craftConfigs).filter(craft => craft && craft.craftingId)
+		};
+	}
+
+	async function writeSlyaStateBackup(reason) {
+		if (slyaStateBackupInFlight) return;
+		if (typeof window === 'undefined' || !window.electronAPI?.writeSlyaStateBackup) return;
+		slyaStateBackupInFlight = true;
+		try {
+			const payload = await buildSlyaStateBackupPayload(reason);
+			const result = await window.electronAPI.writeSlyaStateBackup(payload);
+			if (!result?.ok) cLog(1, '[SLYA-STATE-BAK] write failed', result);
+			else slyaStateBackupCache = payload;
+		} catch (error) {
+			cLog(1, '[SLYA-STATE-BAK] write error', error);
+		} finally {
+			slyaStateBackupInFlight = false;
+		}
+	}
+
+	function scheduleSlyaStateBackup(reason, delayMs = 1500) {
+		if (typeof window === 'undefined' || !window.electronAPI?.writeSlyaStateBackup) return;
+		if (slyaStateBackupTimer) clearTimeout(slyaStateBackupTimer);
+		slyaStateBackupTimer = setTimeout(() => {
+			slyaStateBackupTimer = null;
+			writeSlyaStateBackup(reason);
+		}, delayMs);
+	}
+
+	async function readLatestSlyaStateBackup() {
+		if (slyaStateBackupCache) return slyaStateBackupCache;
+		if (typeof window === 'undefined' || !window.electronAPI?.readSlyaStateBackup) return null;
+		try {
+			const result = await window.electronAPI.readSlyaStateBackup();
+			const backup = result?.best || null;
+			if (backup && Number(backup.schemaVersion || 0) === SLYA_STATE_BACKUP_SCHEMA_VERSION) {
+				slyaStateBackupCache = backup;
+				return backup;
+			}
+		} catch (error) {
+			cLog(1, '[SLYA-STATE-BAK] read error', error);
+		}
+		return null;
+	}
+
+	async function restoreSlyaStateBackupIfCurrentSettingsWeak(reason) {
+		const backup = await readLatestSlyaStateBackup();
+		if (!backup || !backup.settings) return false;
+
+		const currentStrength = getSlyaBackupSettingsStrength(globalSettings);
+		const backupStrength = getSlyaBackupSettingsStrength(backup.settings);
+		if (currentStrength >= 40 || backupStrength <= currentStrength + 25) return false;
+
+		await GM.setValue(settingsGmKey, JSON.stringify(backup.settings));
+		for (const [key, value] of Object.entries(backup.fleetConfigs || {})) await GM.setValue(key, JSON.stringify(value));
+		for (const [key, value] of Object.entries(backup.craftConfigs || {})) await GM.setValue(key, JSON.stringify(value));
+		for (const [key, value] of Object.entries(backup.extraState || {})) await GM.setValue(key, JSON.stringify(value));
+		globalSettings = cloneForSlyaStateBackup(backup.settings);
+		cLog(1, `[SLYA-STATE-BAK] restored weak current state from external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'}`);
+		try { await appendUpgradeAutomationLog(`[SLYA-STATE-BAK] restored weak current state from external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'}`); } catch (e) {}
+		return true;
+	}
+
+	async function recoverCraftingProcessFromSlyaStateBackupForSlot(userCraft) {
+		if (!userCraft || userCraft.craftingId) return null;
+		const backup = await readLatestSlyaStateBackup();
+		const backupCraft = backup?.craftConfigs?.[userCraft.label];
+		if (!backupCraft || !backupCraft.craftingId) return null;
+		if (backupCraft.item && userCraft.item && backupCraft.item !== userCraft.item) return null;
+		if (backupCraft.coordinates && userCraft.coordinates && backupCraft.coordinates !== userCraft.coordinates) return null;
+
+		const restoredCraft = { ...userCraft, ...backupCraft, label: userCraft.label };
+		await GM.setValue(userCraft.label, JSON.stringify(restoredCraft));
+		recoveredCraftingProcessSlots.set(String(restoredCraft.craftingId), userCraft.label);
+		updateFleetState(restoredCraft, restoredCraft.state || userCraft.state || 'Idle');
+		cLog(1, `${FleetTimeStamp(userCraft.label)} Recovered craftingId ${restoredCraft.craftingId} from external SLYA state backup`);
+		try { await appendUpgradeAutomationLog(`[SLYA-STATE-BAK] recovered ${userCraft.label} craftingId=${restoredCraft.craftingId} from external backup`); } catch (e) {}
+		return restoredCraft;
 	}
 
 	async function refreshUpgradeAutomationInfluxStats() {
@@ -2139,6 +2311,7 @@
 	async function saveUpgradeAutomationState(instanceId, state) {
 		const key = UPGRADE_AUTOMATION_STATE_PREFIX + String(instanceId);
 		await GM.setValue(key, JSON.stringify(state));
+		scheduleSlyaStateBackup('upgrade-automation-state');
 	}
 
 	function normalizeUpgradeRecipeName(name) {
@@ -3432,6 +3605,7 @@
 
 		upgradeTelemetryCache.set(key, payload);
 		await GM.setValue(getUpgradeTelemetryKey(key), JSON.stringify(payload));
+		scheduleSlyaStateBackup('upgrade-telemetry-save');
 	}
 
 	async function loadUpgradeTelemetryJob(craftingId) {
@@ -3455,6 +3629,7 @@
 		const key = String(craftingId);
 		upgradeTelemetryCache.delete(key);
 		await GM.deleteValue(getUpgradeTelemetryKey(key));
+		scheduleSlyaStateBackup('upgrade-telemetry-delete');
 	}
 
 	async function emitUpgradeCompletionTelemetry(job, userCraft) {
@@ -3548,6 +3723,7 @@
 				await window.electronAPI.snapshotLeveldbToBackup();
 			}
 		} catch (e) { try { await appendUpgradeAutomationLog('[SETTINGS][BAK-ERROR-POST] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
+		scheduleSlyaStateBackup('settings-' + String(reason || 'unknown'));
 	}
 
 	async function saveFleetConfig(fleetPK, fleetData, reason) {
@@ -3567,6 +3743,7 @@
 				await window.electronAPI.snapshotLeveldbToBackup();
 			}
 		} catch (e) { try { await appendUpgradeAutomationLog('[FLEET][BAK-ERROR] fleet=' + fleetLabel + '... reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
+		scheduleSlyaStateBackup('fleet-' + String(reason || 'unknown'));
 	}
 
 	async function saveCraftConfig(craftIndexOrLabel, craftData, reason) {
@@ -3595,11 +3772,13 @@
 				await window.electronAPI.snapshotLeveldbToBackup();
 			}
 		} catch (e) { try { await appendUpgradeAutomationLog('[CRAFT][BAK-ERROR] slot=' + slotLabel + ' reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
+		scheduleSlyaStateBackup('craft-' + String(reason || 'unknown'));
 	}
 
 	async function loadGlobalSettings() {
 		const rawSettingsData = await GM.getValue(settingsGmKey, '{}');
 		globalSettings = JSON.parse(rawSettingsData);
+		await restoreSlyaStateBackupIfCurrentSettingsWeak('load-global-settings');
 		try {
 			const loadedKeyCount = Object.keys(globalSettings || {}).length;
 			const loadedKeyLen = (globalSettings?.mySecretKey || '').length;
@@ -9844,6 +10023,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				let fleetJson = JSON.stringify(fleetObj);
 				await GM.setValue(key, fleetJson);
 		}
+		scheduleSlyaStateBackup('config-import');
         await loadGlobalSettings();
 		assistImportToggle();
 	}
@@ -9872,6 +10052,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			userFleets[userFleetIndex].destCoord = destXStr + ',' + destYStr;
 			userFleets[userFleetIndex].scanBlock = scanBlock;
 		}
+		scheduleSlyaStateBackup('targets-import');
 		assistImportToggle();
 	}
 
@@ -12976,6 +13157,124 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
         return {starbaseTime: starbaseTime, resRemaining: resRemainingLocalTimeDiffMin};
     }
 
+	async function isCraftingProcessAssignedToAnotherSlot(craftingId, currentLabel) {
+		const reservedLabel = recoveredCraftingProcessSlots.get(String(craftingId));
+		if (reservedLabel && reservedLabel !== currentLabel) return true;
+
+		for (let i = 1; i < globalSettings.craftingJobs + 1; i++) {
+			const label = 'craft' + i;
+			if (label === currentLabel) continue;
+			try {
+				const craftSavedData = await GM.getValue(label, '{}');
+				const craftParsedData = JSON.parse(craftSavedData);
+				if (craftParsedData && Number(craftParsedData.craftingId || 0) === Number(craftingId)) return true;
+			} catch (error) {
+				cLog(1, `${FleetTimeStamp(currentLabel)} Failed to inspect ${label} while recovering crafting process`, error);
+			}
+		}
+
+		return false;
+	}
+
+	function getCraftingRecoveryRecipeCandidates(targetRecipe, userCraft) {
+		const candidates = [];
+		const configuredRecipe = craftRecipes.concat(upgradeRecipes).find(item => item.name === userCraft.item);
+		if (configuredRecipe) candidates.push(configuredRecipe);
+		if (targetRecipe && targetRecipe.craftRecipe) candidates.push(targetRecipe.craftRecipe);
+		return candidates.filter((recipe, index, recipes) => recipe && recipe.publicKey && recipes.findIndex(item => item.publicKey.toString() === recipe.publicKey.toString()) === index);
+	}
+
+	async function findRecoverableCraftingProcess(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime) {
+		const EMPTY_CRAFTING_SPEED_PER_TIER = [0, .2, .275, .35, .425, .5, .5];
+		const recipeCandidates = getCraftingRecoveryRecipeCandidates(targetRecipe, userCraft);
+		if (!recipeCandidates.length) return null;
+
+		const craftingInstances = await sageProgram.account.craftingInstance.all([
+			{
+				memcmp: {
+					offset: 11,
+					bytes: starbasePlayer.toBase58(),
+				},
+			},
+		]);
+
+		let recoveredProcess = null;
+		for (let craftingInstance of craftingInstances) {
+			const craftingProcesses = await craftingProgram.account.craftingProcess.all([
+				{
+					memcmp: {
+						offset: 17,
+						bytes: craftingInstance.publicKey.toBase58(),
+					},
+				},
+			]);
+
+			for (let craftingProcess of craftingProcesses) {
+				const recoveredRecipe = recipeCandidates.find(recipe => recipe.publicKey.toString() === craftingProcess.account.recipe.toString());
+				if (!recoveredRecipe) continue;
+
+				const isCraftingRecipe = craftRecipes.some(item => item.publicKey.toString() === recoveredRecipe.publicKey.toString());
+				const timeInfo = isCraftingRecipe ? craftTime : upgradeTime;
+				if (!timeInfo) continue;
+
+				const craftingId = craftingProcess.account.craftingId.toNumber();
+				if (!craftingId || await isCraftingProcessAssignedToAnotherSlot(craftingId, userCraft.label)) continue;
+
+				const status = maybeBnToNumber(craftingProcess.account.status, craftingProcess.account.status);
+				if (![0, 1, 2, 3].includes(status)) continue;
+
+				const remainingSeconds = Math.max(craftingProcess.account.endTime.toNumber() - timeInfo.starbaseTime, 0);
+				if (!recoveredProcess || craftingProcess.account.endTime.toNumber() < recoveredProcess.endTime) {
+					recoveredProcess = {
+						craftingId: craftingId,
+						endTime: craftingProcess.account.endTime.toNumber(),
+						remainingSeconds: remainingSeconds,
+						isCraftingRecipe: isCraftingRecipe,
+						recipe: recoveredRecipe
+					};
+				}
+			}
+		}
+
+		if (!recoveredProcess) return null;
+
+		let state;
+		let timeoutMs = 60000;
+		if (recoveredProcess.isCraftingRecipe) {
+			const adjustedEndTime = craftTime.resRemaining > 0 ? recoveredProcess.remainingSeconds : (recoveredProcess.remainingSeconds) / EMPTY_CRAFTING_SPEED_PER_TIER[starbase.account.level];
+			state = "&#9874; " + recoveredProcess.recipe.name + (userCraft.item != recoveredProcess.recipe.name ? ' (' + userCraft.item + ')' : '') + ' [' + TimeToStr(new Date(Date.now() + adjustedEndTime * 1000)) + ']';
+			if (adjustedEndTime > 900) timeoutMs = 300000;
+			else if (adjustedEndTime > 180) timeoutMs = adjustedEndTime * 1000 / 3;
+			else if (adjustedEndTime < 60) timeoutMs = 30000;
+		} else {
+			const upgradeTimeDiff = recoveredProcess.remainingSeconds;
+			state = upgradeTime.resRemaining > 0 ? 'Upgrading [' + TimeToStr(new Date(Date.now() + upgradeTimeDiff * 1000)) + ']' : 'Paused [' + parseInt(upgradeTimeDiff / 60) + 'm remaining]';
+			if (upgradeTimeDiff < 60) timeoutMs = 30000;
+		}
+
+		return {
+			craftingId: recoveredProcess.craftingId,
+			state: state,
+			timeoutMs: timeoutMs,
+			activityType: recoveredProcess.isCraftingRecipe ? 'crafting' : 'upgrade',
+			recipeName: recoveredProcess.recipe.name
+		};
+	}
+
+	async function recoverCraftingProcessForSlot(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime) {
+		const recoveredProcess = await findRecoverableCraftingProcess(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime);
+		if (!recoveredProcess) return null;
+
+		userCraft.craftingId = recoveredProcess.craftingId;
+		userCraft.craftingCoords = userCraft.coordinates;
+		userCraft.errorCount = 0;
+		recoveredCraftingProcessSlots.set(String(recoveredProcess.craftingId), userCraft.label);
+		updateFleetState(userCraft, recoveredProcess.state);
+		await updateCraft(userCraft);
+		cLog(1, `${FleetTimeStamp(userCraft.label)} Recovered ${recoveredProcess.activityType} process ${recoveredProcess.craftingId} for ${recoveredProcess.recipeName}`);
+		return recoveredProcess;
+	}
+
     async function updateCraft(userCraft) {
         let craftSavedData = await GM.getValue(userCraft.label, '{}');
         let craftParsedData = JSON.parse(craftSavedData);
@@ -13315,7 +13614,16 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     } else {
                         materialStr = ': ' + targetRecipe.craftRecipe.name + (userCraft.item != targetRecipe.craftRecipe.name ? ' (' + userCraft.item + ')' : '' );
                     }
-                    if(availableCrew < userCraft.crew && ((targetRecipe && targetRecipe.amountCraftable <= 0) || (!targetRecipe)) ) {
+                    const recoveredBackupCraft = await recoverCraftingProcessFromSlyaStateBackupForSlot(userCraft);
+                    if (recoveredBackupCraft) {
+                        userCraft = recoveredBackupCraft;
+                        localTimeout = 10000;
+                    } else {
+                    const recoveredProcess = await recoverCraftingProcessForSlot(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime);
+                    if (recoveredProcess) {
+                        localTimeout = recoveredProcess.timeoutMs;
+                    }
+                    else if(availableCrew < userCraft.crew && ((targetRecipe && targetRecipe.amountCraftable <= 0) || (!targetRecipe)) ) {
                         updateFleetState(userCraft, 'Waiting for crew/material' + materialStr);
                     }
                     else if(availableCrew < userCraft.crew) {
@@ -13323,6 +13631,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     }
                     else {
                         updateFleetState(userCraft, 'Waiting for material' + materialStr);
+                    }
                     }
                     await updateCraft(userCraft);
                 }

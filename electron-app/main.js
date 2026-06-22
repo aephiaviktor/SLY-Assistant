@@ -149,6 +149,9 @@ function wait(ms) {	return new Promise(resolve => {	setTimeout(resolve, ms); });
 const LEVELDB_DIR = path.join(APP_ROOT, 'data', 'Local Storage', 'leveldb')
 const LEVELDB_BAK_DIR = path.join(APP_ROOT, 'data', 'Local Storage', 'leveldb.bak')
 const LEVELDB_PREV_BAK_DIR = path.join(APP_ROOT, 'data', 'Local Storage', 'leveldb.bak.prev')
+const SLYA_STATE_BACKUP_DIR = path.join(APP_ROOT, 'data', 'slya-state-backups')
+const SLYA_STATE_BACKUP_CURRENT = path.join(SLYA_STATE_BACKUP_DIR, 'slya-state-current.json')
+const SLYA_STATE_BACKUP_PREV = path.join(SLYA_STATE_BACKUP_DIR, 'slya-state-prev.json')
 const LEVELDB_MIN_SAFE_SCORE = 65
 const LEVELDB_RESTORE_SCORE_MARGIN = 25
 
@@ -163,6 +166,68 @@ function logToUpgradeLog(line)
 		const logPath = path.join(APP_ROOT, 'data', 'upgrade-automation.log')
 		fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${String(line || '')}\n`, 'utf8')
 	} catch (e) {}
+}
+
+function atomicWriteJson(targetPath, payload)
+{
+	fs.mkdirSync(path.dirname(targetPath), { recursive: true })
+	const tmpPath = `${targetPath}.tmp-${process.pid}-${Date.now()}`
+	fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2), 'utf8')
+	fs.renameSync(tmpPath, targetPath)
+}
+
+function readJsonFileIfExists(filePath)
+{
+	try {
+		if (!fs.existsSync(filePath)) return null
+		return JSON.parse(fs.readFileSync(filePath, 'utf8'))
+	} catch (error) {
+		return { error: String(error?.message || error), path: filePath }
+	}
+}
+
+function writeSlyaStateBackup(payload)
+{
+	try {
+		if (!payload || typeof payload !== 'object') return { ok: false, error: 'missing payload' }
+		fs.mkdirSync(SLYA_STATE_BACKUP_DIR, { recursive: true })
+		if (fs.existsSync(SLYA_STATE_BACKUP_CURRENT)) {
+			try { fs.copyFileSync(SLYA_STATE_BACKUP_CURRENT, SLYA_STATE_BACKUP_PREV) } catch (e) {}
+		}
+		const backup = {
+			...payload,
+			wrapper: {
+				appName: APP_NAME,
+				instanceName: APP_INSTANCE_NAME,
+				writtenAt: new Date().toISOString(),
+				appRoot: APP_ROOT
+			}
+		}
+		atomicWriteJson(SLYA_STATE_BACKUP_CURRENT, backup)
+		const bytes = fs.statSync(SLYA_STATE_BACKUP_CURRENT).size
+		logToUpgradeLog(`[ELECTRON][SLYA-STATE-BAK] snapshot ok reason=${String(payload.reason || 'unknown')} bytes=${bytes} path=${SLYA_STATE_BACKUP_CURRENT}`)
+		return { ok: true, path: SLYA_STATE_BACKUP_CURRENT, bytes }
+	} catch (error) {
+		logToUpgradeLog(`[ELECTRON][SLYA-STATE-BAK] snapshot error=${String(error?.message || error)}`)
+		return { ok: false, error: String(error?.message || error) }
+	}
+}
+
+function readSlyaStateBackup()
+{
+	const current = readJsonFileIfExists(SLYA_STATE_BACKUP_CURRENT)
+	const previous = readJsonFileIfExists(SLYA_STATE_BACKUP_PREV)
+	const best = current && !current.error ? current : previous && !previous.error ? previous : null
+	return {
+		ok: !!best,
+		current,
+		previous,
+		best,
+		paths: {
+			current: SLYA_STATE_BACKUP_CURRENT,
+			previous: SLYA_STATE_BACKUP_PREV
+		}
+	}
 }
 
 function auditLeveldb(targetDir)
@@ -578,6 +643,14 @@ else
 
   ipcMain.handle('snapshotLeveldbToBackup', async () => {
 	return snapshotLeveldbToBackup();
+  })
+
+  ipcMain.handle('writeSlyaStateBackup', async (event, payload) => {
+	return writeSlyaStateBackup(payload);
+  })
+
+  ipcMain.handle('readSlyaStateBackup', async () => {
+	return readSlyaStateBackup();
   })
 
   ipcMain.handle('restoreLeveldbFromBackup', async () => {
