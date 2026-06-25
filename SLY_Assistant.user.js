@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-65
+// @aephia-version 0.7.35-66
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-65'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-66'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -100,6 +100,9 @@
 	let slyaStateBackupTimer = null;
 	let slyaStateBackupInFlight = false;
 	let slyaStateBackupCache = null;
+	let slyaPrevSecretKeyLen = 0;
+	let slyaPrevSaveProfile = true;
+	let slyaSettingsResetSuspected = false;
 	// Viktor: Simple capture-at-xx:58 / write-at-xx:59 state tracking
 	let upgradeAutomationPendingPlanRows = null;
 	let upgradeAutomationPendingCaptureHour = null;
@@ -425,6 +428,21 @@
 		return score;
 	}
 
+	function isSlyaFleetConfigCandidate(key, data) {
+		if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+		if (key === settingsGmKey || String(key).startsWith('craft')) return false;
+		return data.assignment !== undefined
+			|| data.mineResource !== undefined
+			|| data.destCoord !== undefined
+			|| data.starbaseCoord !== undefined
+			|| data.moveType !== undefined
+			|| data.maxCargo !== undefined
+			|| data.maxAmmo !== undefined
+			|| data.maxFuel !== undefined
+			|| data.transportPlusTargets !== undefined
+			|| data.scanBlock !== undefined;
+	}
+
 	async function buildSlyaStateBackupPayload(reason) {
 		const keys = await getGmValueKeys();
 		const keySet = new Set(keys);
@@ -442,6 +460,11 @@
 				const data = await getParsedGmValue(key, null);
 				if (data) fleetConfigs[key] = data;
 			}
+		}
+		for (const key of keySet) {
+			if (fleetConfigs[key]) continue;
+			const data = await getParsedGmValue(key, null);
+			if (isSlyaFleetConfigCandidate(key, data)) fleetConfigs[key] = data;
 		}
 
 		let maxCraftSlot = Number(settings.craftingJobs || 0);
@@ -3659,10 +3682,6 @@
 			starbase: job.starbase || ''
 		});
 	}
-
-	let slyaPrevSecretKeyLen = 0;
-	let slyaPrevSaveProfile = true;
-	let slyaSettingsResetSuspected = false;
 
 	function redactSettingsForLog(obj) {
 		try {

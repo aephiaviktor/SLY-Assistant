@@ -251,6 +251,41 @@ function auditLeveldb(targetDir)
 	}
 }
 
+function extractJsonObjectsContaining(text, marker)
+{
+	const objects = []
+	let markerIndex = -1
+	while ((markerIndex = text.indexOf(marker, markerIndex + 1)) !== -1) {
+		const start = text.lastIndexOf('{', markerIndex)
+		if (start === -1) continue
+		let depth = 0
+		let inString = false
+		let escaped = false
+		for (let i = start; i < text.length; i++) {
+			const ch = text[i]
+			if (inString) {
+				if (escaped) escaped = false
+				else if (ch === '\\') escaped = true
+				else if (ch === '"') inString = false
+				continue
+			}
+			if (ch === '"') {
+				inString = true
+				continue
+			}
+			if (ch === '{') depth++
+			else if (ch === '}') {
+				depth--
+				if (depth === 0) {
+					try { objects.push(JSON.parse(text.slice(start, i + 1))) } catch (e) {}
+					break
+				}
+			}
+		}
+	}
+	return objects
+}
+
 function getLeveldbSettingsHealth(targetDir)
 {
 	const result = {
@@ -267,6 +302,7 @@ function getLeveldbSettingsHealth(targetDir)
 		upgradeAutomationEnabled: false,
 		fleetConfigCount: 0,
 		craftConfigCount: 0,
+		hasParsedSettings: false,
 		score: 0
 	}
 	try {
@@ -279,11 +315,8 @@ function getLeveldbSettingsHealth(targetDir)
 			let text = ''
 			try { text = fs.readFileSync(filePath).toString('latin1') } catch (e) { continue }
 			combinedText += '\n' + text
-			const re = /\{[^{}]*"priorityFee"[^{}]*"mySecretKey"\s*:\s*"[^"]*"[^{}]*\}/g
-			let match
-			while ((match = re.exec(text))) {
-				try { settingsObjects.push(JSON.parse(match[0])) } catch (e) {}
-			}
+			settingsObjects.push(...extractJsonObjectsContaining(text, '"priorityFee"')
+				.filter(settings => settings && typeof settings === 'object' && Object.prototype.hasOwnProperty.call(settings, 'mySecretKey')))
 		}
 		result.fleetConfigCount = (combinedText.match(/"moveType"\s*:/g) || []).length
 		result.craftConfigCount = (combinedText.match(/"label"\s*:\s*"craft\d+"/g) || []).length
@@ -305,6 +338,7 @@ function getLeveldbSettingsHealth(targetDir)
 		}
 		const settings = settingsObjects[settingsObjects.length - 1]
 		const savedProfile = Array.isArray(settings.savedProfile) ? settings.savedProfile : []
+		result.hasParsedSettings = true
 		result.hasAnySettings = true
 		result.keyCount = Object.keys(settings || {}).length
 		result.hasSecret = !!String(settings.mySecretKey || '').trim()
@@ -344,7 +378,7 @@ function scoreLeveldbSettingsHealth(health)
 
 function formatSettingsHealth(health)
 {
-	return `configured=${!!health.hasConfiguredSettings} any=${!!health.hasAnySettings} score=${Number(health.score || 0)} keys=${Number(health.keyCount || 0)} secret=${!!health.hasSecret} instance=${!!health.hasInstanceName} rpc=${!!health.hasRpc} influx=${!!health.hasInflux} saveProfile=${!!health.saveProfile} savedProfileLen=${Number(health.savedProfileLength || 0)} craftingJobs=${Number(health.craftingJobs || 0)} lpEnabled=${!!health.upgradeAutomationEnabled} fleetConfigs=${Number(health.fleetConfigCount || 0)} craftConfigs=${Number(health.craftConfigCount || 0)}`
+	return `configured=${!!health.hasConfiguredSettings} any=${!!health.hasAnySettings} parsed=${!!health.hasParsedSettings} score=${Number(health.score || 0)} keys=${Number(health.keyCount || 0)} secret=${!!health.hasSecret} instance=${!!health.hasInstanceName} rpc=${!!health.hasRpc} influx=${!!health.hasInflux} saveProfile=${!!health.saveProfile} savedProfileLen=${Number(health.savedProfileLength || 0)} craftingJobs=${Number(health.craftingJobs || 0)} lpEnabled=${!!health.upgradeAutomationEnabled} fleetConfigs=${Number(health.fleetConfigCount || 0)} craftConfigs=${Number(health.craftConfigCount || 0)}`
 }
 
 function copyLeveldbSnapshot(targetDir, label, sourceDir = LEVELDB_DIR)
@@ -401,6 +435,7 @@ function liveLooksWeakerThanBackup(liveHealth, backupHealth)
 	const liveScore = Number(liveHealth?.score || 0)
 	const backupScore = Number(backupHealth.score || 0)
 	if (!liveHealth?.hasConfiguredSettings && backupScore >= LEVELDB_MIN_SAFE_SCORE) return true
+	if (liveHealth?.hasConfiguredSettings && !liveHealth?.hasParsedSettings && backupHealth?.hasParsedSettings && liveHealth?.hasInstanceName && liveHealth?.hasRpc) return false
 	if (backupScore >= liveScore + LEVELDB_RESTORE_SCORE_MARGIN) return true
 	if (backupHealth.hasInstanceName && !liveHealth?.hasInstanceName && backupScore > liveScore) return true
 	if (backupHealth.upgradeAutomationEnabled && !liveHealth?.upgradeAutomationEnabled && backupScore > liveScore) return true
