@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-68
+// @aephia-version 0.7.35-69
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-68'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-69'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -777,6 +777,73 @@
 			}
 		}
 		return 0;
+	}
+
+	const UPGRADE_AUTOMATION_INFLUX_UNTAGGED_FALLBACK_UNTIL = '2026-07-09T00:00:00Z';
+	const UPGRADE_AUTOMATION_INFLUX_LEGACY_BUCKET_PREFIX = 'slya-lp-auto-influx-legacy-bucket:';
+
+	function isUpgradeAutomationInfluxUntaggedFallbackActive(now = new Date()) {
+		const cutoff = Date.parse(UPGRADE_AUTOMATION_INFLUX_UNTAGGED_FALLBACK_UNTIL);
+		return Number.isFinite(cutoff) && now.getTime() < cutoff;
+	}
+
+	function getUpgradeAutomationInfluxFactionTag() {
+		return normalizeUpgradeAutomationLpInstance(globalSettings?.upgradeAutomationLpInstance || 'MUD');
+	}
+
+	function getUpgradeAutomationInfluxFactionFluxFilter(now = new Date(), row = 'r') {
+		const faction = String(getUpgradeAutomationInfluxFactionTag()).replace(/"/g, '');
+		const tagged = `(exists ${row}.faction and ${row}.faction == "${faction}")`;
+		if (!isUpgradeAutomationInfluxUntaggedFallbackActive(now)) return tagged;
+		return `(if exists ${row}.faction then ${row}.faction == "${faction}" else true)`;
+	}
+
+	function sanitizeInfluxBucketName(bucketName = '') {
+		return String(bucketName || '').trim().replace(/"/g, '');
+	}
+
+	function getUpgradeAutomationInfluxLegacyBucketKey() {
+		return UPGRADE_AUTOMATION_INFLUX_LEGACY_BUCKET_PREFIX + getUpgradeAutomationInfluxFactionTag();
+	}
+
+	function getUpgradeAutomationDefaultLegacyInfluxBucket() {
+		const faction = getUpgradeAutomationInfluxFactionTag();
+		return faction === 'MUD' ? 'slya_mud' : '';
+	}
+
+	function rememberUpgradeAutomationInfluxLegacyBucket(now = new Date()) {
+		if (!isUpgradeAutomationInfluxUntaggedFallbackActive(now)) return;
+		const currentBucket = sanitizeInfluxBucketName(globalSettings?.influxDB || '');
+		if (!currentBucket || currentBucket === 'slya') return;
+		try {
+			const key = getUpgradeAutomationInfluxLegacyBucketKey();
+			const existing = sanitizeInfluxBucketName(localStorage.getItem(key) || '');
+			if (!existing) localStorage.setItem(key, currentBucket);
+		} catch (e) {}
+	}
+
+	function getUpgradeAutomationInfluxReadBuckets(now = new Date()) {
+		const currentBucket = sanitizeInfluxBucketName(globalSettings?.influxDB || '');
+		const buckets = [];
+		if (currentBucket) buckets.push(currentBucket);
+		if (isUpgradeAutomationInfluxUntaggedFallbackActive(now)) {
+			rememberUpgradeAutomationInfluxLegacyBucket(now);
+			try {
+				const storedLegacy = sanitizeInfluxBucketName(localStorage.getItem(getUpgradeAutomationInfluxLegacyBucketKey()) || '');
+				if (storedLegacy && storedLegacy !== currentBucket) buckets.push(storedLegacy);
+			} catch (e) {}
+			const defaultLegacy = sanitizeInfluxBucketName(getUpgradeAutomationDefaultLegacyInfluxBucket());
+			if (defaultLegacy && defaultLegacy !== currentBucket) buckets.push(defaultLegacy);
+		}
+		return Array.from(new Set(buckets.filter(Boolean)));
+	}
+
+	function buildUpgradeAutomationInfluxSourceFlux(bucketNames = [], rangeLine = '', filterLines = []) {
+		const buckets = Array.from(new Set((bucketNames || []).map(sanitizeInfluxBucketName).filter(Boolean)));
+		const buildSource = bucket => [`from(bucket: "${bucket}")`, `  |> ${rangeLine}`, ...filterLines].join('\n');
+		if (buckets.length <= 1) return buildSource(buckets[0] || sanitizeInfluxBucketName(globalSettings?.influxDB || ''));
+		const queryNames = buckets.map((_, idx) => `lp_auto_bucket_${idx}`);
+		return buckets.map((bucket, idx) => `${queryNames[idx]} = ${buildSource(bucket)}`).join('\n\n') + `\n\nunion(tables: [${queryNames.join(', ')}])`;
 	}
 
 	async function fetchInfluxUpgrading24h() {
@@ -2473,10 +2540,15 @@
 		try {
 			const effectiveStartIso = String(startIso || new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0)).toISOString());
 			const nowIso = now.toISOString();
-			const flux = `from(bucket: "${globalSettings.influxDB}")
-  |> range(start: ${effectiveStartIso}, stop: ${nowIso})
-  |> filter(fn: (r) => r._measurement == "${String(measurementName || '').replace(/"/g, '')}")
-  |> filter(fn: (r) => r._field == "${String(fieldName || '').replace(/"/g, '')}")
+			const isLpAutoMeasurement = /^lp_auto_/.test(String(measurementName || ''));
+			const sourceFlux = isLpAutoMeasurement
+				? buildUpgradeAutomationInfluxSourceFlux(getUpgradeAutomationInfluxReadBuckets(now), `range(start: ${effectiveStartIso}, stop: ${nowIso})`, [
+					`  |> filter(fn: (r) => r._measurement == "${String(measurementName || '').replace(/"/g, '')}")`,
+					`  |> filter(fn: (r) => ${getUpgradeAutomationInfluxFactionFluxFilter(now)})`,
+					`  |> filter(fn: (r) => r._field == "${String(fieldName || '').replace(/"/g, '')}")`
+				])
+				: `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: ${effectiveStartIso}, stop: ${nowIso})\n  |> filter(fn: (r) => r._measurement == "${String(measurementName || '').replace(/"/g, '')}")\n  |> filter(fn: (r) => r._field == "${String(fieldName || '').replace(/"/g, '')}")`;
+			const flux = `${sourceFlux}
   |> keep(columns: ["_time", "_value"])`;
 			const csv = await queryInfluxFlux(flux);
 			const rows = parseInfluxCsv(csv).sort((a, b) => String(a._time || '').localeCompare(String(b._time || '')));
@@ -2580,28 +2652,35 @@
 			const instanceId = factionCfg.lpInstance;
 			const dayStartIso = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0)).toISOString();
 			const nowIso = now.toISOString();
-			const neutralTargetsFlux = `from(bucket: "${globalSettings.influxDB}")
-  |> range(start: ${dayStartIso}, stop: ${nowIso})
-  |> filter(fn: (r) => r._measurement == "lp_auto_aggr")
-  |> filter(fn: (r) => r._field == "neutral_lp_target")
+			const lpAutoFactionFluxFilter = getUpgradeAutomationInfluxFactionFluxFilter(now);
+			const lpAutoReadBuckets = getUpgradeAutomationInfluxReadBuckets(now);
+			const neutralTargetsFlux = `${buildUpgradeAutomationInfluxSourceFlux(lpAutoReadBuckets, `range(start: ${dayStartIso}, stop: ${nowIso})`, [
+				'  |> filter(fn: (r) => r._measurement == "lp_auto_aggr")',
+				`  |> filter(fn: (r) => ${lpAutoFactionFluxFilter})`,
+				'  |> filter(fn: (r) => r._field == "neutral_lp_target")'
+			])}
   |> keep(columns: ["_time", "_value"])`;
-			const achievableTargetsFlux = `from(bucket: "${globalSettings.influxDB}")
-  |> range(start: ${dayStartIso}, stop: ${nowIso})
-  |> filter(fn: (r) => r._measurement == "lp_auto_aggr")
-  |> filter(fn: (r) => r._field == "achievable_lp_target")
+			const achievableTargetsFlux = `${buildUpgradeAutomationInfluxSourceFlux(lpAutoReadBuckets, `range(start: ${dayStartIso}, stop: ${nowIso})`, [
+				'  |> filter(fn: (r) => r._measurement == "lp_auto_aggr")',
+				`  |> filter(fn: (r) => ${lpAutoFactionFluxFilter})`,
+				'  |> filter(fn: (r) => r._field == "achievable_lp_target")'
+			])}
   |> keep(columns: ["_time", "_value"])`;
-			const aggrDebugFlux = `from(bucket: "${globalSettings.influxDB}")
-  |> range(start: ${dayStartIso}, stop: ${nowIso})
-  |> filter(fn: (r) => r._measurement == "lp_auto_aggr")`;
-			const settingsDebugFlux = `from(bucket: "${globalSettings.influxDB}")
-  |> range(start: ${dayStartIso}, stop: ${nowIso})
-  |> filter(fn: (r) => r._measurement == "lp_auto_settings")
-  |> filter(fn: (r) => r._field == "faction")
+			const aggrDebugFlux = buildUpgradeAutomationInfluxSourceFlux(lpAutoReadBuckets, `range(start: ${dayStartIso}, stop: ${nowIso})`, [
+				'  |> filter(fn: (r) => r._measurement == "lp_auto_aggr")',
+				`  |> filter(fn: (r) => ${lpAutoFactionFluxFilter})`
+			]);
+			const settingsDebugFlux = `${buildUpgradeAutomationInfluxSourceFlux(lpAutoReadBuckets, `range(start: ${dayStartIso}, stop: ${nowIso})`, [
+				'  |> filter(fn: (r) => r._measurement == "lp_auto_settings")',
+				`  |> filter(fn: (r) => ${lpAutoFactionFluxFilter})`,
+				'  |> filter(fn: (r) => r._field == "faction" or r._field == "faction_name")'
+			])}
   |> keep(columns: ["_time", "_value"])`;
-			const frameworkCompFlux = `from(bucket: "${globalSettings.influxDB}")
-  |> range(start: ${dayStartIso}, stop: ${nowIso})
-  |> filter(fn: (r) => r._measurement == "lp_auto_comp")
-  |> filter(fn: (r) => r._field == "neutral_upgrading_hour")
+			const frameworkCompFlux = `${buildUpgradeAutomationInfluxSourceFlux(lpAutoReadBuckets, `range(start: ${dayStartIso}, stop: ${nowIso})`, [
+				'  |> filter(fn: (r) => r._measurement == "lp_auto_comp")',
+				`  |> filter(fn: (r) => ${lpAutoFactionFluxFilter})`,
+				'  |> filter(fn: (r) => r._field == "neutral_upgrading_hour")'
+			])}
   |> keep(columns: ["_time", "component", "_value"])`;
 			const neutralTargetsFluxDebug = neutralTargetsFlux;
 			let neutralTargetsCsv = '';
@@ -2778,10 +2857,28 @@
 		try {
 			const dayStartIso = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0)).toISOString();
 			const nowIso = now.toISOString();
-			const neutralFlux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: ${dayStartIso}, stop: ${nowIso})\n  |> filter(fn: (r) => r._measurement == "lp_auto_comp")\n  |> filter(fn: (r) => r._field == "neutral_upgrading_hour")\n  |> keep(columns: ["_time", "component", "_value"])`;
-			const finalFlux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: ${dayStartIso}, stop: ${nowIso})\n  |> filter(fn: (r) => r._measurement == "lp_auto_comp")\n  |> filter(fn: (r) => r._field == "final_upgrading_hour")\n  |> keep(columns: ["_time", "component", "_value"])`;
-			const compHourlyFlux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: ${dayStartIso}, stop: ${nowIso})\n  |> filter(fn: (r) => r._measurement == "lp_auto_comp")\n  |> filter(fn: (r) => r._field == "neutral_upgrading_hour")\n  |> keep(columns: ["_time", "component", "_value"])`;
-			const aggrHourlyFlux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: ${dayStartIso}, stop: ${nowIso})\n  |> filter(fn: (r) => r._measurement == "lp_auto_aggr")\n  |> filter(fn: (r) => r._field == "aggressiveness")\n  |> keep(columns: ["_time", "_value"])`;
+			const lpAutoFactionFluxFilter = getUpgradeAutomationInfluxFactionFluxFilter(now);
+			const lpAutoReadBuckets = getUpgradeAutomationInfluxReadBuckets(now);
+			const neutralFlux = `${buildUpgradeAutomationInfluxSourceFlux(lpAutoReadBuckets, `range(start: ${dayStartIso}, stop: ${nowIso})`, [
+				'  |> filter(fn: (r) => r._measurement == "lp_auto_comp")',
+				`  |> filter(fn: (r) => ${lpAutoFactionFluxFilter})`,
+				'  |> filter(fn: (r) => r._field == "neutral_upgrading_hour")'
+			])}\n  |> keep(columns: ["_time", "component", "_value"])`;
+			const finalFlux = `${buildUpgradeAutomationInfluxSourceFlux(lpAutoReadBuckets, `range(start: ${dayStartIso}, stop: ${nowIso})`, [
+				'  |> filter(fn: (r) => r._measurement == "lp_auto_comp")',
+				`  |> filter(fn: (r) => ${lpAutoFactionFluxFilter})`,
+				'  |> filter(fn: (r) => r._field == "final_upgrading_hour")'
+			])}\n  |> keep(columns: ["_time", "component", "_value"])`;
+			const compHourlyFlux = `${buildUpgradeAutomationInfluxSourceFlux(lpAutoReadBuckets, `range(start: ${dayStartIso}, stop: ${nowIso})`, [
+				'  |> filter(fn: (r) => r._measurement == "lp_auto_comp")',
+				`  |> filter(fn: (r) => ${lpAutoFactionFluxFilter})`,
+				'  |> filter(fn: (r) => r._field == "neutral_upgrading_hour")'
+			])}\n  |> keep(columns: ["_time", "component", "_value"])`;
+			const aggrHourlyFlux = `${buildUpgradeAutomationInfluxSourceFlux(lpAutoReadBuckets, `range(start: ${dayStartIso}, stop: ${nowIso})`, [
+				'  |> filter(fn: (r) => r._measurement == "lp_auto_aggr")',
+				`  |> filter(fn: (r) => ${lpAutoFactionFluxFilter})`,
+				'  |> filter(fn: (r) => r._field == "aggressiveness")'
+			])}\n  |> keep(columns: ["_time", "_value"])`;
 			const [neutralCsv, finalCsv, compHourlyCsv, aggrHourlyCsv] = await Promise.all([
 				queryInfluxFlux(neutralFlux),
 				queryInfluxFlux(finalFlux),
@@ -2841,7 +2938,11 @@
 				.filter(row => String(row.component || '') === 'Framework')
 				.sort((a, b) => String(a._time || '').localeCompare(String(b._time || '')))
 				.pop();
-			const aggrTargetDebugFlux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: ${dayStartIso}, stop: ${nowIso})\n  |> filter(fn: (r) => r._measurement == "lp_auto_aggr")\n  |> filter(fn: (r) => r._field == "neutral_lp_target")\n  |> keep(columns: ["_time", "_value"])`;
+			const aggrTargetDebugFlux = `${buildUpgradeAutomationInfluxSourceFlux(lpAutoReadBuckets, `range(start: ${dayStartIso}, stop: ${nowIso})`, [
+				'  |> filter(fn: (r) => r._measurement == "lp_auto_aggr")',
+				`  |> filter(fn: (r) => ${lpAutoFactionFluxFilter})`,
+				'  |> filter(fn: (r) => r._field == "neutral_lp_target")'
+			])}\n  |> keep(columns: ["_time", "_value"])`;
 			let aggrTargetDebugValue = 0;
 			let aggrTargetDebugTime = '';
 			try {
@@ -3216,17 +3317,19 @@
 			await appendUpgradeAutomationLog('[UPGRADE-AUTO][INFLUX] skip executionSummary missing');
 			return;
 		}
+		rememberUpgradeAutomationInfluxLegacyBucket(now);
 		const nextHour = getUpgradeAutomationNextHourDate(now);
 		const snapshotForHour = nextHour.toISOString().slice(0, 13) + ':00:00Z';
 		const remainingHours = Math.max(1, Math.floor(Number(executionSummary.remainingHours || 0)));
 		const componentPlanRows = executionSummary.neutralComponentPlan || [];
+		const lpAutoFactionTag = getUpgradeAutomationInfluxFactionTag();
 		const lines = [];
 		for (const row of (executionSummary.neutralComponentPlan || [])) {
 			const phantomInventory = Math.max(0, Number(row.inventoryPhantom || 0));
 			const finalUpgHour = Math.max(0, Number(row.finalUpgradingHour || 0));
 			const bufferDaysPhantom = finalUpgHour > 0 ? (phantomInventory / (finalUpgHour * 24)) : (phantomInventory > 0 ? Number.POSITIVE_INFINITY : null);
 			lines.push(
-				`lp_auto_comp,component=${influxEscape(String(row.displayName || row.name || 'unknown'))}` +
+				`lp_auto_comp,faction=${influxEscape(lpAutoFactionTag)},component=${influxEscape(String(row.displayName || row.name || 'unknown'))}` +
 				` installed_today=${Math.floor(Number(row.installedToday || 0))}i` +
 				`,neutral_crew=${Math.floor(Number(row.crew || 0))}i` +
 				`,neutral_upgrading_hour=${Math.floor(Number(row.neutralUpgradingHour || 0))}i` +
@@ -3240,7 +3343,7 @@
 			);
 		}
 		lines.push(
-			`lp_auto_aggr` +
+			`lp_auto_aggr,faction=${influxEscape(lpAutoFactionTag)}` +
 			` day_progress=${Number(summary.dayProgressPct || 0)}` +
 			`,lp_target_now=${Math.round(Number(summary.targetNow || 0))}i` +
 			`,lp_target_now_influx=${Math.round(Number(summary.targetNowInflux || 0))}i` +
@@ -3261,7 +3364,7 @@
 			`,snapshot_for_hour=${influxFieldString(snapshotForHour)}`
 		);
 		lines.push(
-			`lp_auto_perf` +
+			`lp_auto_perf,faction=${influxEscape(lpAutoFactionTag)}` +
 			` neutral_lp_target_full_day=${Math.round(Number(executionSummary.neutralLpTargetFullDay || 0))}i` +
 			`,requested_lp_target_full_day=${Math.round(Number(executionSummary.requestedLpTargetFullDay || 0))}i` +
 			`,achievable_lp_target_full_day=${Math.round(Number(executionSummary.achievableLpTargetFullDay || 0))}i` +
@@ -3269,7 +3372,7 @@
 			`,snapshot_for_hour=${influxFieldString(snapshotForHour)}`
 		);
 		lines.push(
-			`lp_auto_settings` +
+			`lp_auto_settings,faction=${influxEscape(lpAutoFactionTag)}` +
 			` neutral_phase_length=${Math.max(0, parseIntDefault(globalSettings?.upgradeAutomationAggressivenessStartHour, 12))}i` +
 			`,landing_buffer=${UPGRADE_AUTOMATION_LANDING_BUFFER_SECONDS}i` +
 			`,lower_boundary=${Math.max(0, Number(globalSettings?.upgradeAutomationAbsAggrBoundaryLow ?? 20000000000))}i` +
@@ -3285,7 +3388,7 @@
 			`,fstab_sdu_priority_actual_crew=${Math.max(0, Math.floor(Number(executionSummary?.specialPriorityActualCrew || 0)))}i` +
 			`,fstab_sdu_priority_transfers=${Math.max(0, Math.floor(Number(executionSummary?.specialPriorityTransfers || 0)))}i` +
 			`,lp_automation_on=${!!globalSettings.upgradeAutomationEnabled ? 1 : 0}i` +
-			`,faction=${influxFieldString(normalizeUpgradeAutomationLpInstance(globalSettings?.upgradeAutomationLpInstance || 'MUD'))}` +
+			`,faction_name=${influxFieldString(lpAutoFactionTag)}` +
 			`,snapshot_for_hour=${influxFieldString(snapshotForHour)}`
 		);
 		upgradeAutomationInfluxDebugLine = lines[0] || '';
@@ -3296,7 +3399,7 @@
 		let sentCount = 0;
 		for (let idx = 0; idx < lines.length; idx++) {
 			const line = lines[idx];
-			const measurement = line.startsWith('lp_auto_comp,') ? 'lp_auto_comp' : (line.startsWith('lp_auto_settings') ? 'lp_auto_settings' : (line.startsWith('lp_auto_aggr') ? 'lp_auto_aggr' : 'unknown'));
+			const measurement = line.startsWith('lp_auto_comp,') ? 'lp_auto_comp' : (line.startsWith('lp_auto_settings') || line.startsWith('lp_auto_settings,') ? 'lp_auto_settings' : (line.startsWith('lp_auto_aggr,') ? 'lp_auto_aggr' : (line.startsWith('lp_auto_perf,') ? 'lp_auto_perf' : 'unknown')));
 			upgradeAutomationInfluxDebugStatus = `sending ${measurement} ${idx + 1}/${lines.length}`;
 			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][INFLUX] sending measurement=${measurement} line=${idx + 1}/${lines.length}`);
 			await sendToInflux(line);
