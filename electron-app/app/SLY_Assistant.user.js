@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-66
+// @aephia-version 0.7.35-67
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-66'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-67'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -94,6 +94,7 @@
 	let aephiaApiKeyValidation = { status: 'unknown', message: 'Aephia API key has not been checked yet.', checkedAt: 0, tokenKey: '' };
 	let upgradeAutomationAephiaSummaryCache = { fetchedAt: 0, tokenKey: '', data: null };
 	const recoveredCraftingProcessSlots = new Map();
+	let recoverAllCraftingProcessesInFlight = null;
 	const settingsGmKey = 'globalSettings';
 	const UPGRADE_AUTOMATION_LOG_KEY = 'upgradeAutomationLog';
 	const SLYA_STATE_BACKUP_SCHEMA_VERSION = 1;
@@ -12166,6 +12167,55 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		return recoveredProcess;
 	}
 
+	function shouldAttemptCraftingRecoveryForSlot(userCraft) {
+		if (!userCraft || userCraft.craftingId) return false;
+		if (!userCraft.label || !userCraft.item || !userCraft.coordinates || !userCraft.amount || !userCraft.crew) return false;
+		const state = String(userCraft.state || 'Idle');
+		if (state.includes('ERROR')) return false;
+		return state === 'Idle' || state.startsWith('Waiting for crew') || state.startsWith('Waiting for material');
+	}
+
+	async function recoverCraftingProcessesForAllSlots(triggerLabel) {
+		if (recoverAllCraftingProcessesInFlight) return recoverAllCraftingProcessesInFlight;
+		recoverAllCraftingProcessesInFlight = (async () => {
+			let recoveredCount = 0;
+			for (let i = 1; i < globalSettings.craftingJobs + 1; i++) {
+				const label = 'craft' + i;
+				try {
+					const craftSavedData = await GM.getValue(label, '{}');
+					let userCraft = JSON.parse(craftSavedData);
+					if (!shouldAttemptCraftingRecoveryForSlot(userCraft)) continue;
+
+					const recoveredBackupCraft = await recoverCraftingProcessFromSlyaStateBackupForSlot(userCraft);
+					if (recoveredBackupCraft) {
+						recoveredCount++;
+						continue;
+					}
+
+					const [targetX, targetY] = String(userCraft.coordinates || '').split(',').map(value => value.trim());
+					if (!targetX || !targetY) continue;
+					const starbase = await getStarbaseFromCoords(targetX, targetY, true);
+					const craftTime = await getStarbaseTime(starbase, 'Craft');
+					const upgradeTime = await getStarbaseTime(starbase, 'Upgrade');
+					let starbasePlayer = await getStarbasePlayer(userProfileAcct, starbase.publicKey);
+					if (!starbasePlayer) continue;
+					starbasePlayer = starbasePlayer.publicKey;
+					const starbasePlayerCargoHoldsAndTokens = await getStarbasePlayerCargoHolds(starbasePlayer);
+					const targetRecipe = getTargetRecipe(starbasePlayerCargoHoldsAndTokens, userCraft, Number(userCraft.amount), (userCraft.special ? userCraft.special : ''));
+					const recoveredProcess = await recoverCraftingProcessForSlot(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime);
+					if (recoveredProcess) recoveredCount++;
+				} catch (error) {
+					cLog(1, `${FleetTimeStamp(label)} Failed all-slot crafting recovery triggered by ${triggerLabel || 'unknown'}`, error);
+				}
+			}
+			if (recoveredCount) cLog(1, `[CRAFT-RECOVERY] Recovered ${recoveredCount} crafting/upgrading process(es) after crew wait in ${triggerLabel || 'unknown'}`);
+			return recoveredCount;
+		})().finally(() => {
+			recoverAllCraftingProcessesInFlight = null;
+		});
+		return recoverAllCraftingProcessesInFlight;
+	}
+
     async function updateCraft(userCraft) {
         let craftSavedData = await GM.getValue(userCraft.label, '{}');
         let craftParsedData = JSON.parse(craftSavedData);
@@ -12198,6 +12248,15 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
             let craftParsedData = JSON.parse(craftSavedData);
             userCraft = craftParsedData;
             updateFleetState(userCraft, userCraft.state);
+
+            if (!userCraft.craftingId && String(userCraft.state || '').startsWith('Waiting for crew') && shouldAttemptCraftingRecoveryForSlot(userCraft)) {
+                const recoveredAnySlotCount = await recoverCraftingProcessesForAllSlots(userCraft.label);
+                if (recoveredAnySlotCount) {
+                    craftSavedData = await GM.getValue(userCraft.label, '{}');
+                    userCraft = JSON.parse(craftSavedData);
+                    updateFleetState(userCraft, userCraft.state);
+                }
+            }
 
             //if this job isn't active, we exit immediately and check every 10 seconds for an update, this saves at least 2 RPC requests. Also it prevents a error in getRecipe
             if(userCraft.state === 'Idle' && (!userCraft.item || !userCraft.coordinates || !userCraft.amount)) {
@@ -12505,12 +12564,20 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     } else {
                         materialStr = ': ' + targetRecipe.craftRecipe.name + (userCraft.item != targetRecipe.craftRecipe.name ? ' (' + userCraft.item + ')' : '' );
                     }
-                    const recoveredBackupCraft = await recoverCraftingProcessFromSlyaStateBackupForSlot(userCraft);
+                    let recoveredAnySlotCount = 0;
+                    if (availableCrew < userCraft.crew) {
+                        recoveredAnySlotCount = await recoverCraftingProcessesForAllSlots(userCraft.label);
+                        if (recoveredAnySlotCount) {
+                            const refreshedCraftData = await GM.getValue(userCraft.label, '{}');
+                            userCraft = JSON.parse(refreshedCraftData);
+                        }
+                    }
+                    const recoveredBackupCraft = userCraft.craftingId ? null : await recoverCraftingProcessFromSlyaStateBackupForSlot(userCraft);
                     if (recoveredBackupCraft) {
                         userCraft = recoveredBackupCraft;
                         localTimeout = 10000;
                     } else {
-                    const recoveredProcess = await recoverCraftingProcessForSlot(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime);
+                    const recoveredProcess = userCraft.craftingId ? { timeoutMs: 10000 } : await recoverCraftingProcessForSlot(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime);
                     if (recoveredProcess) {
                         localTimeout = recoveredProcess.timeoutMs;
                     }
