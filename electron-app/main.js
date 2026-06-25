@@ -245,9 +245,10 @@ function auditLeveldb(targetDir)
 			})
 			.sort((a, b) => a.name.localeCompare(b.name))
 		const totalSize = entries.reduce((sum, f) => sum + f.size, 0)
-		return { exists: true, dir, files: entries, totalSize, count: entries.length }
+		const lastModified = entries.reduce((max, f) => Math.max(max, Number(f.mtime || 0)), 0)
+		return { exists: true, dir, files: entries, totalSize, count: entries.length, lastModified }
 	} catch (e) {
-		return { exists: false, files: [], totalSize: 0, error: String(e?.message || e) }
+		return { exists: false, files: [], totalSize: 0, lastModified: 0, error: String(e?.message || e) }
 	}
 }
 
@@ -303,6 +304,7 @@ function getLeveldbSettingsHealth(targetDir)
 		fleetConfigCount: 0,
 		craftConfigCount: 0,
 		hasParsedSettings: false,
+		hasUsableSettings: false,
 		score: 0
 	}
 	try {
@@ -332,6 +334,7 @@ function getLeveldbSettingsHealth(targetDir)
 			const craftingJobsMatch = combinedText.match(/"craftingJobs"\s*:\s*(\d+)/)
 			result.craftingJobs = craftingJobsMatch ? Number(craftingJobsMatch[1]) : 0
 			result.upgradeAutomationEnabled = /"upgradeAutomationEnabled"\s*:\s*true/.test(combinedText)
+			result.hasUsableSettings = !!(result.hasAnySettings && result.hasInstanceName)
 			result.score = scoreLeveldbSettingsHealth(result)
 			result.hasConfiguredSettings = result.hasAnySettings && result.score >= LEVELDB_MIN_SAFE_SCORE
 			return result
@@ -349,6 +352,7 @@ function getLeveldbSettingsHealth(targetDir)
 		result.savedProfileLength = savedProfile.length
 		result.craftingJobs = Number(settings.craftingJobs || 0)
 		result.upgradeAutomationEnabled = !!settings.upgradeAutomationEnabled
+		result.hasUsableSettings = true
 		result.score = scoreLeveldbSettingsHealth(result)
 		result.hasConfiguredSettings = result.score >= LEVELDB_MIN_SAFE_SCORE
 		return result
@@ -378,7 +382,7 @@ function scoreLeveldbSettingsHealth(health)
 
 function formatSettingsHealth(health)
 {
-	return `configured=${!!health.hasConfiguredSettings} any=${!!health.hasAnySettings} parsed=${!!health.hasParsedSettings} score=${Number(health.score || 0)} keys=${Number(health.keyCount || 0)} secret=${!!health.hasSecret} instance=${!!health.hasInstanceName} rpc=${!!health.hasRpc} influx=${!!health.hasInflux} saveProfile=${!!health.saveProfile} savedProfileLen=${Number(health.savedProfileLength || 0)} craftingJobs=${Number(health.craftingJobs || 0)} lpEnabled=${!!health.upgradeAutomationEnabled} fleetConfigs=${Number(health.fleetConfigCount || 0)} craftConfigs=${Number(health.craftConfigCount || 0)}`
+	return `configured=${!!health.hasConfiguredSettings} usable=${!!health.hasUsableSettings} any=${!!health.hasAnySettings} parsed=${!!health.hasParsedSettings} score=${Number(health.score || 0)} keys=${Number(health.keyCount || 0)} secret=${!!health.hasSecret} instance=${!!health.hasInstanceName} rpc=${!!health.hasRpc} influx=${!!health.hasInflux} saveProfile=${!!health.saveProfile} savedProfileLen=${Number(health.savedProfileLength || 0)} craftingJobs=${Number(health.craftingJobs || 0)} lpEnabled=${!!health.upgradeAutomationEnabled} fleetConfigs=${Number(health.fleetConfigCount || 0)} craftConfigs=${Number(health.craftConfigCount || 0)}`
 }
 
 function copyLeveldbSnapshot(targetDir, label, sourceDir = LEVELDB_DIR)
@@ -421,27 +425,17 @@ function getBackupCandidates()
 function findBestConfiguredBackup()
 {
 	return getBackupCandidates()
-		.filter(candidate => candidate.audit.exists && candidate.audit.totalSize >= 4096 && candidate.health.hasConfiguredSettings)
+		.filter(candidate => candidate.audit.exists && candidate.audit.totalSize >= 4096 && candidate.health.hasUsableSettings)
 		.sort((a, b) => {
-			const scoreDiff = Number(b.health.score || 0) - Number(a.health.score || 0)
-			if (scoreDiff) return scoreDiff
+			const timeDiff = Number(b.audit.lastModified || 0) - Number(a.audit.lastModified || 0)
+			if (timeDiff) return timeDiff
 			return Number(b.audit.totalSize || 0) - Number(a.audit.totalSize || 0)
 		})[0] || null
 }
 
-function liveLooksWeakerThanBackup(liveHealth, backupHealth)
+function liveNeedsRestoreFromBackup(live, liveHealth)
 {
-	if (!backupHealth?.hasConfiguredSettings) return false
-	const liveScore = Number(liveHealth?.score || 0)
-	const backupScore = Number(backupHealth.score || 0)
-	if (!liveHealth?.hasConfiguredSettings && backupScore >= LEVELDB_MIN_SAFE_SCORE) return true
-	if (liveHealth?.hasConfiguredSettings && !liveHealth?.hasParsedSettings && backupHealth?.hasParsedSettings && liveHealth?.hasInstanceName && liveHealth?.hasRpc) return false
-	if (backupScore >= liveScore + LEVELDB_RESTORE_SCORE_MARGIN) return true
-	if (backupHealth.hasInstanceName && !liveHealth?.hasInstanceName && backupScore > liveScore) return true
-	if (backupHealth.upgradeAutomationEnabled && !liveHealth?.upgradeAutomationEnabled && backupScore > liveScore) return true
-	if (Number(backupHealth.craftingJobs || 0) > Number(liveHealth?.craftingJobs || 0) + 4 && backupScore > liveScore) return true
-	if (Number(backupHealth.fleetConfigCount || 0) > Number(liveHealth?.fleetConfigCount || 0) + 10 && backupScore > liveScore) return true
-	return false
+	return !live?.exists || Number(live.totalSize || 0) < 4096 || !liveHealth?.hasUsableSettings
 }
 
 function seedInitialLeveldbBackup()
@@ -453,7 +447,7 @@ function seedInitialLeveldbBackup()
 		if (!live.exists || live.totalSize < 4096 || bak.exists) {
 			return { ok: false, skipped: true, live, bak, liveHealth }
 		}
-		if (!liveHealth.hasConfiguredSettings) {
+		if (!liveHealth.hasUsableSettings) {
 			logToUpgradeLog(`[ELECTRON][LEVELDB-SEED-BAK] skipped unhealthy live ${formatSettingsHealth(liveHealth)}`)
 			return { ok: false, skipped: true, live, bak, liveHealth }
 		}
@@ -479,7 +473,7 @@ function preserveLeveldbBeforeUpdate()
 		const bak = auditLeveldb(LEVELDB_BAK_DIR)
 		const liveHealth = getLeveldbSettingsHealth(LEVELDB_DIR)
 		let seededBak = { ok: false, skipped: true }
-		if ((!bak.exists || bak.totalSize === 0) && liveHealth.hasConfiguredSettings) {
+		if ((!bak.exists || bak.totalSize === 0) && liveHealth.hasUsableSettings) {
 			seededBak = copyLeveldbSnapshot(LEVELDB_BAK_DIR, 'PRE-UPDATE-BAK')
 		}
 		return { ok: preUpdate.ok, preUpdate, seededBak }
@@ -496,14 +490,9 @@ function snapshotLeveldbToBackup()
 		const live = auditLeveldb(LEVELDB_DIR)
 		if (!live.exists || live.totalSize === 0) return { ok: false, error: 'live leveldb is empty, skipping snapshot' }
 		const liveHealth = getLeveldbSettingsHealth(LEVELDB_DIR)
-		if (!liveHealth.hasConfiguredSettings) {
+		if (!liveHealth.hasUsableSettings) {
 			logToUpgradeLog(`[ELECTRON][LEVELDB-BAK] snapshot skipped unhealthy live ${formatSettingsHealth(liveHealth)}`)
 			return { ok: false, skipped: true, error: 'live leveldb has no configured globalSettings', live, liveHealth }
-		}
-		const bestBackup = findBestConfiguredBackup()
-		if (bestBackup && liveLooksWeakerThanBackup(liveHealth, bestBackup.health)) {
-			logToUpgradeLog(`[ELECTRON][LEVELDB-BAK] snapshot skipped weaker live liveHealth=[${formatSettingsHealth(liveHealth)}] bestBackup=${bestBackup.label} bestHealth=[${formatSettingsHealth(bestBackup.health)}]`)
-			return { ok: false, skipped: true, error: 'live leveldb is weaker than existing backup', live, liveHealth, bestBackup }
 		}
 		if (fs.existsSync(LEVELDB_BAK_DIR)) {
 			try { fs.rmSync(LEVELDB_PREV_BAK_DIR, { recursive: true, force: true }) } catch (e) {}
@@ -528,7 +517,7 @@ function restoreLeveldbFromBackup(sourceDir = null, sourceLabel = 'backup')
 		let source = sourceDir ? { label: sourceLabel, dir: sourceDir, audit: auditLeveldb(sourceDir), health: getLeveldbSettingsHealth(sourceDir) } : findBestConfiguredBackup()
 		if (!source) return { ok: false, error: 'no configured backup leveldb to restore from' }
 		if (!source.audit.exists || source.audit.totalSize === 0) return { ok: false, error: 'no backup leveldb to restore from' }
-		if (!source.health.hasConfiguredSettings) return { ok: false, error: `backup is not configured enough to restore: ${formatSettingsHealth(source.health)}` }
+		if (!source.health.hasUsableSettings) return { ok: false, error: `backup is not usable enough to restore: ${formatSettingsHealth(source.health)}` }
 		const beforeDir = path.join(path.dirname(LEVELDB_DIR), `leveldb.before-restore-${leveldbTimestamp()}`)
 		try {
 			const live = auditLeveldb(LEVELDB_DIR)
@@ -556,15 +545,14 @@ function maybeAutoRestoreLeveldb()
 		const bestBackup = findBestConfiguredBackup()
 		const bak = bestBackup?.audit || auditLeveldb(LEVELDB_BAK_DIR)
 		const bakHealth = bestBackup?.health || getLeveldbSettingsHealth(LEVELDB_BAK_DIR)
-		const liveLooksFresh = !live.exists || live.totalSize < 4096
-		const liveNeedsRestore = liveLooksFresh || liveLooksWeakerThanBackup(liveHealth, bakHealth)
+		const liveNeedsRestore = liveNeedsRestoreFromBackup(live, liveHealth)
 		const bakHasContent = !!bestBackup
 		if (liveNeedsRestore && bakHasContent) {
 			const result = restoreLeveldbFromBackup(bestBackup.dir, bestBackup.label)
 			logToUpgradeLog(`[ELECTRON][LEVELDB-AUTO-RESTORE] triggered liveSize=${live.totalSize} backup=${bestBackup.label} bakSize=${bak.totalSize} liveHealth=[${formatSettingsHealth(liveHealth)}] bakHealth=[${formatSettingsHealth(bakHealth)}] result=${result.ok ? 'ok' : 'fail:' + result.error}`)
 			return result
 		} else {
-			logToUpgradeLog(`[ELECTRON][LEVELDB-AUTO-RESTORE] skipped liveSize=${live.totalSize} bestBackup=${bestBackup?.label || 'none'} bakSize=${bak.totalSize} liveLooksFresh=${liveLooksFresh} liveHealth=[${formatSettingsHealth(liveHealth)}] bakHasContent=${bakHasContent} bakHealth=[${formatSettingsHealth(bakHealth)}]`)
+			logToUpgradeLog(`[ELECTRON][LEVELDB-AUTO-RESTORE] skipped liveSize=${live.totalSize} bestBackup=${bestBackup?.label || 'none'} bakSize=${bak.totalSize} liveNeedsRestore=${liveNeedsRestore} liveMtime=${Number(live.lastModified || 0)} bakMtime=${Number(bak.lastModified || 0)} liveHealth=[${formatSettingsHealth(liveHealth)}] bakHasContent=${bakHasContent} bakHealth=[${formatSettingsHealth(bakHealth)}]`)
 			return { ok: false, skipped: true, live, bak, liveHealth, bakHealth }
 		}
 	} catch (e) {
