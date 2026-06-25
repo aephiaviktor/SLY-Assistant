@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-69
+// @aephia-version 0.7.35-70
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-69'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-70'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -899,7 +899,10 @@
 
 	async function fetchInfluxInventory() {
 		const factionInventory = getUpgradeAutomationInventoryFactionFilter();
-		const flux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == "starbase" and r._field == "curAmount" and r.starbase == "${factionInventory.phantomName}")\n  |> group(columns: ["rss"])\n  |> last()\n  |> keep(columns: ["rss", "_value"])\n  |> rename(columns: {rss: "resource", _value: "inventory"})\n  |> sort(columns: ["resource"])`;
+		const sourceFlux = buildUpgradeAutomationInfluxSourceFlux(getUpgradeAutomationInfluxReadBuckets(), 'range(start: -7d)', [
+			`  |> filter(fn: (r) => r._measurement == "starbase" and r._field == "curAmount" and r.starbase == "${factionInventory.phantomName}")`
+		]);
+		const flux = `${sourceFlux}\n  |> group(columns: ["rss"])\n  |> last()\n  |> keep(columns: ["rss", "_value"])\n  |> rename(columns: {rss: "resource", _value: "inventory"})\n  |> sort(columns: ["resource"])`;
 		const csv = await queryInfluxFlux(flux);
 		const rows = parseInfluxCsv(csv);
 		const out = {};
@@ -913,7 +916,10 @@
 
 	async function fetchInfluxInventoryGlobal() {
 		const factionInventory = getUpgradeAutomationInventoryFactionFilter();
-		const flux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == "starbase" and r._field == "curAmount" and (${factionInventory.globalFilter}))\n  |> group(columns: ["rss", "starbase"])\n  |> last()\n  |> group(columns: ["rss"])\n  |> sum(column: "_value")\n  |> keep(columns: ["rss", "_value"])\n  |> rename(columns: {rss: "resource", _value: "inventory_global"})\n  |> sort(columns: ["resource"])`;
+		const sourceFlux = buildUpgradeAutomationInfluxSourceFlux(getUpgradeAutomationInfluxReadBuckets(), 'range(start: -7d)', [
+			`  |> filter(fn: (r) => r._measurement == "starbase" and r._field == "curAmount" and (${factionInventory.globalFilter}))`
+		]);
+		const flux = `${sourceFlux}\n  |> group(columns: ["rss", "starbase"])\n  |> last()\n  |> group(columns: ["rss"])\n  |> sum(column: "_value")\n  |> keep(columns: ["rss", "_value"])\n  |> rename(columns: {rss: "resource", _value: "inventory_global"})\n  |> sort(columns: ["resource"])`;
 		const csv = await queryInfluxFlux(flux);
 		const rows = parseInfluxCsv(csv);
 		const out = {};
@@ -971,7 +977,10 @@
 
 	async function fetchInfluxInventoryGlobalWeightedDrain() {
 		const factionInventory = getUpgradeAutomationInventoryFactionFilter();
-		const flux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: -8d)\n  |> filter(fn: (r) => r._measurement == "starbase" and r._field == "curAmount" and (${factionInventory.globalFilter}))\n  |> aggregateWindow(every: 1d, fn: last, createEmpty: false)\n  |> group(columns: ["rss", "_time"])\n  |> sum(column: "_value")\n  |> keep(columns: ["rss", "_time", "_value"])\n  |> rename(columns: {rss: "resource", _value: "inventory_global"})\n  |> sort(columns: ["resource", "_time"])`;
+		const sourceFlux = buildUpgradeAutomationInfluxSourceFlux(getUpgradeAutomationInfluxReadBuckets(), 'range(start: -8d)', [
+			`  |> filter(fn: (r) => r._measurement == "starbase" and r._field == "curAmount" and (${factionInventory.globalFilter}))`
+		]);
+		const flux = `${sourceFlux}\n  |> aggregateWindow(every: 1d, fn: last, createEmpty: false)\n  |> group(columns: ["rss", "_time"])\n  |> sum(column: "_value")\n  |> keep(columns: ["rss", "_time", "_value"])\n  |> rename(columns: {rss: "resource", _value: "inventory_global"})\n  |> sort(columns: ["resource", "_time"])`;
 		const csv = await queryInfluxFlux(flux);
 		const rows = parseInfluxCsv(csv);
 		return { map: computeWeightedInventoryDrainFromRows(rows) };
