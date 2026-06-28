@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-71
+// @aephia-version 0.7.35-72
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-71'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-72'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -10325,16 +10325,35 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		return val.replaceAll("\\","\\\\").replaceAll(" ","\\ ").replaceAll(",","\\,").replaceAll("=","\\=");
 	}
 
+	function buildInfluxWriteUrl() {
+		const rawUrl = String(globalSettings?.influxURL || '').trim();
+		const bucket = String(globalSettings?.influxDB || '').trim();
+		if (!rawUrl || !bucket) return rawUrl;
+		try {
+			const url = new URL(rawUrl);
+			const path = String(url.pathname || '').toLowerCase();
+			if (path.includes('/api/v3/write')) {
+				url.searchParams.set('db', bucket);
+			} else if (path.includes('/api/v2/write')) {
+				url.searchParams.set('bucket', bucket);
+			}
+			return url.toString();
+		} catch (e) {
+			return rawUrl;
+		}
+	}
+
 	async function sendToInflux(msg) {
 		if(!globalSettings.influxURL.length) return;
 		let message = '';
 		try {
 			cLog(2, 'Sending message to influx:', msg);
-			const response = await fetch(globalSettings.influxURL, {
+			const influxWriteUrl = buildInfluxWriteUrl();
+			const response = await fetch(influxWriteUrl, {
 				method: "POST",
 				body: msg,
 				headers: {
-					"Authorization": (globalSettings.influxURL.includes('/v2/') ? "Token " : "Bearer ") + globalSettings.influxAuth
+					"Authorization": (influxWriteUrl.includes('/v2/') ? "Token " : "Bearer ") + globalSettings.influxAuth
 				}
 			});
 			if (!response.ok) {
