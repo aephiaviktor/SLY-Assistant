@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-70
+// @aephia-version 0.7.35-71
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-70'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-71'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -791,6 +791,17 @@
 		return normalizeUpgradeAutomationLpInstance(globalSettings?.upgradeAutomationLpInstance || 'MUD');
 	}
 
+	function getSlyaInfluxInstanceTag() {
+		const instanceName = String(globalSettings?.slyInstanceName || '').trim();
+		return (instanceName || getUpgradeAutomationInfluxFactionTag()).replace(/"/g, '');
+	}
+
+	function getSlyaInfluxInstanceFluxFilter(row = 'r') {
+		const instanceTag = getSlyaInfluxInstanceTag();
+		const factionTag = getUpgradeAutomationInfluxFactionTag();
+		return `(if exists ${row}.instance then ${row}.instance == "${instanceTag}" else if exists ${row}.slyInstanceName then ${row}.slyInstanceName == "${instanceTag}" else if exists ${row}.sly_instance then ${row}.sly_instance == "${instanceTag}" else if exists ${row}.tag then ${row}.tag == "${instanceTag}" else if exists ${row}.faction then (${row}.faction == "${instanceTag}" or ${row}.faction == "${factionTag}") else false)`;
+	}
+
 	function getUpgradeAutomationInfluxFactionFluxFilter(now = new Date(), row = 'r') {
 		const faction = String(getUpgradeAutomationInfluxFactionTag()).replace(/"/g, '');
 		const tagged = `(exists ${row}.faction and ${row}.faction == "${faction}")`;
@@ -847,7 +858,8 @@
 	}
 
 	async function fetchInfluxUpgrading24h() {
-		const flux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r._measurement == "upgrade" and r._field == "amount")\n  |> group(columns: ["input"])\n  |> sum(column: "_value")\n  |> keep(columns: ["input", "_value"])\n  |> rename(columns: {input: "resource", _value: "upgrading_last_24h"})\n  |> sort(columns: ["resource"])`;
+		const instanceFilter = getSlyaInfluxInstanceFluxFilter('r');
+		const flux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r._measurement == "upgrade" and r._field == "amount" and ${instanceFilter})\n  |> group(columns: ["input"])\n  |> sum(column: "_value")\n  |> keep(columns: ["input", "_value"])\n  |> rename(columns: {input: "resource", _value: "upgrading_last_24h"})\n  |> sort(columns: ["resource"])`;
 		const csv = await queryInfluxFlux(flux);
 		const rows = parseInfluxCsv(csv);
 		const out = {};
@@ -867,7 +879,8 @@
 	}
 
 	async function fetchInfluxCrafting24h() {
-		const flux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: -72h)\n  |> filter(fn: (r) => r._measurement == "crafting" and r._field == "amount" and r.type == "Output")\n  |> group(columns: ["output"])\n  |> sum(column: "_value")\n  |> map(fn: (r) => ({ r with _value: float(v: r._value) / 3.0 }))\n  |> keep(columns: ["output", "_value"])\n  |> rename(columns: {output: "resource", _value: "crafting_last_24h"})\n  |> sort(columns: ["resource"])`;
+		const instanceFilter = getSlyaInfluxInstanceFluxFilter('r');
+		const flux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: -72h)\n  |> filter(fn: (r) => r._measurement == "crafting" and r._field == "amount" and r.type == "Output" and ${instanceFilter})\n  |> group(columns: ["output"])\n  |> sum(column: "_value")\n  |> map(fn: (r) => ({ r with _value: float(v: r._value) / 3.0 }))\n  |> keep(columns: ["output", "_value"])\n  |> rename(columns: {output: "resource", _value: "crafting_last_24h"})\n  |> sort(columns: ["resource"])`;
 		const csv = await queryInfluxFlux(flux);
 		const rows = parseInfluxCsv(csv);
 		const out = {};
@@ -876,7 +889,7 @@
 			const rawValue = row?.crafting_last_24h ?? 0;
 			if (resource) out[String(resource)] = parseInfluxNumber(rawValue);
 		}
-		const sduFlux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: -72h)\n  |> filter(fn: (r) => r._measurement == "sdu" and r._field == "amount")\n  |> group()\n  |> sum(column: "_value")\n  |> map(fn: (r) => ({ r with _value: float(v: r._value) / 3.0 }))\n  |> keep(columns: ["_value"])\n  |> rename(columns: {_value: "sdu_found_24h"})`;
+		const sduFlux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: -72h)\n  |> filter(fn: (r) => r._measurement == "sdu" and r._field == "amount" and ${instanceFilter})\n  |> group()\n  |> sum(column: "_value")\n  |> map(fn: (r) => ({ r with _value: float(v: r._value) / 3.0 }))\n  |> keep(columns: ["_value"])\n  |> rename(columns: {_value: "sdu_found_24h"})`;
 		const sduCsv = await queryInfluxFlux(sduFlux);
 		const sduRows = parseInfluxCsv(sduCsv);
 		out.SDU = parseInfluxNumber(sduRows?.[0]?.sdu_found_24h ?? 0);
@@ -3222,13 +3235,14 @@
 		const remainingHours = Math.max(1, Math.floor(Number(executionSummary.remainingHours || 0)));
 		const componentPlanRows = executionSummary.neutralComponentPlan || [];
 		const lpAutoFactionTag = getUpgradeAutomationInfluxFactionTag();
+		const lpAutoInstanceTag = getSlyaInfluxInstanceTag();
 		const lines = [];
 		for (const row of (executionSummary.neutralComponentPlan || [])) {
 			const phantomInventory = Math.max(0, Number(row.inventoryPhantom || 0));
 			const finalUpgHour = Math.max(0, Number(row.finalUpgradingHour || 0));
 			const bufferDaysPhantom = finalUpgHour > 0 ? (phantomInventory / (finalUpgHour * 24)) : (phantomInventory > 0 ? Number.POSITIVE_INFINITY : null);
 			lines.push(
-				`lp_auto_comp,faction=${influxEscape(lpAutoFactionTag)},component=${influxEscape(String(row.displayName || row.name || 'unknown'))}` +
+				`lp_auto_comp,faction=${influxEscape(lpAutoFactionTag)},instance=${influxEscape(lpAutoInstanceTag)},component=${influxEscape(String(row.displayName || row.name || 'unknown'))}` +
 				` installed_today=${Math.floor(Number(row.installedToday || 0))}i` +
 				`,neutral_crew=${Math.floor(Number(row.crew || 0))}i` +
 				`,neutral_upgrading_hour=${Math.floor(Number(row.neutralUpgradingHour || 0))}i` +
@@ -3242,7 +3256,7 @@
 			);
 		}
 		lines.push(
-			`lp_auto_aggr,faction=${influxEscape(lpAutoFactionTag)}` +
+			`lp_auto_aggr,faction=${influxEscape(lpAutoFactionTag)},instance=${influxEscape(lpAutoInstanceTag)}` +
 			` day_progress=${Number(summary.dayProgressPct || 0)}` +
 			`,lp_target_now=${Math.round(Number(summary.targetNow || 0))}i` +
 			`,lp_target_now_influx=${Math.round(Number(summary.targetNowInflux || 0))}i` +
@@ -3263,7 +3277,7 @@
 			`,snapshot_for_hour=${influxFieldString(snapshotForHour)}`
 		);
 		lines.push(
-			`lp_auto_perf,faction=${influxEscape(lpAutoFactionTag)}` +
+			`lp_auto_perf,faction=${influxEscape(lpAutoFactionTag)},instance=${influxEscape(lpAutoInstanceTag)}` +
 			` neutral_lp_target_full_day=${Math.round(Number(executionSummary.neutralLpTargetFullDay || 0))}i` +
 			`,requested_lp_target_full_day=${Math.round(Number(executionSummary.requestedLpTargetFullDay || 0))}i` +
 			`,achievable_lp_target_full_day=${Math.round(Number(executionSummary.achievableLpTargetFullDay || 0))}i` +
@@ -3271,7 +3285,7 @@
 			`,snapshot_for_hour=${influxFieldString(snapshotForHour)}`
 		);
 		lines.push(
-			`lp_auto_settings,faction=${influxEscape(lpAutoFactionTag)}` +
+			`lp_auto_settings,faction=${influxEscape(lpAutoFactionTag)},instance=${influxEscape(lpAutoInstanceTag)}` +
 			` neutral_phase_length=${Math.max(0, parseIntDefault(globalSettings?.upgradeAutomationAggressivenessStartHour, 12))}i` +
 			`,landing_buffer=${UPGRADE_AUTOMATION_LANDING_BUFFER_SECONDS}i` +
 			`,lower_boundary=${Math.max(0, Number(globalSettings?.upgradeAutomationAbsAggrBoundaryLow ?? 20000000000))}i` +
@@ -3654,8 +3668,12 @@
 	async function emitUpgradeCompletionTelemetry(job, userCraft) {
 		if (!job) throw new Error('missing_upgrade_job');
 		const completedAt = Date.now();
+		const instanceTag = getSlyaInfluxInstanceTag();
+		const factionTag = getUpgradeAutomationInfluxFactionTag();
 		const line =
 			`upgrade` +
+			`,instance=${influxEscape(instanceTag)}` +
+			`,faction=${influxEscape(factionTag)}` +
 			`,label=${influxEscape(job.label || 'unknown')}` +
 			`,upgrade=${influxEscape(job.upgrade || 'unknown')}` +
 			`,starbase=${influxEscape(job.starbase || 'unknown')}` +
@@ -7567,6 +7585,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
             let influxStr = '';
             let starbaseName = validTargets.find(target => (target.x + ',' + target.y) == (starbase.account.sector[0].toNumber() + ',' + starbase.account.sector[1].toNumber()))?.name;;
             let outputName = cargoItems.find(r => r.token == craftRecipe.output.mint.toString())?.name;
+            const instanceTag = getSlyaInfluxInstanceTag();
+            const factionTag = getUpgradeAutomationInfluxFactionTag();
 
             // status:
             // <2 = not ready
@@ -7601,7 +7621,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                     if(ingredientBurned) { cLog(1,`${FleetTimeStamp(userCraft.label)} Ingredient`, ingredient.idx, `was already burned, skipping ...`); continue; }
 
                     let inputName = cargoItems.find(r => r.token == ingredient.mint.toString())?.name;
-                    influxStr += (influxStr.length ? "\n" : "") + `crafting,starbase=${influxEscape(starbaseName)},sectorX=${starbase.account.sector[0].toNumber()},sectorY=${starbase.account.sector[1].toNumber()},input=${influxEscape(inputName)},output=${influxEscape(outputName)},craftingID=${userCraft.craftingId},type=Input fee=${userCraft.feeAtlas ? userCraft.feeAtlas : 0},amount=${craftingProcess.quantity * ingredient.amount}`;
+                    influxStr += (influxStr.length ? "\n" : "") + `crafting,instance=${influxEscape(instanceTag)},faction=${influxEscape(factionTag)},starbase=${influxEscape(starbaseName)},sectorX=${starbase.account.sector[0].toNumber()},sectorY=${starbase.account.sector[1].toNumber()},input=${influxEscape(inputName)},output=${influxEscape(outputName)},craftingID=${userCraft.craftingId},type=Input fee=${userCraft.feeAtlas ? userCraft.feeAtlas : 0},amount=${craftingProcess.quantity * ingredient.amount}`;
 
                     let tx = { instruction: await sageProgram.methods.burnCraftingConsumables({
                         ingredientIndex: ingredient.idx
@@ -7683,7 +7703,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                 //if the output checksum is 0, we haven't claimed the output yet.
                 if(!craftingProcess.outputsChecksum[0])
                 {
-                    	influxStr += (influxStr.length ? "\n" : "") + `crafting,starbase=${influxEscape(starbaseName)},sectorX=${starbase.account.sector[0].toNumber()},sectorY=${starbase.account.sector[1].toNumber()},output=${influxEscape(outputName)},craftingID=${userCraft.craftingId},type=Output fee=${userCraft.feeAtlas ? userCraft.feeAtlas : 0},amount=${craftingProcess.quantity}`;
+			influxStr += (influxStr.length ? "\n" : "") + `crafting,instance=${influxEscape(instanceTag)},faction=${influxEscape(factionTag)},starbase=${influxEscape(starbaseName)},sectorX=${starbase.account.sector[0].toNumber()},sectorY=${starbase.account.sector[1].toNumber()},output=${influxEscape(outputName)},craftingID=${userCraft.craftingId},type=Output fee=${userCraft.feeAtlas ? userCraft.feeAtlas : 0},amount=${craftingProcess.quantity}`;
                     	upgradeAutomationCraftHookHits++;
                     	await recordUpgradeAutomationEvent({
                     		ts: Date.now(),
@@ -10290,7 +10310,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			await saveScanEnd(i);
 
 			let burnedFood = changesFood.preBalance - changesFood.postBalance;
-			await sendToInflux(`sdu,fleet=${influxEscape(userFleets[i].label)},sectorX=${fleetCoords[0]},sectorY=${fleetCoords[1]} amount=${sduFound},burnedFood=${burnedFood},chance=${scanCondition},cargoRoomLeft=${userFleets[i].cargoCapacity - cargoCnt - sduFound}`);
+			await sendToInflux(`sdu,instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(userFleets[i].label)},sectorX=${fleetCoords[0]},sectorY=${fleetCoords[1]} amount=${sduFound},burnedFood=${burnedFood},chance=${scanCondition},cargoRoomLeft=${userFleets[i].cargoCapacity - cargoCnt - sduFound}`);
 
 		}
 		else if (!moved && Date.now() < userFleets[i].scanEnd && userFleets[i].state == 'Idle') {
