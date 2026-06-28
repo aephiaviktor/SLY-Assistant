@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-74
+// @aephia-version 0.7.35-75
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-74'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-75'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -780,7 +780,7 @@
 	}
 
 	const UPGRADE_AUTOMATION_INFLUX_UNTAGGED_FALLBACK_UNTIL = '2026-07-12T08:00:00Z';
-	const SLYA_RAW_STATS_INFLUX_UNTAGGED_FALLBACK_UNTIL = '2026-06-29T08:00:00Z';
+	const SLYA_RAW_STATS_INFLUX_UNTAGGED_FALLBACK_UNTIL = '2026-07-01T08:00:00Z';
 	const UPGRADE_AUTOMATION_INFLUX_LEGACY_BUCKET_PREFIX = 'slya-lp-auto-influx-legacy-bucket:';
 
 	function isUpgradeAutomationInfluxUntaggedFallbackActive(now = new Date()) {
