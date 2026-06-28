@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-73
+// @aephia-version 0.7.35-74
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-73'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-74'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -779,11 +779,17 @@
 		return 0;
 	}
 
-	const UPGRADE_AUTOMATION_INFLUX_UNTAGGED_FALLBACK_UNTIL = '2026-07-01T08:00:00Z';
+	const UPGRADE_AUTOMATION_INFLUX_UNTAGGED_FALLBACK_UNTIL = '2026-07-12T08:00:00Z';
+	const SLYA_RAW_STATS_INFLUX_UNTAGGED_FALLBACK_UNTIL = '2026-06-29T08:00:00Z';
 	const UPGRADE_AUTOMATION_INFLUX_LEGACY_BUCKET_PREFIX = 'slya-lp-auto-influx-legacy-bucket:';
 
 	function isUpgradeAutomationInfluxUntaggedFallbackActive(now = new Date()) {
 		const cutoff = Date.parse(UPGRADE_AUTOMATION_INFLUX_UNTAGGED_FALLBACK_UNTIL);
+		return Number.isFinite(cutoff) && now.getTime() < cutoff;
+	}
+
+	function isSlyaRawStatsInfluxUntaggedFallbackActive(now = new Date()) {
+		const cutoff = Date.parse(SLYA_RAW_STATS_INFLUX_UNTAGGED_FALLBACK_UNTIL);
 		return Number.isFinite(cutoff) && now.getTime() < cutoff;
 	}
 
@@ -833,11 +839,11 @@
 		} catch (e) {}
 	}
 
-	function getUpgradeAutomationInfluxReadBuckets(now = new Date()) {
+	function getUpgradeAutomationInfluxReadBuckets(now = new Date(), fallbackActive = isUpgradeAutomationInfluxUntaggedFallbackActive(now)) {
 		const currentBucket = sanitizeInfluxBucketName(globalSettings?.influxDB || '');
 		const buckets = [];
 		if (currentBucket) buckets.push(currentBucket);
-		if (isUpgradeAutomationInfluxUntaggedFallbackActive(now)) {
+		if (fallbackActive) {
 			rememberUpgradeAutomationInfluxLegacyBucket(now);
 			try {
 				const storedLegacy = sanitizeInfluxBucketName(localStorage.getItem(getUpgradeAutomationInfluxLegacyBucketKey()) || '');
@@ -859,10 +865,11 @@
 
 	function buildSlyaRawStatsInfluxSourceFlux(rangeLine = '', filterBuilder = null, now = new Date()) {
 		const currentBucket = sanitizeInfluxBucketName(globalSettings?.influxDB || '');
-		const buckets = getUpgradeAutomationInfluxReadBuckets(now);
+		const rawFallbackActive = isSlyaRawStatsInfluxUntaggedFallbackActive(now);
+		const buckets = getUpgradeAutomationInfluxReadBuckets(now, rawFallbackActive);
 		const queryNames = buckets.map((_, idx) => `slya_raw_bucket_${idx}`);
 		const buildSource = (bucket, idx) => {
-			const allowUntaggedFallback = !!bucket && bucket !== currentBucket && isUpgradeAutomationInfluxUntaggedFallbackActive(now);
+			const allowUntaggedFallback = !!bucket && bucket !== currentBucket && rawFallbackActive;
 			const instanceFilter = getSlyaInfluxInstanceFluxFilter('r', allowUntaggedFallback);
 			const filterLines = typeof filterBuilder === 'function' ? (filterBuilder(instanceFilter) || []) : [];
 			return `${queryNames[idx]} = ` + [`from(bucket: "${bucket}")`, `  |> ${rangeLine}`, ...filterLines].join('\n');
