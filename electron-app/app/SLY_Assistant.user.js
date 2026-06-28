@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-75
+// @aephia-version 0.7.35-76
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-75'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-76'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -808,6 +808,12 @@
 		return `(if exists ${row}.instance then ${row}.instance == "${instanceTag}" else if exists ${row}.slyInstanceName then ${row}.slyInstanceName == "${instanceTag}" else if exists ${row}.sly_instance then ${row}.sly_instance == "${instanceTag}" else if exists ${row}.tag then ${row}.tag == "${instanceTag}" else if exists ${row}.faction then (${row}.faction == "${instanceTag}" or ${row}.faction == "${factionTag}") else ${allowUntaggedFallback ? 'true' : 'false'})`;
 	}
 
+	function shouldAllowSlyaRawStatsUntaggedFallback(bucket, currentBucket, rawFallbackActive) {
+		if (!rawFallbackActive) return false;
+		if (bucket && bucket !== currentBucket) return true;
+		return currentBucket === 'slya' && getUpgradeAutomationInfluxFactionTag() === 'UST';
+	}
+
 	function getUpgradeAutomationInfluxFactionFluxFilter(now = new Date(), row = 'r') {
 		const faction = String(getUpgradeAutomationInfluxFactionTag()).replace(/"/g, '');
 		const tagged = `(exists ${row}.faction and ${row}.faction == "${faction}")`;
@@ -869,15 +875,17 @@
 		const buckets = getUpgradeAutomationInfluxReadBuckets(now, rawFallbackActive);
 		const queryNames = buckets.map((_, idx) => `slya_raw_bucket_${idx}`);
 		const buildSource = (bucket, idx) => {
-			const allowUntaggedFallback = !!bucket && bucket !== currentBucket && rawFallbackActive;
+			const allowUntaggedFallback = shouldAllowSlyaRawStatsUntaggedFallback(bucket, currentBucket, rawFallbackActive);
 			const instanceFilter = getSlyaInfluxInstanceFluxFilter('r', allowUntaggedFallback);
 			const filterLines = typeof filterBuilder === 'function' ? (filterBuilder(instanceFilter) || []) : [];
 			return `${queryNames[idx]} = ` + [`from(bucket: "${bucket}")`, `  |> ${rangeLine}`, ...filterLines].join('\n');
 		};
 		if (buckets.length <= 1) {
-			const instanceFilter = getSlyaInfluxInstanceFluxFilter('r', false);
+			const bucket = buckets[0] || currentBucket;
+			const allowUntaggedFallback = shouldAllowSlyaRawStatsUntaggedFallback(bucket, currentBucket, rawFallbackActive);
+			const instanceFilter = getSlyaInfluxInstanceFluxFilter('r', allowUntaggedFallback);
 			const filterLines = typeof filterBuilder === 'function' ? (filterBuilder(instanceFilter) || []) : [];
-			return [`from(bucket: "${buckets[0] || currentBucket}")`, `  |> ${rangeLine}`, ...filterLines].join('\n');
+			return [`from(bucket: "${bucket}")`, `  |> ${rangeLine}`, ...filterLines].join('\n');
 		}
 		return buckets.map(buildSource).join('\n\n') + `\n\nunion(tables: [${queryNames.join(', ')}])`;
 	}
