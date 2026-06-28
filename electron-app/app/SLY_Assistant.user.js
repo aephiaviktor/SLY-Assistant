@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-72
+// @aephia-version 0.7.35-73
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-72'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-73'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -779,7 +779,7 @@
 		return 0;
 	}
 
-	const UPGRADE_AUTOMATION_INFLUX_UNTAGGED_FALLBACK_UNTIL = '2026-07-09T00:00:00Z';
+	const UPGRADE_AUTOMATION_INFLUX_UNTAGGED_FALLBACK_UNTIL = '2026-07-01T08:00:00Z';
 	const UPGRADE_AUTOMATION_INFLUX_LEGACY_BUCKET_PREFIX = 'slya-lp-auto-influx-legacy-bucket:';
 
 	function isUpgradeAutomationInfluxUntaggedFallbackActive(now = new Date()) {
@@ -796,10 +796,10 @@
 		return (instanceName || getUpgradeAutomationInfluxFactionTag()).replace(/"/g, '');
 	}
 
-	function getSlyaInfluxInstanceFluxFilter(row = 'r') {
+	function getSlyaInfluxInstanceFluxFilter(row = 'r', allowUntaggedFallback = false) {
 		const instanceTag = getSlyaInfluxInstanceTag();
 		const factionTag = getUpgradeAutomationInfluxFactionTag();
-		return `(if exists ${row}.instance then ${row}.instance == "${instanceTag}" else if exists ${row}.slyInstanceName then ${row}.slyInstanceName == "${instanceTag}" else if exists ${row}.sly_instance then ${row}.sly_instance == "${instanceTag}" else if exists ${row}.tag then ${row}.tag == "${instanceTag}" else if exists ${row}.faction then (${row}.faction == "${instanceTag}" or ${row}.faction == "${factionTag}") else false)`;
+		return `(if exists ${row}.instance then ${row}.instance == "${instanceTag}" else if exists ${row}.slyInstanceName then ${row}.slyInstanceName == "${instanceTag}" else if exists ${row}.sly_instance then ${row}.sly_instance == "${instanceTag}" else if exists ${row}.tag then ${row}.tag == "${instanceTag}" else if exists ${row}.faction then (${row}.faction == "${instanceTag}" or ${row}.faction == "${factionTag}") else ${allowUntaggedFallback ? 'true' : 'false'})`;
 	}
 
 	function getUpgradeAutomationInfluxFactionFluxFilter(now = new Date(), row = 'r') {
@@ -857,9 +857,28 @@
 		return buckets.map((bucket, idx) => `${queryNames[idx]} = ${buildSource(bucket)}`).join('\n\n') + `\n\nunion(tables: [${queryNames.join(', ')}])`;
 	}
 
+	function buildSlyaRawStatsInfluxSourceFlux(rangeLine = '', filterBuilder = null, now = new Date()) {
+		const currentBucket = sanitizeInfluxBucketName(globalSettings?.influxDB || '');
+		const buckets = getUpgradeAutomationInfluxReadBuckets(now);
+		const queryNames = buckets.map((_, idx) => `slya_raw_bucket_${idx}`);
+		const buildSource = (bucket, idx) => {
+			const allowUntaggedFallback = !!bucket && bucket !== currentBucket && isUpgradeAutomationInfluxUntaggedFallbackActive(now);
+			const instanceFilter = getSlyaInfluxInstanceFluxFilter('r', allowUntaggedFallback);
+			const filterLines = typeof filterBuilder === 'function' ? (filterBuilder(instanceFilter) || []) : [];
+			return `${queryNames[idx]} = ` + [`from(bucket: "${bucket}")`, `  |> ${rangeLine}`, ...filterLines].join('\n');
+		};
+		if (buckets.length <= 1) {
+			const instanceFilter = getSlyaInfluxInstanceFluxFilter('r', false);
+			const filterLines = typeof filterBuilder === 'function' ? (filterBuilder(instanceFilter) || []) : [];
+			return [`from(bucket: "${buckets[0] || currentBucket}")`, `  |> ${rangeLine}`, ...filterLines].join('\n');
+		}
+		return buckets.map(buildSource).join('\n\n') + `\n\nunion(tables: [${queryNames.join(', ')}])`;
+	}
+
 	async function fetchInfluxUpgrading24h() {
-		const instanceFilter = getSlyaInfluxInstanceFluxFilter('r');
-		const flux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r._measurement == "upgrade" and r._field == "amount" and ${instanceFilter})\n  |> group(columns: ["input"])\n  |> sum(column: "_value")\n  |> keep(columns: ["input", "_value"])\n  |> rename(columns: {input: "resource", _value: "upgrading_last_24h"})\n  |> sort(columns: ["resource"])`;
+		const flux = `${buildSlyaRawStatsInfluxSourceFlux('range(start: -24h)', instanceFilter => [
+			`  |> filter(fn: (r) => r._measurement == "upgrade" and r._field == "amount" and ${instanceFilter})`
+		])}\n  |> group(columns: ["input"])\n  |> sum(column: "_value")\n  |> keep(columns: ["input", "_value"])\n  |> rename(columns: {input: "resource", _value: "upgrading_last_24h"})\n  |> sort(columns: ["resource"])`;
 		const csv = await queryInfluxFlux(flux);
 		const rows = parseInfluxCsv(csv);
 		const out = {};
@@ -879,8 +898,9 @@
 	}
 
 	async function fetchInfluxCrafting24h() {
-		const instanceFilter = getSlyaInfluxInstanceFluxFilter('r');
-		const flux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: -72h)\n  |> filter(fn: (r) => r._measurement == "crafting" and r._field == "amount" and r.type == "Output" and ${instanceFilter})\n  |> group(columns: ["output"])\n  |> sum(column: "_value")\n  |> map(fn: (r) => ({ r with _value: float(v: r._value) / 3.0 }))\n  |> keep(columns: ["output", "_value"])\n  |> rename(columns: {output: "resource", _value: "crafting_last_24h"})\n  |> sort(columns: ["resource"])`;
+		const flux = `${buildSlyaRawStatsInfluxSourceFlux('range(start: -72h)', instanceFilter => [
+			`  |> filter(fn: (r) => r._measurement == "crafting" and r._field == "amount" and r.type == "Output" and ${instanceFilter})`
+		])}\n  |> group(columns: ["output"])\n  |> sum(column: "_value")\n  |> map(fn: (r) => ({ r with _value: float(v: r._value) / 3.0 }))\n  |> keep(columns: ["output", "_value"])\n  |> rename(columns: {output: "resource", _value: "crafting_last_24h"})\n  |> sort(columns: ["resource"])`;
 		const csv = await queryInfluxFlux(flux);
 		const rows = parseInfluxCsv(csv);
 		const out = {};
@@ -889,7 +909,9 @@
 			const rawValue = row?.crafting_last_24h ?? 0;
 			if (resource) out[String(resource)] = parseInfluxNumber(rawValue);
 		}
-		const sduFlux = `from(bucket: "${globalSettings.influxDB}")\n  |> range(start: -72h)\n  |> filter(fn: (r) => r._measurement == "sdu" and r._field == "amount" and ${instanceFilter})\n  |> group()\n  |> sum(column: "_value")\n  |> map(fn: (r) => ({ r with _value: float(v: r._value) / 3.0 }))\n  |> keep(columns: ["_value"])\n  |> rename(columns: {_value: "sdu_found_24h"})`;
+		const sduFlux = `${buildSlyaRawStatsInfluxSourceFlux('range(start: -72h)', instanceFilter => [
+			`  |> filter(fn: (r) => r._measurement == "sdu" and r._field == "amount" and ${instanceFilter})`
+		])}\n  |> group()\n  |> sum(column: "_value")\n  |> map(fn: (r) => ({ r with _value: float(v: r._value) / 3.0 }))\n  |> keep(columns: ["_value"])\n  |> rename(columns: {_value: "sdu_found_24h"})`;
 		const sduCsv = await queryInfluxFlux(sduFlux);
 		const sduRows = parseInfluxCsv(sduCsv);
 		out.SDU = parseInfluxNumber(sduRows?.[0]?.sdu_found_24h ?? 0);
