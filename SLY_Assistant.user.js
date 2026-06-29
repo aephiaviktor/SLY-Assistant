@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-78
+// @aephia-version 0.7.35-79
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-78'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-79'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -329,6 +329,21 @@
 		} catch (e) {
 			// ignore
 		}
+	}
+
+	function slyaPerfNowMs() {
+		return (typeof performance !== 'undefined' && performance?.now) ? performance.now() : Date.now();
+	}
+
+	function slyaTimingMark(marks, startMs, label) {
+		marks.push(label + '=' + Math.round((slyaPerfNowMs() - startMs) * 10) / 10 + 'ms');
+	}
+
+	function emitSlyaTiming(line) {
+		try { console.log(line); } catch (e) {}
+		setTimeout(() => {
+			appendUpgradeAutomationLog(line).catch(() => {});
+		}, 0);
 	}
 
 	async function getUpgradeAutomationLogs(limit = 200) {
@@ -3865,6 +3880,8 @@
 	}
 
 	async function saveGlobalSettings(reason) {
+		const timingStart = slyaPerfNowMs();
+		const timingMarks = [];
 		try {
 			const before = {
 				saveProfile: !!slyaPrevSaveProfile,
@@ -3892,30 +3909,45 @@
 				+ ' mySecretKeyLen=' + before.mySecretKeyLen + '->' + after.mySecretKeyLen
 				+ (warnings.length ? ' WARN=' + warnings.join(';') : '');
 			try { cLog(2, logLine); } catch (e) {}
+			const saveLogStart = slyaPerfNowMs();
 			try { await appendUpgradeAutomationLog(logLine); } catch (e) {}
+			timingMarks.push('append-save-log=' + Math.round((slyaPerfNowMs() - saveLogStart) * 10) / 10 + 'ms');
 			if (warnings.length) {
 				const warnLine = '[SETTINGS][WARN] ' + warnings.join('; ') + ' reason=' + String(reason || 'unknown');
 				try { console.warn(warnLine, { before, after, redacted: redactSettingsForLog(globalSettings) }); } catch (e) {}
+				const warnLogStart = slyaPerfNowMs();
 				try { await appendUpgradeAutomationLog(warnLine); } catch (e) {}
+				timingMarks.push('append-warn-log=' + Math.round((slyaPerfNowMs() - warnLogStart) * 10) / 10 + 'ms');
 			}
 			slyaPrevSaveProfile = after.saveProfile;
 			slyaPrevSecretKeyLen = after.mySecretKeyLen;
 		} catch (e) {
 			try { await appendUpgradeAutomationLog('[SETTINGS][SAVE-LOG-ERROR] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {}
 		}
+		const gmSetStart = slyaPerfNowMs();
 		await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
+		timingMarks.push('gm-set-settings=' + Math.round((slyaPerfNowMs() - gmSetStart) * 10) / 10 + 'ms');
+		const backupScheduleStart = slyaPerfNowMs();
 		try {
 			if (typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
+				const backupQueuedAt = slyaPerfNowMs();
 				setTimeout(() => {
 					try {
-						window.electronAPI.snapshotLeveldbToBackup().catch(async e => {
+						const backupStart = slyaPerfNowMs();
+						emitSlyaTiming('[SETTINGS][LEVELDB-BACKUP-TIMING] reason=' + String(reason || 'unknown') + ' timer-delay=' + Math.round((backupStart - backupQueuedAt) * 10) / 10 + 'ms start');
+						window.electronAPI.snapshotLeveldbToBackup().then(result => {
+							emitSlyaTiming('[SETTINGS][LEVELDB-BACKUP-TIMING] reason=' + String(reason || 'unknown') + ' duration=' + Math.round((slyaPerfNowMs() - backupStart) * 10) / 10 + 'ms ok=' + !!result?.ok + ' skipped=' + !!result?.skipped);
+						}).catch(async e => {
 							try { await appendUpgradeAutomationLog('[SETTINGS][BAK-ERROR-POST] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {}
 						});
 					} catch (e) { appendUpgradeAutomationLog('[SETTINGS][BAK-ERROR-POST] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)).catch(() => {}); }
 				}, 2500);
 			}
 		} catch (e) { try { await appendUpgradeAutomationLog('[SETTINGS][BAK-ERROR-POST] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
+		timingMarks.push('schedule-leveldb-backup=' + Math.round((slyaPerfNowMs() - backupScheduleStart) * 10) / 10 + 'ms');
 		scheduleSlyaStateBackup('settings-' + String(reason || 'unknown'));
+		slyaTimingMark(timingMarks, timingStart, 'saveGlobalSettings-total');
+		emitSlyaTiming('[SETTINGS][SAVE-TIMING] reason=' + String(reason || 'unknown') + ' ' + timingMarks.join(' '));
 	}
 
 	async function saveFleetConfig(fleetPK, fleetData, reason) {
@@ -10251,6 +10283,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	}
 
 	async function saveSettingsInput() {
+		const timingStart = slyaPerfNowMs();
+		const timingMarks = [];
 		let errBool = false;
 		const errElem = document.querySelectorAll('#settings-modal-error');
 
@@ -10343,19 +10377,37 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			reloadPageOnFailedFleets: parseIntDefault(document.querySelector('#reloadPageOnFailedFleets').value, 0),
 			mySecretKey: parseStringDefault(document.querySelector('#mySecretKey').value,''),
 		}
+		slyaTimingMark(timingMarks, timingStart, 'read-inputs-build-settings');
 		// just to be sure there are no bad mistakes, restrict both fee settings to 50k lamports
 		if(globalSettings.automaticFeeMax > 50000) globalSettings.automaticFeeMax = 50000;
 		if(globalSettings.priorityFee > 50000) globalSettings.priorityFee = 50000;
 
+		const saveGlobalStart = slyaPerfNowMs();
 		await saveGlobalSettings('global-settings-modal-save');
+		timingMarks.push('saveGlobalSettings-await=' + Math.round((slyaPerfNowMs() - saveGlobalStart) * 10) / 10 + 'ms');
+		const rebuildStart = slyaPerfNowMs();
 		rebuildRpcPools();
+		timingMarks.push('rebuild-rpc-pools=' + Math.round((slyaPerfNowMs() - rebuildStart) * 10) / 10 + 'ms');
 		aephiaApiKeyValidation = { status: 'unknown', message: 'Aephia API key changed; validation required.', checkedAt: 0, tokenKey: '' };
+		const lpAccessStart = slyaPerfNowMs();
 		refreshLpAutomationMenuAccess(true);
+		timingMarks.push('refresh-lp-menu-access=' + Math.round((slyaPerfNowMs() - lpAccessStart) * 10) / 10 + 'ms');
 
 		if (errBool === false) {
 			errElem[0].innerHTML = '';
 			cLog(2, 'SYSTEM: Global Settings saved', globalSettings);
+			const modalCloseStart = slyaPerfNowMs();
 			settingsModalToggle();
+			timingMarks.push('settings-modal-toggle=' + Math.round((slyaPerfNowMs() - modalCloseStart) * 10) / 10 + 'ms');
+		}
+		const emitModalTiming = () => {
+			slyaTimingMark(timingMarks, timingStart, 'post-close-raf');
+			emitSlyaTiming('[SETTINGS][MODAL-SAVE-TIMING] ' + timingMarks.join(' '));
+		};
+		if (typeof requestAnimationFrame !== 'undefined') {
+			requestAnimationFrame(() => requestAnimationFrame(emitModalTiming));
+		} else {
+			emitModalTiming();
 		}
 	}
 
