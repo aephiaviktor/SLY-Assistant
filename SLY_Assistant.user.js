@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-80
+// @aephia-version 0.7.35-81
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-80'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-81'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -3950,9 +3950,10 @@
 		emitSlyaTiming('[SETTINGS][SAVE-TIMING] reason=' + String(reason || 'unknown') + ' ' + timingMarks.join(' '));
 	}
 
-	async function saveFleetConfig(fleetPK, fleetData, reason) {
+	async function saveFleetConfig(fleetPK, fleetData, reason, options = {}) {
 		const timingStart = slyaPerfNowMs();
 		const timingMarks = [];
+		const skipLeveldbSnapshot = !!options.skipLeveldbSnapshot;
 		const dataStr = JSON.stringify(fleetData || {});
 		const dataLen = dataStr.length;
 		const fleetLabel = String(fleetPK || 'unknown').slice(0, 12);
@@ -3969,10 +3970,12 @@
 		await GM.setValue(fleetPK, dataStr);
 		timingMarks.push('gm-set=' + Math.round((slyaPerfNowMs() - gmSetStart) * 10) / 10 + 'ms');
 		try {
-			if (typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
+			if (!skipLeveldbSnapshot && typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
 				const backupStart = slyaPerfNowMs();
 				await window.electronAPI.snapshotLeveldbToBackup();
 				timingMarks.push('leveldb-snapshot=' + Math.round((slyaPerfNowMs() - backupStart) * 10) / 10 + 'ms');
+			} else if (skipLeveldbSnapshot) {
+				timingMarks.push('leveldb-snapshot=skipped');
 			}
 		} catch (e) { try { await appendUpgradeAutomationLog('[FLEET][BAK-ERROR] fleet=' + fleetLabel + '... reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
 		scheduleSlyaStateBackup('fleet-' + String(reason || 'unknown'));
@@ -3980,9 +3983,10 @@
 		emitSlyaTiming('[FLEET][SAVE-TIMING] fleet=' + fleetLabel + '... reason=' + String(reason || 'unknown') + ' dataLen=' + dataLen + ' ' + timingMarks.join(' '));
 	}
 
-	async function saveCraftConfig(craftIndexOrLabel, craftData, reason) {
+	async function saveCraftConfig(craftIndexOrLabel, craftData, reason, options = {}) {
 		const timingStart = slyaPerfNowMs();
 		const timingMarks = [];
+		const skipLeveldbSnapshot = !!options.skipLeveldbSnapshot;
 		let key;
 		let slotLabel;
 		if (typeof craftIndexOrLabel === 'string') {
@@ -4008,10 +4012,12 @@
 		await GM.setValue(key, dataStr);
 		timingMarks.push('gm-set=' + Math.round((slyaPerfNowMs() - gmSetStart) * 10) / 10 + 'ms');
 		try {
-			if (typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
+			if (!skipLeveldbSnapshot && typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
 				const backupStart = slyaPerfNowMs();
 				await window.electronAPI.snapshotLeveldbToBackup();
 				timingMarks.push('leveldb-snapshot=' + Math.round((slyaPerfNowMs() - backupStart) * 10) / 10 + 'ms');
+			} else if (skipLeveldbSnapshot) {
+				timingMarks.push('leveldb-snapshot=skipped');
 			}
 		} catch (e) { try { await appendUpgradeAutomationLog('[CRAFT][BAK-ERROR] slot=' + slotLabel + ' reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
 		scheduleSlyaStateBackup('craft-' + String(reason || 'unknown'));
@@ -10025,7 +10031,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					scanEnd: fleetScanEnd
 				};
 				const fleetSaveStart = slyaPerfNowMs();
-				await saveFleetConfig(fleetPK, fleet, 'fleet-config-modal-save');
+				await saveFleetConfig(fleetPK, fleet, 'fleet-config-modal-save', { skipLeveldbSnapshot: true });
 				const fleetSaveMs = slyaPerfNowMs() - fleetSaveStart;
 				fleetSaveCount += 1;
 				fleetSaveTotalMs += fleetSaveMs;
@@ -10107,7 +10113,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
             console.log('craft: ', craft);
 
             const craftSaveStart = slyaPerfNowMs();
-            await saveCraftConfig(craftPK, craft, 'craft-config-modal-save');
+            await saveCraftConfig(craftPK, craft, 'craft-config-modal-save', { skipLeveldbSnapshot: true });
 			const craftSaveMs = slyaPerfNowMs() - craftSaveStart;
 			craftSaveCount += 1;
 			craftSaveTotalMs += craftSaveMs;
@@ -10117,6 +10123,22 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		timingMarks.push('craft-save-count=' + craftSaveCount);
 		timingMarks.push('craft-save-total=' + Math.round(craftSaveTotalMs * 10) / 10 + 'ms');
 		timingMarks.push('craft-save-max=' + Math.round(craftSaveMaxMs * 10) / 10 + 'ms');
+		try {
+			if (typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
+				const backupQueuedAt = slyaPerfNowMs();
+				setTimeout(() => {
+					try {
+						const backupStart = slyaPerfNowMs();
+						emitSlyaTiming('[CONFIG][LEVELDB-BACKUP-TIMING] reason=config-modal-save timer-delay=' + Math.round((backupStart - backupQueuedAt) * 10) / 10 + 'ms start');
+						window.electronAPI.snapshotLeveldbToBackup().then(result => {
+							emitSlyaTiming('[CONFIG][LEVELDB-BACKUP-TIMING] reason=config-modal-save duration=' + Math.round((slyaPerfNowMs() - backupStart) * 10) / 10 + 'ms ok=' + !!result?.ok + ' skipped=' + !!result?.skipped);
+						}).catch(async e => {
+							try { await appendUpgradeAutomationLog('[CONFIG][BAK-ERROR] reason=config-modal-save err=' + String(e?.message || e)); } catch (e2) {}
+						});
+					} catch (e) { appendUpgradeAutomationLog('[CONFIG][BAK-ERROR] reason=config-modal-save err=' + String(e?.message || e)).catch(() => {}); }
+				}, 2500);
+			}
+		} catch (e) { try { await appendUpgradeAutomationLog('[CONFIG][BAK-ERROR] reason=config-modal-save err=' + String(e?.message || e)); } catch (e2) {} }
 
 		if (errBool === false) {
 			errElem[0].innerHTML = '';
