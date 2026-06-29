@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-77
+// @aephia-version 0.7.35-78
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-77'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-78'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -3790,9 +3790,13 @@
 		await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
 		try {
 			if (typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
-				window.electronAPI.snapshotLeveldbToBackup().catch(async e => {
-					try { await appendUpgradeAutomationLog('[SETTINGS][BAK-ERROR-POST] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {}
-				});
+				setTimeout(() => {
+					try {
+						window.electronAPI.snapshotLeveldbToBackup().catch(async e => {
+							try { await appendUpgradeAutomationLog('[SETTINGS][BAK-ERROR-POST] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {}
+						});
+					} catch (e) { appendUpgradeAutomationLog('[SETTINGS][BAK-ERROR-POST] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)).catch(() => {}); }
+				}, 2500);
 			}
 		} catch (e) { try { await appendUpgradeAutomationLog('[SETTINGS][BAK-ERROR-POST] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
 		scheduleSlyaStateBackup('settings-' + String(reason || 'unknown'));
