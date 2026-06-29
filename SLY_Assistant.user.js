@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-79
+// @aephia-version 0.7.35-80
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-79'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-80'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -3951,26 +3951,38 @@
 	}
 
 	async function saveFleetConfig(fleetPK, fleetData, reason) {
+		const timingStart = slyaPerfNowMs();
+		const timingMarks = [];
 		const dataStr = JSON.stringify(fleetData || {});
 		const dataLen = dataStr.length;
 		const fleetLabel = String(fleetPK || 'unknown').slice(0, 12);
 		try {
 			const logLine = '[FLEET][SAVE] fleet=' + fleetLabel + '... reason=' + String(reason || 'unknown') + ' dataLen=' + dataLen;
 			try { cLog(2, logLine); } catch (e) {}
+			const logStart = slyaPerfNowMs();
 			try { await appendUpgradeAutomationLog(logLine); } catch (e) {}
+			timingMarks.push('append-log=' + Math.round((slyaPerfNowMs() - logStart) * 10) / 10 + 'ms');
 		} catch (e) {
 			try { await appendUpgradeAutomationLog('[FLEET][SAVE-LOG-ERROR] fleet=' + fleetLabel + '... reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {}
 		}
+		const gmSetStart = slyaPerfNowMs();
 		await GM.setValue(fleetPK, dataStr);
+		timingMarks.push('gm-set=' + Math.round((slyaPerfNowMs() - gmSetStart) * 10) / 10 + 'ms');
 		try {
 			if (typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
+				const backupStart = slyaPerfNowMs();
 				await window.electronAPI.snapshotLeveldbToBackup();
+				timingMarks.push('leveldb-snapshot=' + Math.round((slyaPerfNowMs() - backupStart) * 10) / 10 + 'ms');
 			}
 		} catch (e) { try { await appendUpgradeAutomationLog('[FLEET][BAK-ERROR] fleet=' + fleetLabel + '... reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
 		scheduleSlyaStateBackup('fleet-' + String(reason || 'unknown'));
+		slyaTimingMark(timingMarks, timingStart, 'total');
+		emitSlyaTiming('[FLEET][SAVE-TIMING] fleet=' + fleetLabel + '... reason=' + String(reason || 'unknown') + ' dataLen=' + dataLen + ' ' + timingMarks.join(' '));
 	}
 
 	async function saveCraftConfig(craftIndexOrLabel, craftData, reason) {
+		const timingStart = slyaPerfNowMs();
+		const timingMarks = [];
 		let key;
 		let slotLabel;
 		if (typeof craftIndexOrLabel === 'string') {
@@ -3986,17 +3998,25 @@
 		try {
 			const logLine = '[CRAFT][SAVE] slot=' + slotLabel + ' reason=' + String(reason || 'unknown') + ' dataLen=' + dataLen;
 			try { cLog(2, logLine); } catch (e) {}
+			const logStart = slyaPerfNowMs();
 			try { await appendUpgradeAutomationLog(logLine); } catch (e) {}
+			timingMarks.push('append-log=' + Math.round((slyaPerfNowMs() - logStart) * 10) / 10 + 'ms');
 		} catch (e) {
 			try { await appendUpgradeAutomationLog('[CRAFT][SAVE-LOG-ERROR] slot=' + slotLabel + ' reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {}
 		}
+		const gmSetStart = slyaPerfNowMs();
 		await GM.setValue(key, dataStr);
+		timingMarks.push('gm-set=' + Math.round((slyaPerfNowMs() - gmSetStart) * 10) / 10 + 'ms');
 		try {
 			if (typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
+				const backupStart = slyaPerfNowMs();
 				await window.electronAPI.snapshotLeveldbToBackup();
+				timingMarks.push('leveldb-snapshot=' + Math.round((slyaPerfNowMs() - backupStart) * 10) / 10 + 'ms');
 			}
 		} catch (e) { try { await appendUpgradeAutomationLog('[CRAFT][BAK-ERROR] slot=' + slotLabel + ' reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
 		scheduleSlyaStateBackup('craft-' + String(reason || 'unknown'));
+		slyaTimingMark(timingMarks, timingStart, 'total');
+		emitSlyaTiming('[CRAFT][SAVE-TIMING] slot=' + slotLabel + ' reason=' + String(reason || 'unknown') + ' dataLen=' + dataLen + ' ' + timingMarks.join(' '));
 	}
 
 	async function loadGlobalSettings() {
@@ -9702,6 +9722,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	}
 
 	async function saveAssistInput() {
+		const timingStart = slyaPerfNowMs();
+		const timingMarks = [];
 		function validateCoordInput(coord) { return coord ? coord.replace('.', ',') : ''; }
 		let fleetRows = document.querySelectorAll('#assistModal .assist-fleet-row');
 		let scanRows = document.querySelectorAll('#assistModal .assist-scan-row');
@@ -9711,7 +9733,16 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		let transportPlusRows = document.querySelectorAll('#assistModal .assist-transport-plus-row > td');
 		let errElem = document.querySelectorAll('#assist-modal-error');
 		let errBool = false;
+		let fleetSaveCount = 0;
+		let fleetSaveTotalMs = 0;
+		let fleetSaveMaxMs = 0;
+		let craftSaveCount = 0;
+		let craftSaveTotalMs = 0;
+		let craftSaveMaxMs = 0;
+		timingMarks.push('fleetRows=' + fleetRows.length);
+		timingMarks.push('craftRows=' + document.querySelectorAll('#assistModal .assist-craft-row').length);
 
+		const fleetLoopStart = slyaPerfNowMs();
 		for (let [i, row] of fleetRows.entries()) {
 
 			const inputError = (msg, innerHtml, type, extraElems = []) => {
@@ -9993,7 +10024,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					scanMove: scanMove,
 					scanEnd: fleetScanEnd
 				};
+				const fleetSaveStart = slyaPerfNowMs();
 				await saveFleetConfig(fleetPK, fleet, 'fleet-config-modal-save');
+				const fleetSaveMs = slyaPerfNowMs() - fleetSaveStart;
+				fleetSaveCount += 1;
+				fleetSaveTotalMs += fleetSaveMs;
+				fleetSaveMaxMs = Math.max(fleetSaveMaxMs, fleetSaveMs);
 
 				const transportConfigKeys = Object.keys(fleet).filter(key =>
 					key.indexOf('transportResource') === 0 ||
@@ -10027,8 +10063,13 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				userFleets[userFleetIndex].scanBlockIdx = scanMove ? userFleets[userFleetIndex].scanBlockIdx : 0;
 			}
 		}
+		timingMarks.push('fleet-loop-total=' + Math.round((slyaPerfNowMs() - fleetLoopStart) * 10) / 10 + 'ms');
+		timingMarks.push('fleet-save-count=' + fleetSaveCount);
+		timingMarks.push('fleet-save-total=' + Math.round(fleetSaveTotalMs * 10) / 10 + 'ms');
+		timingMarks.push('fleet-save-max=' + Math.round(fleetSaveMaxMs * 10) / 10 + 'ms');
 
         let craftRows = document.querySelectorAll('#assistModal .assist-craft-row');
+		const craftLoopStart = slyaPerfNowMs();
         for (let [i, row] of craftRows.entries()) {
             let craftPK = row.getAttribute('pk');
 
@@ -10065,12 +10106,32 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
             }
             console.log('craft: ', craft);
 
+            const craftSaveStart = slyaPerfNowMs();
             await saveCraftConfig(craftPK, craft, 'craft-config-modal-save');
+			const craftSaveMs = slyaPerfNowMs() - craftSaveStart;
+			craftSaveCount += 1;
+			craftSaveTotalMs += craftSaveMs;
+			craftSaveMaxMs = Math.max(craftSaveMaxMs, craftSaveMs);
         }
+		timingMarks.push('craft-loop-total=' + Math.round((slyaPerfNowMs() - craftLoopStart) * 10) / 10 + 'ms');
+		timingMarks.push('craft-save-count=' + craftSaveCount);
+		timingMarks.push('craft-save-total=' + Math.round(craftSaveTotalMs * 10) / 10 + 'ms');
+		timingMarks.push('craft-save-max=' + Math.round(craftSaveMaxMs * 10) / 10 + 'ms');
 
 		if (errBool === false) {
 			errElem[0].innerHTML = '';
+			const modalCloseStart = slyaPerfNowMs();
 			assistModalToggle();
+			timingMarks.push('assist-modal-toggle=' + Math.round((slyaPerfNowMs() - modalCloseStart) * 10) / 10 + 'ms');
+		}
+		const emitModalTiming = () => {
+			slyaTimingMark(timingMarks, timingStart, 'post-close-raf');
+			emitSlyaTiming('[CONFIG][MODAL-SAVE-TIMING] ' + timingMarks.join(' '));
+		};
+		if (typeof requestAnimationFrame !== 'undefined') {
+			requestAnimationFrame(() => requestAnimationFrame(emitModalTiming));
+		} else {
+			emitModalTiming();
 		}
 	}
 
