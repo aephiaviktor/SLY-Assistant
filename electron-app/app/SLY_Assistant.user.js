@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-82
+// @aephia-version 0.7.35-83
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-82'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-83'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -11324,10 +11324,93 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		}
 	}
 
-        return {currentManifest, destinationManifest, needToLoad, needToUnload};
-    }
+	        return {currentManifest, destinationManifest, needToLoad, needToUnload};
+	    }
 
-	async function handleCrewUnloading(fleet, starbaseCoords, amount, returnTx) {
+		async function getTransportRecoveryCargoAmounts(fleet) {
+			const cargoAmounts = {};
+			const fleetCurrentCargo = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.cargoHold, {programId: tokenProgramPK});
+			for(const tokenAccount of fleetCurrentCargo.value) {
+				const mint = tokenAccount.account.data.parsed.info.mint;
+				const amount = Number(tokenAccount.account.data.parsed.info.tokenAmount.uiAmount || 0);
+				if(mint && amount > 0) cargoAmounts[mint] = (cargoAmounts[mint] || 0) + amount;
+			}
+
+			if(globalSettings.transportUseAmmoBank) {
+				const ammoMint = sageGameAcct.account.mints.ammo.toString();
+				const fleetCurrentAmmoBank = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.ammoBank, {programId: tokenProgramPK});
+				const currentAmmo = fleetCurrentAmmoBank.value.find(item => item.account.data.parsed.info.mint === ammoMint);
+				const ammoBankAmount = currentAmmo ? Number(currentAmmo.account.data.parsed.info.tokenAmount.uiAmount || 0) : 0;
+				if(ammoBankAmount > 0) cargoAmounts[ammoMint] = (cargoAmounts[ammoMint] || 0) + ammoBankAmount;
+			}
+
+			return cargoAmounts;
+		}
+
+		function scoreTransportRecoveryManifest(manifest, cargoAmounts) {
+			let score = 0;
+			const matches = [];
+			for(const entry of manifest || []) {
+				if(!entry || !entry.res || !(Number(entry.amt || 0) > 0)) continue;
+				const rawAmount = Number(cargoAmounts[entry.res] || 0);
+				const effectiveAmount = Math.max(0, rawAmount - (globalSettings.transportKeep1 ? 1 : 0));
+				if(effectiveAmount <= 0) continue;
+				const cargoSize = Number((cargoItems.find(r => r.token == entry.res) || {}).size || 1);
+				const matchedAmount = Math.min(effectiveAmount, Number(entry.amt || 0));
+				score += matchedAmount * cargoSize;
+				matches.push({ res: entry.res, have: rawAmount, effective: effectiveAmount, configured: Number(entry.amt || 0) });
+			}
+			return { score, matches };
+		}
+
+		async function inferTransportRecoveryLeg(fleet, candidates) {
+			const cargoAmounts = await getTransportRecoveryCargoAmounts(fleet);
+			const scoredCandidates = (candidates || []).map(candidate => {
+				const manifestScore = scoreTransportRecoveryManifest(candidate.destinationManifest || candidate.manifest || [], cargoAmounts);
+				return { ...candidate, score: manifestScore.score, matches: manifestScore.matches };
+			});
+			const activeCandidates = scoredCandidates.filter(candidate => candidate.score > 0);
+
+			if(activeCandidates.length === 1) {
+				return { recovered: true, reason: 'single_cargo_match', leg: activeCandidates[0], cargoAmounts, candidates: scoredCandidates };
+			}
+
+			return {
+				recovered: false,
+				reason: activeCandidates.length > 1 ? 'ambiguous_cargo_match' : 'no_cargo_match',
+				cargoAmounts,
+				candidates: scoredCandidates
+			};
+		}
+
+		async function recoverTransportMovement(i, fleetCoords, recovery, logPrefix) {
+			const leg = recovery && recovery.leg;
+			if(!leg || !leg.destCoord) return false;
+			const fleetPK = userFleets[i].publicKey.toString();
+			const fleetSavedData = await GM.getValue(fleetPK, '{}');
+			const fleetParsedData = JSON.parse(fleetSavedData);
+			fleetParsedData.moveType = leg.moveType || userFleets[i].moveType;
+			fleetParsedData.subwarpPref = transportMoveTypeToSubwarpPref(fleetParsedData.moveType);
+			fleetParsedData.moveTarget = leg.destCoord;
+			await saveFleetConfig(fleetPK, fleetParsedData, 'transport-recovery-route-save');
+			userFleets[i].moveType = fleetParsedData.moveType;
+			userFleets[i].moveTarget = leg.destCoord;
+			cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${logPrefix} - recovered route to ${leg.destCoord} (${recovery.reason})`);
+			const [targetX, targetY] = ConvertCoords(leg.destCoord);
+			const moveDist = calculateMovementDistance(fleetCoords, [targetX, targetY]);
+			let isStarbaseAndWarpSubwarp = false;
+			if(userFleets[i].moveType == 'warpsubwarp') {
+				const sourceCoords = leg.sourceCoord ? ConvertCoords(leg.sourceCoord) : [];
+				const destCoords = leg.destCoord ? ConvertCoords(leg.destCoord) : [];
+				isStarbaseAndWarpSubwarp =
+					CoordsEqual(fleetCoords, sourceCoords) ||
+					CoordsEqual(fleetCoords, destCoords);
+			}
+			await handleMovement(i, moveDist, targetX, targetY, isStarbaseAndWarpSubwarp);
+			return true;
+		}
+
+		async function handleCrewUnloading(fleet, starbaseCoords, amount, returnTx) {
 	return new Promise(async resolve => {
 
 	    let starbaseX = starbaseCoords.split(',')[0].trim();
@@ -11735,18 +11818,38 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
             if(userFleets[i].stopping) return;
 
-            if (userFleets[i].moveTarget !== '') {
-                const targetX = userFleets[i].moveTarget.split(',').length > 1 ? userFleets[i].moveTarget.split(',')[0].trim() : '';
-                const targetY = userFleets[i].moveTarget.split(',').length > 1 ? userFleets[i].moveTarget.split(',')[1].trim() : '';
-                const moveDist = calculateMovementDistance(fleetCoords, [targetX,targetY]);
-		let isStarbaseAndWarpSubwarp = userFleets[i].moveType == 'warpsubwarp' && ((fleetCoords[0] == starbaseX && fleetCoords[1] == starbaseY) || (fleetCoords[0] == destX && fleetCoords[1] == destY));
-                await handleMovement(i, moveDist, targetX, targetY, isStarbaseAndWarpSubwarp);
-            } else {
-                cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - ERROR: Fleet must start at Target or Starbase`);
-                updateFleetState(userFleets[i], 'ERROR: Fleet must start at Target or Starbase');
-            }
-        }
-    }
+	            if (userFleets[i].moveTarget !== '') {
+	                const targetX = userFleets[i].moveTarget.split(',').length > 1 ? userFleets[i].moveTarget.split(',')[0].trim() : '';
+	                const targetY = userFleets[i].moveTarget.split(',').length > 1 ? userFleets[i].moveTarget.split(',')[1].trim() : '';
+	                const moveDist = calculateMovementDistance(fleetCoords, [targetX,targetY]);
+			let isStarbaseAndWarpSubwarp = userFleets[i].moveType == 'warpsubwarp' && ((fleetCoords[0] == starbaseX && fleetCoords[1] == starbaseY) || (fleetCoords[0] == destX && fleetCoords[1] == destY));
+	                await handleMovement(i, moveDist, targetX, targetY, isStarbaseAndWarpSubwarp);
+	            } else {
+					const recovery = await inferTransportRecoveryLeg(userFleets[i], [
+						{
+							label: 'to target',
+							sourceCoord: userFleets[i].starbaseCoord,
+							destCoord: userFleets[i].destCoord,
+							moveType: userFleets[i].moveType,
+							destinationManifest: targetCargoManifest
+						},
+						{
+							label: 'to starbase',
+							sourceCoord: userFleets[i].destCoord,
+							destCoord: userFleets[i].starbaseCoord,
+							moveType: userFleets[i].moveType,
+							destinationManifest: starbaseCargoManifest
+						}
+					]);
+					if(recovery.recovered) {
+						await recoverTransportMovement(i, fleetCoords, recovery, 'Transporting');
+					} else {
+						cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - ERROR: Fleet must start at Target or Starbase (${recovery.reason})`);
+						updateFleetState(userFleets[i], 'ERROR: Fleet must start at Target or Starbase');
+					}
+	            }
+	        }
+	    }
 
 	async function getFleetFuelData(fleet, currentPos, targetPos, roundTrip = true) {
 		const moveDist = calculateMovementDistance(currentPos, targetPos);
