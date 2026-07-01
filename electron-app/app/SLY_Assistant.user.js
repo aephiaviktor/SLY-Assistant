@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-86
+// @aephia-version 0.7.35-87
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-86'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-87'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -576,23 +576,6 @@
 		cLog(1, `[SLYA-STATE-BAK] restored weak current state from external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'}`);
 		try { await appendUpgradeAutomationLog(`[SLYA-STATE-BAK] restored weak current state from external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'}`); } catch (e) {}
 		return true;
-	}
-
-	async function recoverCraftingProcessFromSlyaStateBackupForSlot(userCraft) {
-		if (!userCraft || userCraft.craftingId) return null;
-		const backup = await readLatestSlyaStateBackup();
-		const backupCraft = backup?.craftConfigs?.[userCraft.label];
-		if (!backupCraft || !backupCraft.craftingId) return null;
-		if (backupCraft.item && userCraft.item && backupCraft.item !== userCraft.item) return null;
-		if (backupCraft.coordinates && userCraft.coordinates && backupCraft.coordinates !== userCraft.coordinates) return null;
-
-		const restoredCraft = { ...userCraft, ...backupCraft, label: userCraft.label };
-		await GM.setValue(userCraft.label, JSON.stringify(restoredCraft));
-		recoveredCraftingProcessSlots.set(String(restoredCraft.craftingId), userCraft.label);
-		updateFleetState(restoredCraft, restoredCraft.state || userCraft.state || 'Idle');
-		cLog(1, `${FleetTimeStamp(userCraft.label)} Recovered craftingId ${restoredCraft.craftingId} from external SLYA state backup`);
-		try { await appendUpgradeAutomationLog(`[SLYA-STATE-BAK] recovered ${userCraft.label} craftingId=${restoredCraft.craftingId} from external backup`); } catch (e) {}
-		return restoredCraft;
 	}
 
 	async function refreshUpgradeAutomationInfluxStats() {
@@ -13019,12 +13002,6 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					let userCraft = JSON.parse(craftSavedData);
 					if (!shouldAttemptCraftingRecoveryForSlot(userCraft)) continue;
 
-					const recoveredBackupCraft = await recoverCraftingProcessFromSlyaStateBackupForSlot(userCraft);
-					if (recoveredBackupCraft) {
-						recoveredCount++;
-						continue;
-					}
-
 					const [targetX, targetY] = String(userCraft.coordinates || '').split(',').map(value => value.trim());
 					if (!targetX || !targetY) continue;
 					const starbase = await getStarbaseFromCoords(targetX, targetY, true);
@@ -13136,6 +13113,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	            //let complete58 = bs58.encode(completeArr);
 
 	            if (craftingInstances.length < 1) {
+	                const previousCraftingId = userCraft.craftingId;
+	                try { await appendUpgradeAutomationLog(`[CRAFT-RECOVERY] clearing ${userCraft.label} craftingId=${previousCraftingId} reason=no_crafting_instances coords=${userCraft.craftingCoords || userCraft.coordinates || ''}`); } catch (e) {}
 	                userCraft.craftingId = 0;
 	                updateFleetState(userCraft, 'Idle');
 	                await updateCraft(userCraft);
@@ -13202,7 +13181,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	            }
 
 	            if (!craftingProcessRunning) {
-	                cLog(1,`${FleetTimeStamp(userCraft.label)} Crafting process not found. Setting state to Idle.`);
+	                const previousCraftingId = userCraft.craftingId;
+	                cLog(1,`${FleetTimeStamp(userCraft.label)} Crafting process ${previousCraftingId} not found. Setting state to Idle.`);
+	                try { await appendUpgradeAutomationLog(`[CRAFT-RECOVERY] clearing ${userCraft.label} craftingId=${previousCraftingId} reason=process_not_found coords=${userCraft.craftingCoords || userCraft.coordinates || ''}`); } catch (e) {}
 	                userCraft.craftingId = 0;
 	                updateFleetState(userCraft, 'Idle');
 	                await updateCraft(userCraft);
@@ -13405,11 +13386,6 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                             userCraft = JSON.parse(refreshedCraftData);
                         }
                     }
-                    const recoveredBackupCraft = userCraft.craftingId ? null : await recoverCraftingProcessFromSlyaStateBackupForSlot(userCraft);
-                    if (recoveredBackupCraft) {
-                        userCraft = recoveredBackupCraft;
-                        localTimeout = 10000;
-                    } else {
                     const recoveredProcess = userCraft.craftingId ? { timeoutMs: 10000 } : await recoverCraftingProcessForSlot(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime);
                     if (recoveredProcess) {
                         localTimeout = recoveredProcess.timeoutMs;
@@ -13422,7 +13398,6 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     }
                     else {
                         updateFleetState(userCraft, 'Waiting for material' + materialStr);
-                    }
                     }
                     await updateCraft(userCraft);
                 }
