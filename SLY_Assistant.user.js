@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-89
+// @aephia-version 0.7.35-90
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-89'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-90'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -1465,18 +1465,21 @@
 		try { await appendUpgradeAutomationLog(line); } catch (e) {}
 	}
 
-	function buildUpgradeAutomationSchedulerPlanPayload(stage, rows, schedule, settings = {}, now = new Date()) {
-		const rowList = Array.isArray(rows) ? JSON.parse(JSON.stringify(rows)) : [];
-		return {
-			schemaVersion: 1,
-			stage: String(stage || 'capture'),
-			hour: now.getUTCHours(),
-			cycleStamp: getUpgradeAutomationCycleStamp(now, settings),
-			capturedAtUtc: now.toISOString(),
-			targetFinishAtUtc: String(schedule?.targetFinishAtUtc || ''),
-			rows: rowList
-		};
-	}
+		function buildUpgradeAutomationSchedulerPlanPayload(stage, rows, schedule, settings = {}, now = new Date()) {
+			const rowList = Array.isArray(rows) ? JSON.parse(JSON.stringify(rows)) : [];
+			const targetFinishAtUtc = String(schedule?.targetFinishAtUtc || '');
+			const writeAfterAt = targetFinishAtUtc ? new Date(new Date(targetFinishAtUtc).getTime() - 2 * 60 * 1000) : null;
+			return {
+				schemaVersion: 1,
+				stage: String(stage || 'capture'),
+				hour: now.getUTCHours(),
+				cycleStamp: getUpgradeAutomationCycleStamp(now, settings),
+				capturedAtUtc: now.toISOString(),
+				targetFinishAtUtc,
+				writeAfterUtc: writeAfterAt && !Number.isNaN(writeAfterAt.getTime()) ? writeAfterAt.toISOString() : '',
+				rows: rowList
+			};
+		}
 
 	function isUpgradeAutomationSchedulerPlanValidForHour(payload, settings = {}, now = new Date()) {
 		return !!(
@@ -1484,9 +1487,27 @@
 			String(payload.cycleStamp || '') === getUpgradeAutomationCycleStamp(now, settings) &&
 			String(payload.targetFinishAtUtc || '') &&
 			Array.isArray(payload.rows) &&
-			payload.rows.length
-		);
-	}
+				payload.rows.length
+			);
+		}
+
+		function getUpgradeAutomationSchedulerWriteAfterUtc(payload) {
+			const explicit = String(payload?.writeAfterUtc || '');
+			if (explicit) return explicit;
+			const targetFinishAtUtc = String(payload?.targetFinishAtUtc || '');
+			if (!targetFinishAtUtc) return '';
+			const target = new Date(targetFinishAtUtc);
+			if (Number.isNaN(target.getTime())) return '';
+			return new Date(target.getTime() - 2 * 60 * 1000).toISOString();
+		}
+
+		function isUpgradeAutomationSchedulerPlanWriteDue(payload, now = new Date()) {
+			const writeAfterUtc = getUpgradeAutomationSchedulerWriteAfterUtc(payload);
+			if (!writeAfterUtc) return false;
+			const writeAfter = new Date(writeAfterUtc);
+			if (Number.isNaN(writeAfter.getTime())) return false;
+			return now.getTime() >= writeAfter.getTime();
+		}
 
 	function hydrateUpgradeAutomationSchedulerPlan(payload) {
 		if (!payload) return;
@@ -5101,11 +5122,18 @@ function renderAssistStats() {
 	setInterval(() => { refreshUpgradeAutomationExecutionSummary(); }, 5 * 60 * 1000);
 	setInterval(async () => {
 		try {
-			if (!globalSettings.upgradeAutomationEnabled) return;
-			const now = new Date();
-			const currentMinute = now.getUTCMinutes();
-			const currentHour = now.getUTCHours();
-			const summary = upgradeAutomationExecutionSummary;
+				if (!globalSettings.upgradeAutomationEnabled) return;
+				const now = new Date();
+				if (window.schedulerLastIntervalAt) {
+					const intervalGapMs = now.getTime() - Number(window.schedulerLastIntervalAt || 0);
+					if (intervalGapMs > 45 * 1000) {
+						await logUpgradeAutomationSchedulerEvent('Scheduler timer delayed', { utc: now.toISOString(), gapMs: intervalGapMs });
+					}
+				}
+				window.schedulerLastIntervalAt = now.getTime();
+				const currentMinute = now.getUTCMinutes();
+				const currentHour = now.getUTCHours();
+				const summary = upgradeAutomationExecutionSummary;
 
 				// Viktor: Clear all managed craft slots at xx:54 UTC - set amount=0, crew=0, preserve everything else
 				// This gives 3 staged minutes before the final write at xx:57, still targeting xx:59
@@ -5186,29 +5214,41 @@ function renderAssistStats() {
 						}
 					}
 
-					// Viktor: Write captured rows at xx:57 UTC - once per hour, using the refreshed rows from xx:56
-					if (currentMinute === 57 && upgradeAutomationLastWrittenHour !== currentHour) {
-						upgradeAutomationLastWrittenHour = currentHour;
-						const persistedPlan = await loadUpgradeAutomationSchedulerPlan(globalSettings, now);
-						const rows = persistedPlan?.rows || [];
-						const schedule = persistedPlan ? { targetFinishAtUtc: persistedPlan.targetFinishAtUtc } : {};
-						if (Array.isArray(rows) && rows.length && schedule?.targetFinishAtUtc) {
-							await logUpgradeAutomationSchedulerEvent('WRITE starting', { utc: now.toISOString(), rows: rows.length, target: schedule.targetFinishAtUtc });
-							await applyUpgradeAutomationExecutionToCraftConfig(rows, schedule, globalSettings, now);
-							await writeUpgradeAutomationSchedulerReceipt('write-57', persistedPlan, globalSettings, now);
-							upgradeAutomationPendingPlanRows = null;
-							upgradeAutomationPendingCaptureHour = null;
-							upgradeAutomationLastPlanSchedule = null;
-							window.schedulerLastPreviewHour = null;
-							window.schedulerPendingPlanRows = null;
-							window.schedulerPendingCaptureHour = null;
-							window.schedulerLastPlanSchedule = null;
-							await logUpgradeAutomationSchedulerEvent('WRITE complete', { utc: new Date().toISOString(), rows: rows.length, target: schedule.targetFinishAtUtc });
-							renderLpAutomationContent(); // Viktor: update the LP Automation panel UI with fresh debug info after write
-					} else {
-						await logUpgradeAutomationSchedulerEvent('Write skipped', { utc: now.toISOString(), rows: rows?.length || 0, target: schedule?.targetFinishAtUtc || '' });
+						// Viktor: Primary scheduler write - deadline based, not exact-minute based.
+						// Timer callbacks can be delayed by Electron/Chromium work; if xx:57 is missed,
+						// the next tick still writes the same persisted plan once it is due.
+					{
+							const persistedPlan = await loadUpgradeAutomationSchedulerPlan(globalSettings, now);
+							const rows = persistedPlan?.rows || [];
+							const schedule = persistedPlan ? { targetFinishAtUtc: persistedPlan.targetFinishAtUtc } : {};
+							const receipt = persistedPlan ? await loadUpgradeAutomationSchedulerReceipt(globalSettings, now) : null;
+							const writeDue = persistedPlan ? isUpgradeAutomationSchedulerPlanWriteDue(persistedPlan, now) : false;
+							if (!receipt && writeDue && window.schedulerLastPrimaryWriteCycleStamp !== persistedPlan.cycleStamp && window.schedulerPrimaryWriteInFlightCycleStamp !== persistedPlan.cycleStamp && Array.isArray(rows) && rows.length && schedule?.targetFinishAtUtc) {
+								window.schedulerPrimaryWriteInFlightCycleStamp = persistedPlan.cycleStamp;
+								const writeAfterUtc = getUpgradeAutomationSchedulerWriteAfterUtc(persistedPlan);
+								const writeDelayMs = writeAfterUtc ? Math.max(0, now.getTime() - new Date(writeAfterUtc).getTime()) : 0;
+								try {
+									await logUpgradeAutomationSchedulerEvent('WRITE starting', { utc: now.toISOString(), rows: rows.length, target: schedule.targetFinishAtUtc, writeAfterUtc, writeDelayMs });
+									await applyUpgradeAutomationExecutionToCraftConfig(rows, schedule, globalSettings, now);
+									await writeUpgradeAutomationSchedulerReceipt('deadline-write', persistedPlan, globalSettings, now);
+									window.schedulerLastPrimaryWriteCycleStamp = persistedPlan.cycleStamp;
+									upgradeAutomationLastWrittenHour = currentHour;
+									upgradeAutomationPendingPlanRows = null;
+									upgradeAutomationPendingCaptureHour = null;
+									upgradeAutomationLastPlanSchedule = null;
+									window.schedulerLastPreviewHour = null;
+									window.schedulerPendingPlanRows = null;
+									window.schedulerPendingCaptureHour = null;
+									window.schedulerLastPlanSchedule = null;
+									await logUpgradeAutomationSchedulerEvent('WRITE complete', { utc: new Date().toISOString(), rows: rows.length, target: schedule.targetFinishAtUtc, writeDelayMs });
+									renderLpAutomationContent(); // Viktor: update the LP Automation panel UI with fresh debug info after write
+								} finally {
+									if (window.schedulerPrimaryWriteInFlightCycleStamp === persistedPlan.cycleStamp) window.schedulerPrimaryWriteInFlightCycleStamp = null;
+								}
+						} else if (currentMinute === 57 && !receipt) {
+							await logUpgradeAutomationSchedulerEvent('Write skipped', { utc: now.toISOString(), rows: rows?.length || 0, target: schedule?.targetFinishAtUtc || '' });
+						}
 					}
-				}
 
 				// Viktor: Recovery write at xx:58 UTC - verify the persisted plan was written before jobs end at xx:59
 				if (currentMinute === 58 && window.schedulerLastFallbackHour !== currentHour) {
@@ -5241,39 +5281,7 @@ function renderAssistStats() {
 					}
 				}
 
-				if (currentMinute <= 10) {
-					const cycleStamp = getUpgradeAutomationCycleStamp(now, globalSettings);
-					if (window.schedulerLastLateWriteCycleStamp !== cycleStamp) {
-						const persistedPlan = await loadUpgradeAutomationSchedulerPlan(globalSettings, now);
-						if (persistedPlan) {
-							const receipt = await loadUpgradeAutomationSchedulerReceipt(globalSettings, now);
-							const verification = await verifyUpgradeAutomationSchedulerPlanWritten(persistedPlan);
-							if (!receipt || !verification.ok) {
-								window.schedulerLastLateWriteCycleStamp = cycleStamp;
-								await logUpgradeAutomationSchedulerEvent('Late write watchdog starting', {
-									utc: now.toISOString(),
-									hasReceipt: !!receipt,
-									verifyReason: verification.reason,
-									rows: persistedPlan.rows.length,
-									target: persistedPlan.targetFinishAtUtc,
-									failures: verification.failures
-								});
-								await applyUpgradeAutomationExecutionToCraftConfig(persistedPlan.rows, { targetFinishAtUtc: persistedPlan.targetFinishAtUtc }, globalSettings, now);
-								await writeUpgradeAutomationSchedulerReceipt('late-watchdog', persistedPlan, globalSettings, now);
-								const retryVerification = await verifyUpgradeAutomationSchedulerPlanWritten(persistedPlan);
-								await logUpgradeAutomationSchedulerEvent('Late write watchdog complete', {
-									utc: new Date().toISOString(),
-									verified: retryVerification.ok,
-									verifyReason: retryVerification.reason,
-									failures: retryVerification.failures
-								});
-							} else {
-								window.schedulerLastLateWriteCycleStamp = cycleStamp;
-							}
-						}
-					}
-				}
-			} catch (e) {
+				} catch (e) {
 				console.error('[Scheduler] Interval error:', e);
 				try { await logUpgradeAutomationSchedulerEvent('Interval error', { utc: new Date().toISOString(), err: String(e?.message || e) }); } catch (e2) {}
 			}
