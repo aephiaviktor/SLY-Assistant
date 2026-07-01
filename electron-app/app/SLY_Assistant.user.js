@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-88
+// @aephia-version 0.7.35-89
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-88'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-89'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -1490,7 +1490,6 @@
 	function isUpgradeAutomationSchedulerPlanValidForHour(payload, settings = {}, now = new Date()) {
 		return !!(
 			payload &&
-			Number(payload.hour) === now.getUTCHours() &&
 			String(payload.cycleStamp || '') === getUpgradeAutomationCycleStamp(now, settings) &&
 			String(payload.targetFinishAtUtc || '') &&
 			Array.isArray(payload.rows) &&
@@ -1582,7 +1581,6 @@
 			const raw = await GM.getValue(UPGRADE_AUTOMATION_SCHEDULER_WRITE_RECEIPT_KEY, '');
 			const receipt = raw ? JSON.parse(raw) : null;
 			if (!receipt) return null;
-			if (Number(receipt.hour) !== now.getUTCHours()) return null;
 			if (String(receipt.cycleStamp || '') !== getUpgradeAutomationCycleStamp(now, settings)) return null;
 			return receipt;
 		} catch (e) {
@@ -5115,6 +5113,39 @@ function renderAssistStats() {
 								verifyReason: retryVerification.reason,
 								failures: retryVerification.failures
 							});
+						}
+					}
+				}
+
+				if (currentMinute <= 10) {
+					const cycleStamp = getUpgradeAutomationCycleStamp(now, globalSettings);
+					if (window.schedulerLastLateWriteCycleStamp !== cycleStamp) {
+						const persistedPlan = await loadUpgradeAutomationSchedulerPlan(globalSettings, now);
+						if (persistedPlan) {
+							const receipt = await loadUpgradeAutomationSchedulerReceipt(globalSettings, now);
+							const verification = await verifyUpgradeAutomationSchedulerPlanWritten(persistedPlan);
+							if (!receipt || !verification.ok) {
+								window.schedulerLastLateWriteCycleStamp = cycleStamp;
+								await logUpgradeAutomationSchedulerEvent('Late write watchdog starting', {
+									utc: now.toISOString(),
+									hasReceipt: !!receipt,
+									verifyReason: verification.reason,
+									rows: persistedPlan.rows.length,
+									target: persistedPlan.targetFinishAtUtc,
+									failures: verification.failures
+								});
+								await applyUpgradeAutomationExecutionToCraftConfig(persistedPlan.rows, { targetFinishAtUtc: persistedPlan.targetFinishAtUtc }, globalSettings, now);
+								await writeUpgradeAutomationSchedulerReceipt('late-watchdog', persistedPlan, globalSettings, now);
+								const retryVerification = await verifyUpgradeAutomationSchedulerPlanWritten(persistedPlan);
+								await logUpgradeAutomationSchedulerEvent('Late write watchdog complete', {
+									utc: new Date().toISOString(),
+									verified: retryVerification.ok,
+									verifyReason: retryVerification.reason,
+									failures: retryVerification.failures
+								});
+							} else {
+								window.schedulerLastLateWriteCycleStamp = cycleStamp;
+							}
 						}
 					}
 				}
