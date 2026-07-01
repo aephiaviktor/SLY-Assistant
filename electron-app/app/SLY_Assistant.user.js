@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-85
+// @aephia-version 0.7.35-86
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-85'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-86'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -1900,11 +1900,11 @@
 
 	async function reconcileUpgradeAutomationLpProcesses(settings = {}, reason = 'scheduler') {
 		const managedCraftLabels = getUpgradeAutomationManagedCraftLabels(settings);
-		const protectedLabels = new Set();
+		const attachedLabels = new Set();
 		const result = {
 			ok: false,
 			reason,
-			protectedLabels: [],
+			attachedLabels: [],
 			bound: [],
 			alreadyAssigned: [],
 			unbound: [],
@@ -1932,7 +1932,7 @@
 					continue;
 				}
 
-				protectedLabels.add(craftLabel);
+				attachedLabels.add(craftLabel);
 				if (process.assignedLabel === craftLabel) {
 					result.alreadyAssigned.push({ craftLabel, craftingId: process.craftingId, component: process.component, completed: process.completed });
 					continue;
@@ -1958,12 +1958,12 @@
 			}
 
 			result.ok = true;
-			result.protectedLabels = Array.from(protectedLabels);
+			result.attachedLabels = Array.from(attachedLabels);
 			await logUpgradeAutomationSchedulerEvent('LP reconcile complete', {
 				reason,
 				activeCount: result.activeCount,
 				completedCount: result.completedCount,
-				protectedLabels: result.protectedLabels,
+				attachedLabels: result.attachedLabels,
 				bound: result.bound,
 				unbound: result.unbound
 			});
@@ -1985,8 +1985,7 @@
 		const cycleStamp = getUpgradeAutomationCycleStamp(now, settings);
 		const managedCraftLabels = getUpgradeAutomationManagedCraftLabels(settings);
 		const completion = await detectUpgradeAutomationCompletionEvent(settings, now);
-		const reconciliation = await reconcileUpgradeAutomationLpProcesses(settings, 'write-' + now.getUTCMinutes());
-		const protectedLabels = new Set(reconciliation.protectedLabels || []);
+		await reconcileUpgradeAutomationLpProcesses(settings, 'write-' + now.getUTCMinutes());
 		const planRowsArr = Array.isArray(planRows) ? planRows : [];
 		const scheduledCraftLabels = new Set();
 		const targetFinishAtUtc = String(schedule?.targetFinishAtUtc || '');
@@ -2006,10 +2005,6 @@
 			const craftLabel = String(row.craftLabel || '');
 			if (!craftLabel) continue;
 			scheduledCraftLabels.add(craftLabel);
-			if (protectedLabels.has(craftLabel)) {
-				await logUpgradeAutomationSchedulerEvent('WRITE protected slot skipped', { craftLabel, item: row.displayName || row.name || '', reason: 'lp_process_attached' });
-				continue;
-			}
 			const existing = await getUpgradeAutomationCraftSlotState(craftLabel);
 			const amount = Math.max(0, Math.floor(Number(row.nextAmount || 0)));
 			const crew = Math.max(0, Math.floor(Number(row.nextCrew || 0)));
@@ -2035,10 +2030,6 @@
 		// Viktor: Clear unscheduled slots - only zero amount and crew
 		for (const craftLabel of managedCraftLabels) {
 			if (scheduledCraftLabels.has(craftLabel)) continue;
-			if (protectedLabels.has(craftLabel)) {
-				await logUpgradeAutomationSchedulerEvent('CLEAR protected unscheduled slot skipped', { craftLabel, reason: 'lp_process_attached' });
-				continue;
-			}
 			const existing = await getUpgradeAutomationCraftSlotState(craftLabel);
 			await saveCraftConfig(craftLabel, {
 				...(existing || {}),
@@ -5021,16 +5012,9 @@ function renderAssistStats() {
 							await logUpgradeAutomationSchedulerEvent('PRE-CLEAR capture skipped', { utc: now.toISOString(), rows: preClearPlan.rows.length, target: preClearPlan.targetFinishAtUtc });
 						}
 						const managedCraftLabels = getUpgradeAutomationManagedCraftLabels(globalSettings);
-						const reconciliation = await reconcileUpgradeAutomationLpProcesses(globalSettings, 'clear-54');
-						const protectedLabels = new Set(reconciliation.protectedLabels || []);
+						await reconcileUpgradeAutomationLpProcesses(globalSettings, 'clear-54');
 					let clearedCount = 0;
-					let protectedCount = 0;
 					for (const craftLabel of managedCraftLabels) {
-						if (protectedLabels.has(craftLabel)) {
-							protectedCount++;
-							await logUpgradeAutomationSchedulerEvent('CLEAR protected slot skipped', { craftLabel, reason: 'lp_process_attached' });
-							continue;
-						}
 						const existing = await getUpgradeAutomationCraftSlotState(craftLabel);
 						if (existing && (Number(existing.amount || 0) > 0 || existing.lpAutomationManaged)) {
 							await saveCraftConfig(craftLabel, {
@@ -5045,7 +5029,7 @@ function renderAssistStats() {
 						}
 					}
 					window.schedulerLastClearedHour = currentHour;
-					await logUpgradeAutomationSchedulerEvent('CLEARED all managed slots', { utc: now.toISOString(), clearedCount, protectedCount });
+					await logUpgradeAutomationSchedulerEvent('CLEARED all managed slots', { utc: now.toISOString(), clearedCount });
 				}
 
 				if (currentMinute >= 56 && currentMinute <= 58 && upgradeAutomationPendingCaptureHour !== currentHour) {
