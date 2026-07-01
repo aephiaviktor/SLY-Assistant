@@ -45,6 +45,98 @@ const loadApp = (win, version, aephiaVersion) => {
 	win.loadFile(path.join(APP_ROOT, 'app', 'index.html'), { query: { version: version, aephiaVersion: aephiaVersion, appInstanceName: APP_INSTANCE_NAME } } )
 }
 
+function serializeCrashValue(value)
+{
+	if (value instanceof Error) {
+		return {
+			name: value.name,
+			message: value.message,
+			stack: value.stack,
+			code: value.code
+		}
+	}
+	if (value && typeof value === 'object') {
+		try {
+			return JSON.parse(JSON.stringify(value))
+		} catch {
+			return String(value)
+		}
+	}
+	return value
+}
+
+function logCrashEvent(type, details = {})
+{
+	const logPath = path.join(APP_ROOT, 'analysis', 'crash-events.jsonl')
+	const event = {
+		timestamp: new Date().toISOString(),
+		app: APP_NAME,
+		appId: APP_ID,
+		instance: APP_INSTANCE_NAME || null,
+		pid: process.pid,
+		ppid: process.ppid,
+		platform: process.platform,
+		versions: {
+			electron: process.versions.electron,
+			chrome: process.versions.chrome,
+			node: process.versions.node
+		},
+		type,
+		details: serializeCrashValue(details)
+	}
+	try {
+		fs.mkdirSync(path.dirname(logPath), { recursive: true })
+		fs.appendFileSync(logPath, `${JSON.stringify(event)}\n`, 'utf8')
+	} catch (error) {
+		console.error('[SLYA] failed to write crash event:', error)
+	}
+	console.error('[SLYA] crash event:', JSON.stringify({ type, details: event.details }))
+}
+
+function attachWindowCrashLogging(win)
+{
+	if (!win || !win.webContents) return
+	win.webContents.on('render-process-gone', (_event, details) => {
+		logCrashEvent('window-render-process-gone', {
+			title: win.getTitle(),
+			url: win.webContents.getURL(),
+			details
+		})
+	})
+	win.webContents.on('unresponsive', () => {
+		logCrashEvent('window-unresponsive', {
+			title: win.getTitle(),
+			url: win.webContents.getURL()
+		})
+	})
+}
+
+function installCrashEventLogging()
+{
+	process.on('uncaughtExceptionMonitor', (error) => {
+		logCrashEvent('uncaughtExceptionMonitor', error)
+	})
+	process.on('unhandledRejection', (reason) => {
+		logCrashEvent('unhandledRejection', reason)
+	})
+	process.on('exit', (code) => {
+		logCrashEvent('process-exit', { code })
+	})
+	app.on('render-process-gone', (_event, webContents, details) => {
+		logCrashEvent('app-render-process-gone', {
+			id: webContents?.id,
+			url: typeof webContents?.getURL === 'function' ? webContents.getURL() : '',
+			details
+		})
+	})
+	app.on('child-process-gone', (_event, details) => {
+		logCrashEvent('child-process-gone', details)
+	})
+	app.on('gpu-process-crashed', (_event, killed) => {
+		logCrashEvent('gpu-process-crashed', { killed })
+	})
+}
+
 const createWindow = (version, aephiaVersion) => {
   const win = new BrowserWindow({
     title: APP_NAME,
@@ -58,6 +150,7 @@ const createWindow = (version, aephiaVersion) => {
   })
   //win.webContents.openDevTools()  
   win.setTitle(APP_NAME + (version ? ` v${version}` : ''))
+  attachWindowCrashLogging(win)
   loadApp(win, version, aephiaVersion)
   return win
 }
@@ -561,6 +654,8 @@ function maybeAutoRestoreLeveldb()
 	}
 }
 
+
+installCrashEventLogging()
 
 app.whenReady().then(async () => {
 // Wrapper-level leveldb audit and auto-restore (before any SLYA save could overwrite evidence)
