@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-84
+// @aephia-version 0.7.35-85
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-84'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-85'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -1532,6 +1532,41 @@
 		await GM.setValue(UPGRADE_AUTOMATION_SCHEDULER_PENDING_PLAN_KEY, JSON.stringify(payload));
 		hydrateUpgradeAutomationSchedulerPlan(payload);
 		return payload;
+	}
+
+	function getUpgradeAutomationSchedulerRowsFromSummary(summary, settings = {}, now = new Date()) {
+		const scheduleState = summary ? getUpgradeAutomationScheduleState(summary, settings, now) : null;
+		const targetFinishAtUtc = scheduleState?.targetFinishAtUtc || '';
+		const rows = Array.isArray(scheduleState?.rows) ? JSON.parse(JSON.stringify(scheduleState.rows)) : [];
+		return { rows, targetFinishAtUtc, scheduleState };
+	}
+
+	async function persistUpgradeAutomationSchedulerPlanFromSummary(stage, summary, settings = {}, now = new Date()) {
+		const capture = getUpgradeAutomationSchedulerRowsFromSummary(summary, settings, now);
+		const payload = await persistUpgradeAutomationSchedulerPlan(stage, capture.rows, { targetFinishAtUtc: capture.targetFinishAtUtc }, settings, now);
+		return { ...capture, payload };
+	}
+
+	async function refreshUpgradeAutomationExecutionSummaryForScheduler(stage, now = new Date(), timeoutMs = 12000) {
+		const startedAt = Date.now();
+		await logUpgradeAutomationSchedulerEvent('CAPTURE refresh starting', { utc: now.toISOString(), stage });
+		const refreshPromise = (async () => {
+			await refreshUpgradeAutomationExecutionSummary();
+			return { ok: true };
+		})().catch(error => ({ ok: false, error }));
+		const timeoutPromise = new Promise(resolve => {
+			setTimeout(() => resolve({ ok: false, timeout: true }), timeoutMs);
+		});
+		const result = await Promise.race([refreshPromise, timeoutPromise]);
+		const elapsedMs = Date.now() - startedAt;
+		if (result?.timeout) {
+			await logUpgradeAutomationSchedulerEvent('CAPTURE refresh timeout', { utc: new Date().toISOString(), stage, elapsedMs, timeoutMs });
+		} else if (result?.ok) {
+			await logUpgradeAutomationSchedulerEvent('CAPTURE refresh complete', { utc: new Date().toISOString(), stage, elapsedMs });
+		} else {
+			await logUpgradeAutomationSchedulerEvent('CAPTURE refresh error', { utc: new Date().toISOString(), stage, elapsedMs, err: String(result?.error?.message || result?.error || 'unknown_error') });
+		}
+		return result;
 	}
 
 	async function loadUpgradeAutomationSchedulerPlan(settings = {}, now = new Date()) {
@@ -4976,12 +5011,18 @@ function renderAssistStats() {
 			const currentHour = now.getUTCHours();
 			const summary = upgradeAutomationExecutionSummary;
 
-			// Viktor: Clear all managed craft slots at xx:54 UTC - set amount=0, crew=0, preserve everything else
-			// This gives 3 staged minutes before the final write at xx:57, still targeting xx:59
-				if (currentMinute === 54 && window.schedulerLastClearedHour !== currentHour) {
-					const managedCraftLabels = getUpgradeAutomationManagedCraftLabels(globalSettings);
-					const reconciliation = await reconcileUpgradeAutomationLpProcesses(globalSettings, 'clear-54');
-					const protectedLabels = new Set(reconciliation.protectedLabels || []);
+				// Viktor: Clear all managed craft slots at xx:54 UTC - set amount=0, crew=0, preserve everything else
+				// This gives 3 staged minutes before the final write at xx:57, still targeting xx:59
+					if (currentMinute === 54 && window.schedulerLastClearedHour !== currentHour) {
+						const preClearPlan = await persistUpgradeAutomationSchedulerPlanFromSummary('pre-clear-54', summary, globalSettings, now);
+						if (preClearPlan.payload) {
+							await logUpgradeAutomationSchedulerEvent('PRE-CLEAR captured pending plan', { utc: now.toISOString(), rows: preClearPlan.rows.length, target: preClearPlan.targetFinishAtUtc });
+						} else {
+							await logUpgradeAutomationSchedulerEvent('PRE-CLEAR capture skipped', { utc: now.toISOString(), rows: preClearPlan.rows.length, target: preClearPlan.targetFinishAtUtc });
+						}
+						const managedCraftLabels = getUpgradeAutomationManagedCraftLabels(globalSettings);
+						const reconciliation = await reconcileUpgradeAutomationLpProcesses(globalSettings, 'clear-54');
+						const protectedLabels = new Set(reconciliation.protectedLabels || []);
 					let clearedCount = 0;
 					let protectedCount = 0;
 					for (const craftLabel of managedCraftLabels) {
@@ -5020,64 +5061,61 @@ function renderAssistStats() {
 					}
 				}
 
-				// Viktor: Capture optimizer output at xx:55 UTC - once per hour
-				if (currentMinute === 55 && upgradeAutomationPendingCaptureHour !== currentHour) {
-					await refreshUpgradeAutomationExecutionSummary();
-					const freshSummary = upgradeAutomationExecutionSummary;
-					const scheduleState = freshSummary ? getUpgradeAutomationScheduleState(freshSummary, globalSettings, now) : null;
-					const targetFinishAtUtc = scheduleState?.targetFinishAtUtc || '';
-					const rows = Array.isArray(scheduleState?.rows) ? JSON.parse(JSON.stringify(scheduleState.rows)) : [];
-					if (rows.length && targetFinishAtUtc) {
-						await persistUpgradeAutomationSchedulerPlan('capture-55', rows, { targetFinishAtUtc }, globalSettings, now);
-						upgradeAutomationSchedulerDebug = JSON.stringify({
-							now: now.toISOString(),
-							reason: 'captured',
-							status: 'captured',
-						pendingRowCount: rows.length,
-							pendingCaptureHour: currentHour,
-							targetFinishAtUtc
-						});
-						window.schedulerDebug = upgradeAutomationSchedulerDebug;
-						await logUpgradeAutomationSchedulerEvent('CAPTURED', { utc: now.toISOString(), rows: rows.length, target: targetFinishAtUtc });
-					} else {
-						await logUpgradeAutomationSchedulerEvent('Skipped capture', { utc: now.toISOString(), rows: rows?.length || 0, target: targetFinishAtUtc });
+					// Viktor: Capture optimizer output at xx:55 UTC - once per hour
+					if (currentMinute === 55 && window.schedulerLastCaptureHour !== currentHour) {
+						window.schedulerLastCaptureHour = currentHour;
+						await refreshUpgradeAutomationExecutionSummaryForScheduler('capture-55', now);
+						const freshSummary = upgradeAutomationExecutionSummary;
+						const capture = await persistUpgradeAutomationSchedulerPlanFromSummary('capture-55', freshSummary, globalSettings, now);
+						if (capture.payload) {
+							upgradeAutomationSchedulerDebug = JSON.stringify({
+								now: now.toISOString(),
+								reason: 'captured',
+								status: 'captured',
+							pendingRowCount: capture.rows.length,
+								pendingCaptureHour: currentHour,
+								targetFinishAtUtc: capture.targetFinishAtUtc
+							});
+							window.schedulerDebug = upgradeAutomationSchedulerDebug;
+							await logUpgradeAutomationSchedulerEvent('CAPTURED', { utc: now.toISOString(), rows: capture.rows.length, target: capture.targetFinishAtUtc });
+						} else {
+							await logUpgradeAutomationSchedulerEvent('Skipped capture', { utc: now.toISOString(), rows: capture.rows?.length || 0, target: capture.targetFinishAtUtc });
+						}
 					}
-				}
 
-				// Viktor: First scheduler pass at xx:56 UTC - refresh debug/snapshot only, do not write config yet
-				if (currentMinute === 56 && upgradeAutomationPendingCaptureHour === currentHour && window.schedulerLastPreviewHour !== currentHour) {
-					await refreshUpgradeAutomationExecutionSummary();
-					const freshSummary = upgradeAutomationExecutionSummary;
-					const previewState = freshSummary ? getUpgradeAutomationScheduleState(freshSummary, globalSettings, now) : null;
-					if (Array.isArray(previewState?.rows) && previewState.rows.length && previewState?.targetFinishAtUtc) {
-						await persistUpgradeAutomationSchedulerPlan('preview-56', previewState.rows, { targetFinishAtUtc: previewState.targetFinishAtUtc }, globalSettings, now);
+					// Viktor: First scheduler pass at xx:56 UTC - refresh debug/snapshot only, do not write config yet
+					if (currentMinute === 56 && window.schedulerLastPreviewHour !== currentHour) {
 						window.schedulerLastPreviewHour = currentHour;
-						renderLpAutomationContent();
-						await logUpgradeAutomationSchedulerEvent('PREVIEW refreshed pending plan', { utc: now.toISOString(), rows: previewState.rows.length, target: previewState.targetFinishAtUtc });
-					} else {
-						await logUpgradeAutomationSchedulerEvent('Skipped preview refresh', { utc: now.toISOString(), rows: previewState?.rows?.length || 0, target: previewState?.targetFinishAtUtc || '' });
+						await refreshUpgradeAutomationExecutionSummaryForScheduler('preview-56', now);
+						const freshSummary = upgradeAutomationExecutionSummary;
+						const preview = await persistUpgradeAutomationSchedulerPlanFromSummary('preview-56', freshSummary, globalSettings, now);
+						if (preview.payload) {
+							renderLpAutomationContent();
+							await logUpgradeAutomationSchedulerEvent('PREVIEW refreshed pending plan', { utc: now.toISOString(), rows: preview.rows.length, target: preview.targetFinishAtUtc });
+						} else {
+							await logUpgradeAutomationSchedulerEvent('Skipped preview refresh', { utc: now.toISOString(), rows: preview.rows?.length || 0, target: preview.targetFinishAtUtc || '' });
+						}
 					}
-				}
 
-				// Viktor: Write captured rows at xx:57 UTC - once per hour, using the refreshed rows from xx:56
-				if (currentMinute === 57 && upgradeAutomationPendingCaptureHour === currentHour) {
-					const persistedPlan = await loadUpgradeAutomationSchedulerPlan(globalSettings, now);
-					const rows = persistedPlan?.rows || upgradeAutomationPendingPlanRows;
-					const schedule = persistedPlan ? { targetFinishAtUtc: persistedPlan.targetFinishAtUtc } : (upgradeAutomationLastPlanSchedule || {});
-					if (Array.isArray(rows) && rows.length && schedule?.targetFinishAtUtc) {
-						await logUpgradeAutomationSchedulerEvent('WRITE starting', { utc: now.toISOString(), rows: rows.length, target: schedule.targetFinishAtUtc });
-						await applyUpgradeAutomationExecutionToCraftConfig(rows, schedule, globalSettings, now);
-						await writeUpgradeAutomationSchedulerReceipt('write-57', persistedPlan || buildUpgradeAutomationSchedulerPlanPayload('write-57-memory', rows, schedule, globalSettings, now), globalSettings, now);
-						upgradeAutomationPendingPlanRows = null;
-						upgradeAutomationPendingCaptureHour = null;
-						upgradeAutomationLastPlanSchedule = null;
+					// Viktor: Write captured rows at xx:57 UTC - once per hour, using the refreshed rows from xx:56
+					if (currentMinute === 57 && upgradeAutomationLastWrittenHour !== currentHour) {
 						upgradeAutomationLastWrittenHour = currentHour;
-					window.schedulerLastPreviewHour = null;
-						window.schedulerPendingPlanRows = null;
-						window.schedulerPendingCaptureHour = null;
-						window.schedulerLastPlanSchedule = null;
-						await logUpgradeAutomationSchedulerEvent('WRITE complete', { utc: new Date().toISOString(), rows: rows.length, target: schedule.targetFinishAtUtc });
-						renderLpAutomationContent(); // Viktor: update the LP Automation panel UI with fresh debug info after write
+						const persistedPlan = await loadUpgradeAutomationSchedulerPlan(globalSettings, now);
+						const rows = persistedPlan?.rows || [];
+						const schedule = persistedPlan ? { targetFinishAtUtc: persistedPlan.targetFinishAtUtc } : {};
+						if (Array.isArray(rows) && rows.length && schedule?.targetFinishAtUtc) {
+							await logUpgradeAutomationSchedulerEvent('WRITE starting', { utc: now.toISOString(), rows: rows.length, target: schedule.targetFinishAtUtc });
+							await applyUpgradeAutomationExecutionToCraftConfig(rows, schedule, globalSettings, now);
+							await writeUpgradeAutomationSchedulerReceipt('write-57', persistedPlan, globalSettings, now);
+							upgradeAutomationPendingPlanRows = null;
+							upgradeAutomationPendingCaptureHour = null;
+							upgradeAutomationLastPlanSchedule = null;
+							window.schedulerLastPreviewHour = null;
+							window.schedulerPendingPlanRows = null;
+							window.schedulerPendingCaptureHour = null;
+							window.schedulerLastPlanSchedule = null;
+							await logUpgradeAutomationSchedulerEvent('WRITE complete', { utc: new Date().toISOString(), rows: rows.length, target: schedule.targetFinishAtUtc });
+							renderLpAutomationContent(); // Viktor: update the LP Automation panel UI with fresh debug info after write
 					} else {
 						await logUpgradeAutomationSchedulerEvent('Write skipped', { utc: now.toISOString(), rows: rows?.length || 0, target: schedule?.targetFinishAtUtc || '' });
 					}
