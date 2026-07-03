@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-95
+// @aephia-version 0.7.35-96
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-95'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-96'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -592,6 +592,53 @@
 		cLog(1, `[SLYA-STATE-BAK] restored weak current state from external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'}`);
 		try { await appendUpgradeAutomationLog(`[SLYA-STATE-BAK] restored weak current state from external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'}`); } catch (e) {}
 		return true;
+	}
+
+	// Post-reload reconcile: make sure the current cycle's optimizer plan is in
+	// GM even if the optimizer hasn't captured it yet this hour. The scheduler
+	// captures at xx:57 and writes at xx:57-:58. If the panel reloads in the
+	// middle of a non-standard cycle (e.g. phantom starbase was just resumed),
+	// the persisted plan may be missing and the slot loops would have nothing
+	// to act on for the current xx:59 target window. This re-derives the plan
+	// from the LP execution summary, persists it, and writes the craft configs
+	// immediately when the write deadline is already past.
+	async function reconcileUpgradeAutomationCraftConfigsAfterReload(reason) {
+		try {
+			if (typeof globalSettings === 'undefined' || !globalSettings || !globalSettings.upgradeAutomationEnabled) return;
+			const now = new Date();
+			const persistedPlan = await loadUpgradeAutomationSchedulerPlan(globalSettings, now);
+			if (persistedPlan && isUpgradeAutomationSchedulerPlanValidForHour(persistedPlan, globalSettings, now)) {
+				hydrateUpgradeAutomationSchedulerPlan(persistedPlan);
+				try { cLog(1, `[SLYA-RECONCILE] hydrated persisted plan cycleStamp=${persistedPlan.cycleStamp} rows=${(persistedPlan.rows || []).length} reason=${String(reason || 'unknown')}`); } catch (e) {}
+				return;
+			}
+			if (!upgradeAutomationExecutionSummary) {
+				try {
+					const fetched = await fetchUpgradeAutomationExecutionSummary();
+					if (fetched) {
+						upgradeAutomationExecutionSummary = fetched;
+						window.schedulerSummary = upgradeAutomationExecutionSummary;
+					}
+				} catch (e) { /* fall through; getUpgradeAutomationSchedulerRowsFromSummary will return empty */ }
+			}
+			const { rows, targetFinishAtUtc } = getUpgradeAutomationSchedulerRowsFromSummary(upgradeAutomationExecutionSummary || {}, globalSettings, now);
+			if (!Array.isArray(rows) || !rows.length || !targetFinishAtUtc) {
+				try { cLog(1, `[SLYA-RECONCILE] no current cycle plan derivable; waiting for xx:57 capture reason=${String(reason || 'unknown')}`); } catch (e) {}
+				return;
+			}
+			const schedule = { targetFinishAtUtc };
+			await persistUpgradeAutomationSchedulerPlan('reload-reconcile', rows, schedule, globalSettings, now);
+			const writeAfter = getUpgradeAutomationSchedulerWriteAfterUtc({ targetFinishAtUtc });
+			if (writeAfter && now.getTime() >= new Date(writeAfter).getTime()) {
+				await applyUpgradeAutomationExecutionToCraftConfig(rows, schedule, globalSettings, now);
+				await writeUpgradeAutomationSchedulerReceipt('reload-reconcile', { rows, targetFinishAtUtc }, globalSettings, now);
+				try { cLog(1, `[SLYA-RECONCILE] wrote current cycle plan immediately cycleStamp=${getUpgradeAutomationCycleStamp(now, globalSettings)} rows=${rows.length} target=${targetFinishAtUtc} reason=${String(reason || 'unknown')}`); } catch (e) {}
+			} else {
+				try { cLog(1, `[SLYA-RECONCILE] persisted current cycle plan cycleStamp=${getUpgradeAutomationCycleStamp(now, globalSettings)} rows=${rows.length} target=${targetFinishAtUtc} writeAfter=${writeAfter} reason=${String(reason || 'unknown')}`); } catch (e) {}
+			}
+		} catch (e) {
+			try { cLog(1, '[SLYA-RECONCILE] error:', e && e.message || e); } catch (_) {}
+		}
 	}
 
 	async function refreshUpgradeAutomationInfluxStats() {
@@ -4574,6 +4621,7 @@
 		const rawSettingsData = await GM.getValue(settingsGmKey, '{}');
 		globalSettings = JSON.parse(rawSettingsData);
 		await restoreSlyaStateBackupIfCurrentSettingsWeak('load-global-settings');
+		await reconcileUpgradeAutomationCraftConfigsAfterReload('load-global-settings');
 		try {
 			const loadedKeyCount = Object.keys(globalSettings || {}).length;
 			const loadedKeyLen = (globalSettings?.mySecretKey || '').length;
