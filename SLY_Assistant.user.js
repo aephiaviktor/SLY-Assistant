@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-92
+// @aephia-version 0.7.35-93
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-92'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-93'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -1342,6 +1342,9 @@
 				: (liveFinishMs >= globalTargetMs && liveFinishMs <= nextNextXx59Ms) ? nextNextXx59Ms
 				: globalTargetMs;
 			let effectiveStartMs = liveFinishMs || now.getTime();
+			let amountCapReason = '';
+			let case3CurrentPhaseRate = 0;
+			let case3SafeRuntimeSec = 0;
 			if (item.crewDelta > 0) {
 				let released = 0;
 				let extraCrewAvailableAt = effectiveStartMs;
@@ -1351,12 +1354,33 @@
 					extraCrewAvailableAt = donor.finishMs;
 					if (released >= item.crewDelta) break;
 				}
-				if (released < item.crewDelta) extraCrewAvailableAt = nextXx59ForRow;
-				effectiveStartMs = Math.max(effectiveStartMs, extraCrewAvailableAt);
+				if (released < item.crewDelta) {
+					// Insufficient crew for the full planned run this cycle. Do not roll
+					// effectiveStartMs to nextXx59ForRow and do not use the final-phase
+					// rate for the whole window - that combination produced oversized
+					// amounts (e.g. 2.79M Framework). Branch on what crew the slot has now.
+					if (item.currentCrewActive > 0) {
+						const secondsPerUnit = Math.max(1, Number(row.secondsPerUnit || 1));
+						case3CurrentPhaseRate = Math.floor(item.currentCrewActive * 3600 / secondsPerUnit);
+						const case3StartMs = Math.max(effectiveStartMs, now.getTime());
+						case3SafeRuntimeSec = Math.max(0, Math.floor((nextXx59ForRow - case3StartMs - landingBufferSeconds * 1000) / 1000));
+						amountCapReason = 'insufficient_crew_current_phase';
+					} else {
+						case3CurrentPhaseRate = 0;
+						case3SafeRuntimeSec = 0;
+						amountCapReason = 'insufficient_crew_no_crew';
+					}
+				} else {
+					effectiveStartMs = Math.max(effectiveStartMs, extraCrewAvailableAt);
+				}
 			}
 			const nextRuntimeMs = Math.max(0, nextXx59ForRow - effectiveStartMs - landingBufferSeconds * 1000);
 			const nextRuntimeSec = Math.floor(nextRuntimeMs / 1000);
-			const nextAmount = Math.max(0, Math.floor(upgradingHour * (nextRuntimeSec / 3600)));
+			const nextAmount = amountCapReason
+				? (amountCapReason === 'insufficient_crew_current_phase'
+					? Math.max(0, Math.floor(case3CurrentPhaseRate * case3SafeRuntimeSec / 3600))
+					: 0)
+				: Math.max(0, Math.floor(upgradingHour * (nextRuntimeSec / 3600)));
 			row.nextXx59Utc = new Date(nextXx59ForRow).toISOString();
 			row.nextRuntime = nextRuntimeSec;
 			row.nextAmount = nextAmount;
@@ -1365,6 +1389,7 @@
 			row.crewDelta = item.crewDelta;
 			row.availableCrew = item.availableCrew;
 			row.effectiveStartMs = effectiveStartMs;
+			row.amountCapReason = amountCapReason || '';
 			if (/^\s*Paused\s*\[/i.test(item.liveState || '') && !liveFinishMs) {
 				console.log('[Scheduler][PausedNoFinishDebug]', {
 					craft: row.craftLabel,
@@ -1388,10 +1413,27 @@
 					targetUtc: new Date(nextXx59ForRow).toISOString(),
 					nextRuntimeSec,
 					nowUtc: now.toISOString(),
-					rolledToNextUtcDay: !!(liveFinishMs && liveFinishMs > now.getTime() + 12 * 3600 * 1000)
+					rolledToNextUtcDay: !!(liveFinishMs && liveFinishMs > now.getTime() + 12 * 3600 * 1000),
+					amountCapReason: amountCapReason || ''
 				};
 				console.log('[Scheduler][ZeroAmountDebug]', zeroAmountDebug);
 				appendUpgradeAutomationLog('[Scheduler][ZeroAmountDebug] ' + JSON.stringify(zeroAmountDebug)).catch(() => {});
+			}
+			if (amountCapReason) {
+				const insufficientDebug = {
+					craft: row.craftLabel,
+					reason: amountCapReason,
+					currentCrewActive: item.currentCrewActive,
+					plannedCrew: item.plannedCrew,
+					crewDelta: item.crewDelta,
+					case3CurrentPhaseRate,
+					case3SafeRuntimeSec,
+					nextAmount,
+					targetUtc: new Date(nextXx59ForRow).toISOString(),
+					nowUtc: now.toISOString()
+				};
+				console.log('[Scheduler][InsufficientCrewDebug]', insufficientDebug);
+				appendUpgradeAutomationLog('[Scheduler][InsufficientCrewDebug] ' + JSON.stringify(insufficientDebug)).catch(() => {});
 			}
 		}
 
