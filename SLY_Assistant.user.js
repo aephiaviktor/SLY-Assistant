@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-91
+// @aephia-version 0.7.35-92
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-91'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-92'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -1446,6 +1446,21 @@
 		return Array.from({ length: UPGRADE_AUTOMATION_MANAGED_CRAFT_SLOTS }, (_, i) => 'craft' + (startCraftSlot + i));
 	}
 
+	function getUpgradeAutomationFixedCraftConfigForLabel(label = '', settings = {}) {
+		const match = String(label || '').trim().match(/^craft(\d+)$/i);
+		if (!match) return null;
+		const startCraftSlot = Math.max(1, parseIntDefault(settings.upgradeAutomationStartCraftSlot, 1));
+		const orderIndex = Number(match[1]) - startCraftSlot;
+		const componentName = UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_ORDER[orderIndex];
+		if (!componentName) return null;
+		const normalizedInstance = normalizeUpgradeAutomationLpInstance(settings.upgradeAutomationLpInstance || 'MUD');
+		const factionCfg = UPGRADE_AUTOMATION_FACTION_CONFIG[normalizedInstance] || UPGRADE_AUTOMATION_FACTION_CONFIG.MUD;
+		return {
+			item: componentName === 'Survey Data Unit' ? 'SDU Upgrade' : (componentName + ' Upgrade'),
+			coordinates: String(factionCfg?.phantomCrewCoords || '0,-24')
+		};
+	}
+
 	function isUpgradeAutomationSlotActive(slot = {}) {
 		if (!slot) return false;
 		const hasManagedFlag = !!slot.lpAutomationManaged;
@@ -1982,9 +1997,12 @@
 		const planRowsArr = Array.isArray(planRows) ? planRows : [];
 		const scheduledCraftLabels = new Set();
 		const targetFinishAtUtc = String(schedule?.targetFinishAtUtc || '');
-		const writeSlotState = async (craftLabel, existing, amount, crew) => {
+		const writeSlotState = async (craftLabel, row, existing, amount, crew) => {
+			const fixedCraftConfig = getUpgradeAutomationFixedCraftConfigForLabel(craftLabel, settings) || {};
 			await saveCraftConfig(craftLabel, {
 				...(existing || {}),
+				coordinates: String(row?.coordinates || fixedCraftConfig.coordinates || existing?.coordinates || ''),
+				item: String(row?.craftItem || fixedCraftConfig.item || existing?.item || ''),
 				amount,
 				crew,
 				lpAutomationManaged: true,
@@ -2008,24 +2026,27 @@
 			row.writtenUph = writtenUph;
 			row.writtenAtUtc = now.toISOString();
 			row.impliedDurationSec = impliedDurationSec;
-			await writeSlotState(craftLabel, existing, amount, crew);
+			await writeSlotState(craftLabel, row, existing, amount, crew);
 			let readBack = await getUpgradeAutomationCraftSlotState(craftLabel);
 			const missingAmount = amount > 0 && Math.max(0, Math.floor(Number(readBack?.amount || 0))) <= 0;
 			const missingCrew = crew > 0 && Math.max(0, Math.floor(Number(readBack?.crew || 0))) <= 0;
 			if (missingAmount || missingCrew) {
 				console.log('[Scheduler][RetryWrite]', craftLabel, 'reason=', [missingAmount ? 'missing_amount' : '', missingCrew ? 'missing_crew' : ''].filter(Boolean).join('+'), 'expectedAmount=', amount, 'expectedCrew=', crew, 'actualAmount=', Math.floor(Number(readBack?.amount || 0)), 'actualCrew=', Math.floor(Number(readBack?.crew || 0)));
-				await writeSlotState(craftLabel, readBack || existing, amount, crew);
+				await writeSlotState(craftLabel, row, readBack || existing, amount, crew);
 				readBack = await getUpgradeAutomationCraftSlotState(craftLabel);
 			}
 			console.log('[Scheduler] WROTE', craftLabel, 'amount=', amount, 'crew=', crew, 'uph=', writtenUph, 'runtime=', Number(row.nextRuntime || 0), 'impliedDurationSec=', impliedDurationSec, 'readBackAmount=', Math.floor(Number(readBack?.amount || 0)), 'readBackCrew=', Math.floor(Number(readBack?.crew || 0)));
 		}
 
-		// Viktor: Clear unscheduled slots - only zero amount and crew
+		// Viktor: Clear unscheduled slots - reassert fixed item/coordinates and zero amount/crew
 		for (const craftLabel of managedCraftLabels) {
 			if (scheduledCraftLabels.has(craftLabel)) continue;
 			const existing = await getUpgradeAutomationCraftSlotState(craftLabel);
+			const fixedCraftConfig = getUpgradeAutomationFixedCraftConfigForLabel(craftLabel, settings) || {};
 			await saveCraftConfig(craftLabel, {
 				...(existing || {}),
+				coordinates: String(fixedCraftConfig.coordinates || existing?.coordinates || ''),
+				item: String(fixedCraftConfig.item || existing?.item || ''),
 				amount: 0,
 				crew: 0,
 				lpAutomationManaged: false,
@@ -5135,17 +5156,24 @@ function renderAssistStats() {
 				const currentHour = now.getUTCHours();
 				const summary = upgradeAutomationExecutionSummary;
 
-				// Viktor: Clear all managed craft slots at xx:54 UTC - set amount=0, crew=0, preserve everything else
-				// This gives 3 staged minutes before the final write at xx:57, still targeting xx:59
-					if (currentMinute === 54 && window.schedulerLastClearedHour !== currentHour) {
-						const preClearPlan = await persistUpgradeAutomationSchedulerPlanFromSummary('pre-clear-54', summary, globalSettings, now);
+				// Viktor: Deadline-based pre-clear. The clear for a cycle must happen before that
+				// cycle's write deadline. This replaces the exact-minute :54 guard so a delayed
+				// scheduler tick (e.g. 4 min gap from Electron/Chromium load) still clears old
+				// values before the write, and does not leave stale amount/crew in slots.
+					{
+						const cycleStamp = getUpgradeAutomationCycleStamp(now, globalSettings);
+						const cycleTarget = getUpgradeAutomationNextTargetWindow(now, globalSettings);
+						const cycleWriteAfterMs = cycleTarget && cycleTarget.targetFinishAt ? cycleTarget.targetFinishAt.getTime() - 2 * 60 * 1000 : Number.POSITIVE_INFINITY;
+						const clearDue = now.getTime() >= cycleWriteAfterMs - 3 * 60 * 1000;
+						if (clearDue && window.schedulerLastClearedCycleStamp !== cycleStamp) {
+						const preClearPlan = await persistUpgradeAutomationSchedulerPlanFromSummary('pre-clear-deadline', summary, globalSettings, now);
 						if (preClearPlan.payload) {
-							await logUpgradeAutomationSchedulerEvent('PRE-CLEAR captured pending plan', { utc: now.toISOString(), rows: preClearPlan.rows.length, target: preClearPlan.targetFinishAtUtc });
+							await logUpgradeAutomationSchedulerEvent('PRE-CLEAR captured pending plan', { utc: now.toISOString(), rows: preClearPlan.rows.length, target: preClearPlan.targetFinishAtUtc, reason: 'deadline' });
 						} else {
-							await logUpgradeAutomationSchedulerEvent('PRE-CLEAR capture skipped', { utc: now.toISOString(), rows: preClearPlan.rows.length, target: preClearPlan.targetFinishAtUtc });
+							await logUpgradeAutomationSchedulerEvent('PRE-CLEAR capture skipped', { utc: now.toISOString(), rows: preClearPlan.rows.length, target: preClearPlan.targetFinishAtUtc, reason: 'deadline' });
 						}
 						const managedCraftLabels = getUpgradeAutomationManagedCraftLabels(globalSettings);
-						await reconcileUpgradeAutomationLpProcesses(globalSettings, 'clear-54');
+						await reconcileUpgradeAutomationLpProcesses(globalSettings, 'clear-deadline');
 					let clearedCount = 0;
 					for (const craftLabel of managedCraftLabels) {
 						const existing = await getUpgradeAutomationCraftSlotState(craftLabel);
@@ -5156,13 +5184,14 @@ function renderAssistStats() {
 							crew: 0,
 							lpAutomationManaged: false,
 							lpAutomationUpdatedAt: now.toISOString(),
-								lpAutomationCycleStamp: getUpgradeAutomationCycleStamp(now, globalSettings)
-							}, 'lp-auto-clear-staged-min-54');
+								lpAutomationCycleStamp: cycleStamp
+							}, 'lp-auto-clear-staged-deadline');
 							clearedCount++;
 						}
 					}
-					window.schedulerLastClearedHour = currentHour;
-					await logUpgradeAutomationSchedulerEvent('CLEARED all managed slots', { utc: now.toISOString(), clearedCount });
+					window.schedulerLastClearedCycleStamp = cycleStamp;
+					await logUpgradeAutomationSchedulerEvent('CLEARED all managed slots', { utc: now.toISOString(), clearedCount, cycleStamp, reason: 'deadline' });
+				}
 				}
 
 				if (currentMinute >= 56 && currentMinute <= 58 && upgradeAutomationPendingCaptureHour !== currentHour) {
