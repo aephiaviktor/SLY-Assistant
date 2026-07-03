@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-93
+// @aephia-version 0.7.35-94
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-93'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-94'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -1819,6 +1819,115 @@
 			return raw ? JSON.parse(raw) : {};
 		} catch (e) {
 			return {};
+		}
+	}
+
+	// Read-only panel refresh for non-LP-managed craft slots.
+	// Walks each non-LP slot's saved state, re-queries on-chain CraftingInstance +
+	// CraftingProcess accounts at the slot's craftingCoords, and updates the
+	// displayed `state` text if the slot's saved `craftingId` is no longer live
+	// on-chain (so the panel doesn't keep showing a stale "Waiting for crew" etc.).
+	// Does NOT mutate craftingId. Does NOT call execCancelCraft. Does NOT touch
+	// LP-managed slots. Does NOT write back to GM. Display-only, safe to run on
+	// a timer.
+	async function refreshNonLpCraftPanelFromChain() {
+		if (typeof sageProgram === 'undefined' || !sageProgram || !sageProgram.account || !sageProgram.account.craftingInstance) return;
+		if (typeof craftingProgram === 'undefined' || !craftingProgram || !craftingProgram.account || !craftingProgram.account.craftingProcess) return;
+		if (typeof userProfileAcct === 'undefined' || !userProfileAcct) return;
+		try {
+			const settings = (typeof globalSettings !== 'undefined' && globalSettings) ? globalSettings : {};
+			const totalCraftingJobs = Math.max(0, parseIntDefault(settings.craftingJobs, 0));
+			if (!totalCraftingJobs) return;
+			const startCraftSlot = Math.max(1, parseIntDefault(settings.upgradeAutomationStartCraftSlot, 1));
+			const managedLabels = new Set(getUpgradeAutomationManagedCraftLabels(settings));
+
+			// Build the list of non-LP slot labels: 1..totalCraftingJobs minus managed.
+			const nonLpLabels = [];
+			for (let i = 1; i <= totalCraftingJobs; i++) {
+				const label = 'craft' + i;
+				if (managedLabels.has(label)) continue;
+				nonLpLabels.push(label);
+			}
+			if (!nonLpLabels.length) return;
+
+			// Read each slot's saved state once. Skip slots without craftingCoords
+			// (never started) or without a craftingId (idle).
+			const slotByLabel = new Map();
+			const slotByCoords = new Map();
+			for (const label of nonLpLabels) {
+				let slot;
+				try {
+					const raw = await GM.getValue(label, '{}');
+					slot = raw ? JSON.parse(raw) : {};
+				} catch (e) { continue; }
+				const craftingId = Math.floor(Number(slot && slot.craftingId || 0));
+				if (!craftingId) continue;
+				const coords = String((slot && slot.craftingCoords) || (slot && slot.coordinates) || '').trim();
+				if (!coords) continue;
+				slotByLabel.set(label, { slot, craftingId, coords });
+				if (!slotByCoords.has(coords)) slotByCoords.set(coords, []);
+				slotByCoords.get(coords).push(label);
+			}
+			if (!slotByCoords.size) return;
+
+			let updated = 0;
+			for (const [coords, labels] of slotByCoords) {
+				const coordParts = coords.split(',').map(v => parseInt(String(v).trim(), 10));
+				if (coordParts.length !== 2 || !coordParts.every(Number.isFinite)) continue;
+				let starbase;
+				try { starbase = await getStarbaseFromCoords(coordParts[0], coordParts[1], true); } catch (e) { continue; }
+				if (!starbase || !starbase.publicKey) continue;
+				let starbasePlayer;
+				try { starbasePlayer = await getStarbasePlayer(userProfileAcct, starbase.publicKey); } catch (e) { continue; }
+				const starbasePlayerPk = starbasePlayer ? (starbasePlayer.publicKey || starbasePlayer) : null;
+				if (!starbasePlayerPk) continue;
+
+				let craftingInstances;
+				try {
+					craftingInstances = await sageProgram.account.craftingInstance.all([
+						{ memcmp: { offset: 11, bytes: starbasePlayerPk.toBase58() } }
+					]);
+				} catch (e) { continue; }
+
+				// Build the set of live craftingIds across all instances at this starbase.
+				const liveCraftingIds = new Set();
+				for (const craftingInstance of craftingInstances) {
+					let craftingProcesses;
+					try {
+						craftingProcesses = await craftingProgram.account.craftingProcess.all([
+							{ memcmp: { offset: 17, bytes: craftingInstance.publicKey.toBase58() } }
+						]);
+					} catch (e) { continue; }
+					for (const cp of craftingProcesses) {
+						try {
+							const cid = cp && cp.account && cp.account.craftingId && cp.account.craftingId.toNumber
+								? cp.account.craftingId.toNumber()
+								: Number(cp && cp.account && cp.account.craftingId || 0);
+							if (cid) liveCraftingIds.add(cid);
+						} catch (e) { /* skip */ }
+					}
+				}
+
+				// For each slot at these coords, if its saved craftingId is no longer
+				// live on-chain, the slot is stale: update the displayed state to
+				// 'Idle' and re-render. Do NOT write back to GM.
+				for (const label of labels) {
+					const rec = slotByLabel.get(label);
+					if (!rec) continue;
+					if (liveCraftingIds.has(rec.craftingId)) continue;
+					const currentState = String((rec.slot && rec.slot.state) || '');
+					if (currentState === 'Idle') continue;
+					try { cLog(2, FleetTimeStamp(label), '[CRAFT-PANEL-STALE] saved craftingId', rec.craftingId, 'not found in live processes at', coords + '; displaying Idle'); } catch (e) {}
+					try { updateFleetState({ label, state: 'Idle' }, 'Idle', true); } catch (e) {}
+					updated += 1;
+				}
+			}
+
+			if (updated > 0) {
+				try { renderAssistStats(); } catch (e) {}
+			}
+		} catch (e) {
+			try { cLog(1, '[CRAFT-PANEL-REFRESH] error:', e && e.message || e); } catch (_) {}
 		}
 	}
 
@@ -5183,6 +5292,7 @@ function renderAssistStats() {
 	});
 	setInterval(() => { refreshUpgradeAutomationInfluxStats(); }, 5 * 60 * 1000);
 	setInterval(() => { refreshUpgradeAutomationExecutionSummary(); }, 5 * 60 * 1000);
+	setInterval(() => { refreshNonLpCraftPanelFromChain(); }, 5 * 60 * 1000);
 	setInterval(async () => {
 		try {
 				if (!globalSettings.upgradeAutomationEnabled) return;
