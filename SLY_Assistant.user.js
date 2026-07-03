@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-94
+// @aephia-version 0.7.35-95
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-94'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-95'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -570,7 +570,23 @@
 
 		await GM.setValue(settingsGmKey, JSON.stringify(backup.settings));
 		for (const [key, value] of Object.entries(backup.fleetConfigs || {})) await GM.setValue(key, JSON.stringify(value));
-		for (const [key, value] of Object.entries(backup.craftConfigs || {})) await GM.setValue(key, JSON.stringify(value));
+		// craftConfigs: only restore the user-persistent fields. The volatile
+		// runtime state (state, craftingId, craftingCoords, feeAtlas, amount,
+		// nextAmount, nextRuntime, lpAutomationUpdatedAt, lpAutomationCycleStamp,
+		// errorCount) is re-derived on reload from on-chain via
+		// recoverCraftingProcessesForAllSlots and from the optimizer's next cycle
+		// write via applyUpgradeAutomationExecutionToCraftConfig. Restoring the
+		// raw backup values would surface stale "Waiting for crew" / past
+		// nextFinishAt to the panel.
+		const PERSISTENT_CRAFT_CONFIG_KEYS = ['coordinates', 'item', 'special', 'belowAmount'];
+		for (const [key, value] of Object.entries(backup.craftConfigs || {})) {
+			if (!value || typeof value !== 'object') continue;
+			const filtered = {};
+			for (const k of PERSISTENT_CRAFT_CONFIG_KEYS) {
+				if (value[k] !== undefined) filtered[k] = value[k];
+			}
+			if (Object.keys(filtered).length) await GM.setValue(key, JSON.stringify(filtered));
+		}
 		for (const [key, value] of Object.entries(backup.extraState || {})) await GM.setValue(key, JSON.stringify(value));
 		globalSettings = cloneForSlyaStateBackup(backup.settings);
 		cLog(1, `[SLYA-STATE-BAK] restored weak current state from external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'}`);
