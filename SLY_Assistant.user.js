@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-96
+// @aephia-version 0.7.35-97
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-96'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-97'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -11565,6 +11565,18 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		let fleetAcctInfo = await getAccountInfo(userFleets[i].label, 'full fleet info', userFleets[i].publicKey);
 		let [fleetState, extra] = getFleetState(fleetAcctInfo, userFleets[i]);
 
+		//If fleet is in StarbaseLoadingBay (post-undock transitional state), wait for it to transition to Idle
+		//so that the movement and InfluxDB write are not skipped
+		if (fleetState == 'StarbaseLoadingBay' && moveDist && moveX !== null && moveX !== '' && moveY != null && moveY !== '') {
+			cLog(2, `${FleetTimeStamp(userFleets[i].label)} Fleet in StarbaseLoadingBay, waiting for Idle transition`);
+			for (let retryCount = 0; retryCount < 4 && fleetState == 'StarbaseLoadingBay'; retryCount++) {
+				await wait(3000);
+				fleetAcctInfo = await getAccountInfo(userFleets[i].label, 'full fleet info', userFleets[i].publicKey);
+				[fleetState, extra] = getFleetState(fleetAcctInfo, userFleets[i]);
+				cLog(3, `${FleetTimeStamp(userFleets[i].label)} retry ${retryCount + 1}/4: fleetState=${fleetState}`);
+			}
+		}
+
 		//Fleet idle and needs to be moved?
 		if (fleetState == 'Idle' && extra.length > 1 && moveDist && moveX !== null && moveX !== '' && moveY != null && moveY !== '') {
 			if (extra[0] !== moveX || extra[1] !== moveY) {
@@ -11659,7 +11671,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					moveTime = calculateWarpTime(userFleets[i], moveDist);
 					const warpResult = await execWarp(userFleets[i], moveX, moveY, moveTime);
 					if(warpResult && warpResult.warpCooldownRetry) return warpResult.warpCooldownFinished;
-					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${assignment} type="warp",burnedFuel=${moveDist*(userFleets[i].warpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}`);
+					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${assignment},starbase=${influxEscape(fleetParsedData.starbase || '')} type="warp",burnedFuel=${moveDist*(userFleets[i].warpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}`);
 					if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].warpFuelConsumptionRate/100);
 					warpCooldownFinished = warpResult.warpCooldownFinished;
 				} else if (currentFuelCnt + currentCargoFuelCnt >= subwarpCost) {
@@ -11669,7 +11681,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					const fleetSavedData = await GM.getValue(fleetPK, '{}');
 					const fleetParsedData = JSON.parse(fleetSavedData);
 					const assignment = fleetParsedData.assignment;
-					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${assignment} type="subwarp",burnedFuel=${moveDist*(userFleets[i].subwarpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}`);
+					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${assignment},starbase=${influxEscape(fleetParsedData.starbase || '')} type="subwarp",burnedFuel=${moveDist*(userFleets[i].subwarpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}`);
 					if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].subwarpFuelConsumptionRate/100);
 				} else {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Unable to move, lack of fuel`);
