@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-99
+// @aephia-version 0.7.35-100
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-99'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-100'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -93,6 +93,7 @@
 	let globalSettings;
 	let aephiaApiKeyValidation = { status: 'unknown', message: 'Aephia API key has not been checked yet.', checkedAt: 0, tokenKey: '' };
 	let upgradeAutomationAephiaSummaryCache = { fetchedAt: 0, tokenKey: '', data: null };
+	let upgradeAutomationGmPriceCache = { fetchedAt: 0, prices: {} };
 	const recoveredCraftingProcessSlots = new Map();
 	let recoverAllCraftingProcessesInFlight = null;
 	const settingsGmKey = 'globalSettings';
@@ -301,6 +302,19 @@
 		'SDU': 1325,
 		'INK': 100000,
 	};
+	const UPGRADE_AUTOMATION_COMPONENT_MINT_FALLBACK = {
+		'Framework': 'FMWKb7YJA5upZHbu5FjVRRoxdDw2FYFAu284VqUGF9C2',
+		'Electronics': 'ELECrjC8m9GxCqcm4XCNpFvkS8fHStAvymS6MJbe3XLZ',
+		'Power Source': 'PoWRYJnw3YDSyXgNtN3mQ3TKUMoUSsLAbvE8Ejade3u',
+		'Electromagnet': 'EMAGoQSP89CJV5focVjrpEuE4CeqJ4k1DouQW7gUu7yX',
+		'Field Stabilizer': 'FiELD9fGaCgiNMfzQKKZD78wxwnBHTwjiiJfsieb6VGb',
+		'Particle Accelerator': 'PTCLSWbwZ3mqZqHAporphY2ofio8acsastaHfoP87Dc',
+		'Radiation Absorber': 'RABSXX6RcqJ1L5qsGY64j91pmbQVbsYRQuw1mmxhxFe',
+		'Survey Data Unit': 'SDUsgfSZaDhhZ76U3ZgvtFiXsfnHbf2VrzYxjBZ5YbM'
+	};
+	const UPGRADE_AUTOMATION_GM_PROGRAM_ID = 'traderDnaR5w6Tcoi3NFm53i48FTDNbGjBSZwWXDRrg';
+	const UPGRADE_AUTOMATION_ATLAS_MINT = 'ATLASXmbPQxBUYbxPsV97usA3fPQYEqzQBUHgiFCUsXx';
+	const UPGRADE_AUTOMATION_ATLAS_DECIMALS = 8;
 	const UPGRADE_AUTOMATION_EXCLUDED_COMPONENTS = new Set(['INK']);
 	const UPGRADE_AUTOMATION_STATE_PREFIX = 'upgradeAutomationState:';
 
@@ -3317,11 +3331,79 @@
 		}
 	}
 
+	function getUpgradeAutomationPerformanceComponentName(component = '') {
+		return String(component || '') === 'SDU' ? 'Survey Data Unit' : String(component || '');
+	}
+
+	function getUpgradeAutomationComponentMint(component = '') {
+		const componentName = getUpgradeAutomationPerformanceComponentName(component);
+		const item = Array.isArray(cargoItems) ? cargoItems.find(row => String(row.name || '') === componentName) : null;
+		return String(item?.token || UPGRADE_AUTOMATION_COMPONENT_MINT_FALLBACK[componentName] || '');
+	}
+
+	function parseUpgradeAutomationGmPrice(priceValue) {
+		const raw = typeof priceValue?.toString === 'function' ? Number(priceValue.toString()) : Number(priceValue || 0);
+		const price = raw / Math.pow(10, UPGRADE_AUTOMATION_ATLAS_DECIMALS);
+		return Number.isFinite(price) && price > 0 ? price : null;
+	}
+
+	async function fetchUpgradeAutomationGmPrices(componentNames = []) {
+		const names = [...new Set((componentNames || []).map(getUpgradeAutomationPerformanceComponentName).filter(Boolean))];
+		const nowMs = Date.now();
+		const cachedPrices = upgradeAutomationGmPriceCache?.prices || {};
+		if (nowMs - Number(upgradeAutomationGmPriceCache?.fetchedAt || 0) < 5 * 60 * 1000 && names.every(name => Object.prototype.hasOwnProperty.call(cachedPrices, name))) {
+			return cachedPrices;
+		}
+		const mintToComponent = {};
+		for (const name of names) {
+			const mint = getUpgradeAutomationComponentMint(name);
+			if (mint) mintToComponent[mint] = name;
+		}
+		const prices = Object.fromEntries(names.map(name => [name, null]));
+		const mints = new Set(Object.keys(mintToComponent));
+		if (!mints.size) {
+			upgradeAutomationGmPriceCache = { fetchedAt: nowMs, prices };
+			return prices;
+		}
+		const marketProgramId = new solanaWeb3.PublicKey(UPGRADE_AUTOMATION_GM_PROGRAM_ID);
+		const marketIDL = await BrowserAnchor.anchor.Program.fetchIdl(marketProgramId, anchorProvider);
+		const marketProgram = new BrowserAnchor.anchor.Program(marketIDL, marketProgramId, anchorProvider);
+		const atlasMint = new solanaWeb3.PublicKey(UPGRADE_AUTOMATION_ATLAS_MINT);
+		await Promise.all([...mints].map(async mint => {
+			const component = mintToComponent[mint];
+			const orderAccounts = await marketProgram.account.orderAccount.all([
+				{ dataSize: 201 },
+				{ memcmp: { offset: 40, bytes: atlasMint.toBase58() } },
+				{ memcmp: { offset: 72, bytes: mint } }
+			]);
+			for (const order of orderAccounts || []) {
+				const account = order?.account || {};
+				const side = Object.keys(account.orderSide || {})[0];
+				if (side !== 'buy') continue;
+				const remainingQty = typeof account.orderRemainingQty?.toNumber === 'function' ? account.orderRemainingQty.toNumber() : Number(account.orderRemainingQty || 0);
+				if (!Number.isFinite(remainingQty) || remainingQty <= 0) continue;
+				const price = parseUpgradeAutomationGmPrice(account.price);
+				if (!price) continue;
+				prices[component] = prices[component] == null ? price : Math.max(prices[component], price);
+			}
+		}));
+		upgradeAutomationGmPriceCache = { fetchedAt: nowMs, prices };
+		return prices;
+	}
+
 	async function fetchUpgradeAutomationComponentPerformanceMetrics(now = new Date(), pricingRows = [], daysBack = 14) {
 		if (!globalSettings.influxURL || !globalSettings.influxAuth || !globalSettings.influxDB) {
 			return { rows: [], error: 'missing_influx_config' };
 		}
 		try {
+			const performanceComponents = Array.isArray(UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_ORDER) ? UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_ORDER : ['Framework','Electronics','Power Source','Electromagnet','Field Stabilizer','Particle Accelerator','Radiation Absorber','Survey Data Unit'];
+			let gmPrices = {};
+			let gmPriceError = '';
+			try {
+				gmPrices = await fetchUpgradeAutomationGmPrices(performanceComponents);
+			} catch (priceErr) {
+				gmPriceError = String(priceErr?.message || priceErr || 'gm_price_failed');
+			}
 			const todayStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0);
 			const startIso = new Date(todayStartMs - Math.max(1, Number(daysBack || 14)) * 86400000).toISOString();
 			const stopIso = new Date(todayStartMs).toISOString();
@@ -3345,13 +3427,17 @@
 				if (!latestByComponentDay[key] || time > String(latestByComponentDay[key]._time || '')) latestByComponentDay[key] = row;
 			}
 			const todayDay = new Date(todayStartMs).toISOString().slice(0, 10);
+			const yesterdayDay = new Date(todayStartMs - 86400000).toISOString().slice(0, 10);
 			const minDay = new Date(todayStartMs - Math.max(1, Number(daysBack || 14)) * 86400000).toISOString().slice(0, 10);
 			const pricingByDay = Object.fromEntries((pricingRows || [])
 				.map(r => [String(r.day || ''), Number(r.lpValue || 0)])
 				.filter(([day, lpValue]) => day >= minDay && day < todayDay && Number.isFinite(lpValue) && lpValue > 0));
 			const byComponent = {};
+			for (const component of performanceComponents) {
+				byComponent[component] = { installed14d: 0, weightedValue: 0, installedYday: 0, weightedValueYday: 0, priceGm: gmPrices?.[component] ?? null };
+			}
 			for (const row of Object.values(latestByComponentDay)) {
-				const component = String(row.component || '');
+				const component = getUpgradeAutomationPerformanceComponentName(row.component || '');
 				const day = String(row._time || '').slice(0, 10);
 				const lpValue = Number(pricingByDay[day] || 0);
 				if (!component || !day || !lpValue) continue;
@@ -3359,17 +3445,24 @@
 				if (!amount) continue;
 				const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[component] || (component === 'Survey Data Unit' ? UPGRADE_AUTOMATION_COMPONENT_LP.SDU : 0) || 0);
 				if (!lpPerUnit) continue;
-				if (!byComponent[component]) byComponent[component] = { installed14d: 0, weightedValue: 0 };
+				if (!byComponent[component]) byComponent[component] = { installed14d: 0, weightedValue: 0, installedYday: 0, weightedValueYday: 0, priceGm: gmPrices?.[component] ?? null };
 				byComponent[component].installed14d += amount;
 				byComponent[component].weightedValue += amount * lpPerUnit * lpValue;
+				if (day === yesterdayDay) {
+					byComponent[component].installedYday += amount;
+					byComponent[component].weightedValueYday += amount * lpPerUnit * lpValue;
+				}
 			}
 			return {
 				rows: Object.entries(byComponent).map(([component, row]) => ({
 					component,
 					installed14d: row.installed14d,
-					averageValue: row.installed14d > 0 ? row.weightedValue / row.installed14d : null
+					averageValue: row.installed14d > 0 ? row.weightedValue / row.installed14d : null,
+					installedYday: row.installedYday,
+					averageValueYday: row.installedYday > 0 ? row.weightedValueYday / row.installedYday : null,
+					priceGm: Number.isFinite(Number(row.priceGm)) && Number(row.priceGm) > 0 ? Number(row.priceGm) : null
 				})),
-				error: ''
+				error: gmPriceError
 			};
 		} catch (e) {
 			return { rows: [], error: String(e?.message || e || 'component_performance_failed') };
@@ -4984,7 +5077,6 @@
 			if (aephiaApiKeyValidation.tokenKey && aephiaApiKeyValidation.tokenKey !== getAephiaTokenCacheKey(currentAephiaToken)) {
 				aephiaApiKeyValidation = { status: 'unknown', message: 'Aephia API key changed; validation required.', checkedAt: 0, tokenKey: '' };
 			}
-			content += renderAephiaApiKeyGateContent();
 			if (aephiaApiKeyValidation.status !== 'valid') {
 				const token = currentAephiaToken;
 				if (token && !['checking', 'invalid', 'temporary_error', 'missing'].includes(aephiaApiKeyValidation.status)) {
@@ -5118,20 +5210,24 @@
 			if (upgradeAutomationExecutionSummary?.neutralComponentPlan?.length) {
 				const metricRows = Array.isArray(upgradeAutomationExecutionSummary?.componentPerformanceMetrics) ? upgradeAutomationExecutionSummary.componentPerformanceMetrics : [];
 				const metricsByComponent = Object.fromEntries(metricRows.map(row => [String(row.component || ''), row]));
-				content += '<tr style="opacity:0.66"><td style="min-width:180px"><b>Performance Metrics<br>Component</b></td><td align="right" style="min-width:120px"><b>Installed 14d</b></td><td align="right" style="min-width:120px"><b>Average Value</b></td></tr>';
+				content += '<tr style="opacity:0.66"><td style="min-width:180px"><b>Performance Metrics<br>Component</b></td><td align="right" style="min-width:96px"><b>Installed 14d</b></td><td align="right" style="min-width:120px"><b>Average Value</b></td><td align="right" style="min-width:96px"><b>Installed yday</b></td><td align="right" style="min-width:120px"><b>Average Value yday</b></td><td align="right" style="min-width:96px"><b>Price GM</b></td></tr>';
 				for (const row of upgradeAutomationExecutionSummary.neutralComponentPlan) {
 					const componentName = String(row.displayName || row.name || '');
 					const metric = metricsByComponent[componentName] || metricsByComponent[row.name] || (componentName === 'Survey Data Unit' ? metricsByComponent.SDU : null);
 					const installed14d = Math.floor(Number(metric?.installed14d || 0));
 					const installed14dDisplay = installed14d > 0 ? installed14d.toLocaleString() : '-';
 					const averageValue = installed14d > 0 && Number.isFinite(Number(metric?.averageValue)) ? Number(metric.averageValue).toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }) : '-';
-					content += '<tr><td>' + componentName + '</td><td align="right">' + installed14dDisplay + '</td><td align="right">' + averageValue + '</td></tr>';
+					const installedYday = Math.floor(Number(metric?.installedYday || 0));
+					const installedYdayDisplay = installedYday > 0 ? installedYday.toLocaleString() : '-';
+					const averageValueYday = installedYday > 0 && Number.isFinite(Number(metric?.averageValueYday)) ? Number(metric.averageValueYday).toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }) : '-';
+					const priceGm = Number.isFinite(Number(metric?.priceGm)) && Number(metric.priceGm) > 0 ? Number(metric.priceGm).toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }) : '-';
+					content += '<tr><td>' + componentName + '</td><td align="right">' + installed14dDisplay + '</td><td align="right">' + averageValue + '</td><td align="right">' + installedYdayDisplay + '</td><td align="right">' + averageValueYday + '</td><td align="right">' + priceGm + '</td></tr>';
 				}
 				if (upgradeAutomationExecutionSummary?.componentPerformanceMetricsError) {
-					content += '<tr><td colspan="3" style="color:#ffb366">Performance metrics using available data; refresh issue: ' + String(upgradeAutomationExecutionSummary.componentPerformanceMetricsError).replace(/[<>]/g, '') + '</td></tr>';
+					content += '<tr><td colspan="6" style="color:#ffb366">Performance metrics using available data; refresh issue: ' + String(upgradeAutomationExecutionSummary.componentPerformanceMetricsError).replace(/[<>]/g, '') + '</td></tr>';
 				}
 			} else {
-				content += '<tr><td colspan="3">Performance metrics unavailable</td></tr>';
+				content += '<tr><td colspan="6">Performance metrics unavailable</td></tr>';
 			}
 			content += closeSection;
 		} catch (e) {
@@ -5140,17 +5236,6 @@
 		const el = document.querySelector('#assistLpAutomationContent');
 		if (el) {
 			el.innerHTML = content;
-			const aephiaApiKeyRecheck = el.querySelector('#aephiaApiKeyRecheck');
-			if (aephiaApiKeyRecheck && !aephiaApiKeyRecheck.dataset.bound) {
-				aephiaApiKeyRecheck.dataset.bound = '1';
-				aephiaApiKeyRecheck.addEventListener('click', async () => {
-					aephiaApiKeyRecheck.disabled = true;
-					aephiaApiKeyValidation = { ...aephiaApiKeyValidation, status: 'checking', message: 'Checking Aephia API key...' };
-					renderLpAutomationContent();
-					await validateAephiaApiKey(true);
-					renderLpAutomationContent();
-				});
-			}
 			const lpAutomationEnabledToggle = el.querySelector('#lpAutomationEnabledToggle');
 			if (lpAutomationEnabledToggle && !lpAutomationEnabledToggle.dataset.bound) {
 				lpAutomationEnabledToggle.dataset.bound = '1';

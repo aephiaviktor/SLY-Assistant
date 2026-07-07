@@ -12,7 +12,7 @@ const FILES = [
 ];
 
 function usage() {
-  console.log(`Usage: node scripts/bump-aephia-version.js [options]\n\nOptions:\n  --dry-run          Print the next version without writing files\n  --set <version>    Set exact Aephia version, e.g. 0.7.35-02\n  --commit           Create a git commit after updating files\n  --tag              Create/update an annotated git tag after updating files\n  --help             Show this help\n\nDefault behavior:\n  - Reads official SLYA base from // @version\n  - Reads current Aephia version from // @aephia-version\n  - Same base: increments suffix, e.g. 0.7.35-01 -> 0.7.35-02\n  - New upstream base: resets suffix, e.g. 0.7.36 + 0.7.35-02 -> 0.7.36-00\n  - Missing Aephia version: initializes to <base>-01`);
+  console.log(`Usage: node scripts/bump-aephia-version.js [options]\n\nOptions:\n  --dry-run          Print the next version without writing files\n  --set <version>    Set exact Aephia version, e.g. 0.7.35-100\n  --commit           Create a git commit after updating files\n  --tag              Create/update an annotated git tag after updating files\n  --help             Show this help\n\nDefault behavior:\n  - Reads official SLYA base from // @version\n  - Reads current Aephia version from // @aephia-version\n  - Same base: increments suffix, e.g. 0.7.35-99 -> 0.7.35-100\n  - New upstream base: resets suffix, e.g. 0.7.36 + 0.7.35-100 -> 0.7.36-00\n  - Missing Aephia version: initializes to <base>-01`);
 }
 
 function parseArgs(argv) {
@@ -40,23 +40,22 @@ function parseOfficialVersion(text, file) {
 }
 
 function parseAephiaVersion(text) {
-  const match = text.match(/^\/\/\s*@aephia-version\s+([0-9]+\.[0-9]+\.[0-9]+-[0-9]{2})\s*$/m);
+  const match = text.match(/^\/\/\s*@aephia-version\s+([0-9]+\.[0-9]+\.[0-9]+-[0-9]+)\s*$/m);
   return match ? match[1] : '';
 }
 
 function assertValidAephiaVersion(version) {
-  if (!/^[0-9]+\.[0-9]+\.[0-9]+-[0-9]{2}$/.test(version)) {
-    throw new Error(`Invalid Aephia version: ${version}. Expected x.y.z-NN, e.g. 0.7.35-02`);
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$/.test(version)) {
+    throw new Error(`Invalid Aephia version: ${version}. Expected x.y.z-N, e.g. 0.7.35-100`);
   }
 }
 
 function nextAephiaVersion(base, current) {
   if (!current) return `${base}-01`;
-  const match = current.match(/^([0-9]+\.[0-9]+\.[0-9]+)-([0-9]{2})$/);
+  const match = current.match(/^([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)$/);
   if (!match) throw new Error(`Invalid current Aephia version: ${current}`);
   if (match[1] !== base) return `${base}-00`;
   const next = Number(match[2]) + 1;
-  if (next > 99) throw new Error(`Aephia version suffix overflow for ${base}; expected 00-99`);
   return `${base}-${String(next).padStart(2, '0')}`;
 }
 
