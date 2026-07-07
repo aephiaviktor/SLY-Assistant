@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-98
+// @aephia-version 0.7.35-99
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-98'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-99'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -882,6 +882,12 @@
 		const tagged = `(exists ${row}.faction and ${row}.faction == "${faction}")`;
 		if (!isUpgradeAutomationInfluxUntaggedFallbackActive(now)) return tagged;
 		return `(if exists ${row}.faction then ${row}.faction == "${faction}" else true)`;
+	}
+
+	function getUpgradeAutomationInfluxTaggedIdentityFluxFilter(row = 'r') {
+		const faction = String(getUpgradeAutomationInfluxFactionTag()).replace(/"/g, '');
+		const instance = String(getSlyaInfluxInstanceTag()).replace(/"/g, '');
+		return `(exists ${row}.faction and ${row}.faction == "${faction}" and exists ${row}.instance and ${row}.instance == "${instance}")`;
 	}
 
 	function sanitizeInfluxBucketName(bucketName = '') {
@@ -3319,11 +3325,11 @@
 			const todayStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0);
 			const startIso = new Date(todayStartMs - Math.max(1, Number(daysBack || 14)) * 86400000).toISOString();
 			const stopIso = new Date(todayStartMs).toISOString();
-			const lpAutoFactionFluxFilter = getUpgradeAutomationInfluxFactionFluxFilter(now);
+			const lpAutoIdentityFluxFilter = getUpgradeAutomationInfluxTaggedIdentityFluxFilter('r');
 			const lpAutoReadBuckets = getUpgradeAutomationInfluxReadBuckets(now);
 			const installedFlux = `${buildUpgradeAutomationInfluxSourceFlux(lpAutoReadBuckets, `range(start: ${startIso}, stop: ${stopIso})`, [
 				'  |> filter(fn: (r) => r._measurement == "lp_auto_comp")',
-				`  |> filter(fn: (r) => ${lpAutoFactionFluxFilter})`,
+				`  |> filter(fn: (r) => ${lpAutoIdentityFluxFilter})`,
 				'  |> filter(fn: (r) => r._field == "installed_today")'
 			])}
   |> keep(columns: ["_time", "component", "_value"])`;
@@ -5118,7 +5124,7 @@
 					const metric = metricsByComponent[componentName] || metricsByComponent[row.name] || (componentName === 'Survey Data Unit' ? metricsByComponent.SDU : null);
 					const installed14d = Math.floor(Number(metric?.installed14d || 0));
 					const installed14dDisplay = installed14d > 0 ? installed14d.toLocaleString() : '-';
-					const averageValue = installed14d > 0 && Number.isFinite(Number(metric?.averageValue)) ? Math.round(Number(metric.averageValue)).toLocaleString() : '-';
+					const averageValue = installed14d > 0 && Number.isFinite(Number(metric?.averageValue)) ? Number(metric.averageValue).toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }) : '-';
 					content += '<tr><td>' + componentName + '</td><td align="right">' + installed14dDisplay + '</td><td align="right">' + averageValue + '</td></tr>';
 				}
 				if (upgradeAutomationExecutionSummary?.componentPerformanceMetricsError) {
