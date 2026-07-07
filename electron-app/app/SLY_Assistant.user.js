@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-103
+// @aephia-version 0.7.35-104
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-103'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-104'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -930,6 +930,22 @@
 			preview = 'debug_unavailable';
 		}
 		return { map: out, debug: preview };
+	}
+
+	async function fetchInfluxUpgradingTodayByComponent(now = new Date()) {
+		const dayStartIso = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0)).toISOString();
+		const flux = `${buildSlyaRawStatsInfluxSourceFlux(`range(start: ${dayStartIso}, stop: ${now.toISOString()})`, instanceFilter => [
+			`  |> filter(fn: (r) => r._measurement == "upgrade" and r._field == "amount" and ${instanceFilter})`
+		], now)}\n  |> group(columns: ["input"])\n  |> sum(column: "_value")\n  |> keep(columns: ["input", "_value"])\n  |> rename(columns: {input: "resource", _value: "upgrading_today"})\n  |> sort(columns: ["resource"])`;
+		const csv = await queryInfluxFlux(flux);
+		const rows = parseInfluxCsv(csv);
+		const out = {};
+		for (const row of rows) {
+			const resource = row?.resource;
+			const rawValue = row?.upgrading_today ?? 0;
+			if (resource) out[String(resource)] = parseInfluxNumber(rawValue);
+		}
+		return { map: out };
 	}
 
 	async function fetchInfluxCrafting24h() {
@@ -2616,16 +2632,24 @@
 		const utcDayStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0);
 		const events = await loadUpgradeAutomationEvents();
 		const todaysUpgradeEvents = events.filter(e => e?.kind === 'upgrade' && Number(e?.ts || 0) >= utcDayStartMs);
-		const installedTodayByComponent = todaysUpgradeEvents.reduce((acc, e) => {
+		const localInstalledTodayByComponent = todaysUpgradeEvents.reduce((acc, e) => {
 			const resource = String(e?.resource || '');
 			const amount = Math.floor(Number(e?.amount || 0));
 			if (resource && Number.isFinite(amount) && amount > 0) acc[resource] = (acc[resource] || 0) + amount;
 			return acc;
 		}, {});
-		const installedTodayRaw = todaysUpgradeEvents.reduce((sum, e) => {
-			const amount = Number(e?.amount || 0);
-			const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[e?.resource] || 0);
-			return sum + amount * lpPerUnit;
+		let influxInstalledTodayByComponent = {};
+		try {
+			const influxInstalledToday = await fetchInfluxUpgradingTodayByComponent(now);
+			influxInstalledTodayByComponent = influxInstalledToday.map || {};
+		} catch (e) {
+			influxInstalledTodayByComponent = {};
+		}
+		const influxInstalledTodayTotal = Object.values(influxInstalledTodayByComponent).reduce((sum, value) => sum + Math.max(0, Number(value || 0)), 0);
+		const installedTodayByComponent = influxInstalledTodayTotal > 0 ? influxInstalledTodayByComponent : localInstalledTodayByComponent;
+		const installedTodayRaw = Object.entries(installedTodayByComponent).reduce((sum, [resource, amount]) => {
+			const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[resource] || 0);
+			return sum + Number(amount || 0) * lpPerUnit;
 		}, 0);
 		const installedToday = installedTodayRaw;
 		const elapsedUtcSeconds = Math.max(Math.floor((now.getTime() - utcDayStartMs) / 1000), 1);
