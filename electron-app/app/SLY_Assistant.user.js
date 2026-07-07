@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-101
+// @aephia-version 0.7.35-102
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-101'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-102'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -6225,6 +6225,30 @@ function renderAssistStats() {
         });
     }
 
+	function getFactionTagFromFactionValue(factionValue) {
+		const faction = typeof factionValue?.toNumber === 'function' ? factionValue.toNumber() : Number(factionValue);
+		if (faction === 1) return 'MUD';
+		if (faction === 2) return 'ONI';
+		if (faction === 3) return 'UST';
+		return '';
+	}
+
+	function getStarbaseNameFromCoords(x, y) {
+		const coordKey = String(x).trim() + ',' + String(y).trim();
+		return validTargets.find(target => (target.x + ',' + target.y) == coordKey)?.name || '';
+	}
+
+	async function getTelemetryStarbaseContextFromCoords(x, y) {
+		const starbaseName = getStarbaseNameFromCoords(x, y);
+		let faction = '';
+		try {
+			const starbase = await getStarbaseFromCoords(x, y);
+			faction = getFactionTagFromFactionValue(starbase?.account?.faction);
+		} catch (e) {}
+		if (!faction) faction = getFactionTagFromFactionValue(userProfileFactionAcct?.account?.faction);
+		return { starbaseName, faction };
+	}
+
     async function getPlanetsFromCoords(x, y) {
         return new Promise(async resolve => {
             let xBN = new BrowserAnchor.anchor.BN(x);
@@ -8012,8 +8036,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		let burnedAmmo = preAmmoCnt - postAmmoCnt;
 
 		let minedRssName = cargoItems.find(r => r.token == resourceToken.toString())?.name;
-		let starbaseName = validTargets.find(target => (target.x + ',' + target.y) == targetX + ',' + targetY )?.name;
-		await sendToInflux(`mining,fleet=${influxEscape(fleet.label)},starbase=${influxEscape(starbaseName)},sectorX=${targetX},sectorY=${targetY},rss=${influxEscape(minedRssName)} burnedFuel=${fleet.planetExitFuelAmount},burnedFood=${burnedFood},burnedAmmo=${burnedAmmo},amount=${minedAmount}`);
+		let miningStarbaseContext = await getTelemetryStarbaseContextFromCoords(targetX, targetY);
+		let miningFactionTag = miningStarbaseContext.faction ? `,faction=${influxEscape(miningStarbaseContext.faction)}` : '';
+		await sendToInflux(`mining,fleet=${influxEscape(fleet.label)},starbase=${influxEscape(miningStarbaseContext.starbaseName || 'unknown')},sectorX=${targetX},sectorY=${targetY}${miningFactionTag},rss=${influxEscape(minedRssName)} burnedFuel=${fleet.planetExitFuelAmount},burnedFood=${burnedFood},burnedAmmo=${burnedAmmo},amount=${minedAmount}`);
             }
 
         });
@@ -10824,7 +10849,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					moveTime = calculateWarpTime(userFleets[i], moveDist);
 					const warpResult = await execWarp(userFleets[i], moveX, moveY, moveTime);
 					if(warpResult && warpResult.warpCooldownRetry) return warpResult.warpCooldownFinished;
-					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${assignment},starbase=${influxEscape(fleetParsedData.starbase || '')} type="warp",burnedFuel=${moveDist*(userFleets[i].warpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}`);
+					const movementStarbaseCoords = ConvertCoords(fleetParsedData.starbase || userFleets[i].starbaseCoord);
+					const movementStarbaseContext = await getTelemetryStarbaseContextFromCoords(movementStarbaseCoords[0], movementStarbaseCoords[1]);
+					const movementFactionTag = movementStarbaseContext.faction ? `,faction=${influxEscape(movementStarbaseContext.faction)}` : '';
+					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${assignment},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag} type="warp",burnedFuel=${moveDist*(userFleets[i].warpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}`);
 					if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].warpFuelConsumptionRate/100);
 					warpCooldownFinished = warpResult.warpCooldownFinished;
 				} else if (currentFuelCnt + currentCargoFuelCnt >= subwarpCost) {
@@ -10834,7 +10862,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					const fleetSavedData = await GM.getValue(fleetPK, '{}');
 					const fleetParsedData = JSON.parse(fleetSavedData);
 					const assignment = fleetParsedData.assignment;
-					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${assignment},starbase=${influxEscape(fleetParsedData.starbase || '')} type="subwarp",burnedFuel=${moveDist*(userFleets[i].subwarpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}`);
+					const movementStarbaseCoords = ConvertCoords(fleetParsedData.starbase || userFleets[i].starbaseCoord);
+					const movementStarbaseContext = await getTelemetryStarbaseContextFromCoords(movementStarbaseCoords[0], movementStarbaseCoords[1]);
+					const movementFactionTag = movementStarbaseContext.faction ? `,faction=${influxEscape(movementStarbaseContext.faction)}` : '';
+					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${assignment},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag} type="subwarp",burnedFuel=${moveDist*(userFleets[i].subwarpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}`);
 					if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].subwarpFuelConsumptionRate/100);
 				} else {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Unable to move, lack of fuel`);
@@ -11077,7 +11108,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			await saveScanEnd(i);
 
 			let burnedFood = changesFood.preBalance - changesFood.postBalance;
-			await sendToInflux(`sdu,instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(userFleets[i].label)},sectorX=${fleetCoords[0]},sectorY=${fleetCoords[1]} amount=${sduFound},burnedFood=${burnedFood},chance=${scanCondition},cargoRoomLeft=${userFleets[i].cargoCapacity - cargoCnt - sduFound}`);
+			const sduStarbaseCoords = ConvertCoords(userFleets[i].starbaseCoord);
+			const sduStarbaseContext = await getTelemetryStarbaseContextFromCoords(sduStarbaseCoords[0], sduStarbaseCoords[1]);
+			await sendToInflux(`sdu,instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},starbase=${influxEscape(sduStarbaseContext.starbaseName || 'unknown')},fleet=${influxEscape(userFleets[i].label)},sectorX=${fleetCoords[0]},sectorY=${fleetCoords[1]} amount=${sduFound},burnedFood=${burnedFood},chance=${scanCondition},cargoRoomLeft=${userFleets[i].cargoCapacity - cargoCnt - sduFound}`);
 
 		}
 		else if (!moved && Date.now() < userFleets[i].scanEnd && userFleets[i].state == 'Idle') {
