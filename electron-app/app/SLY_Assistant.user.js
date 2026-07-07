@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-97
+// @aephia-version 0.7.35-98
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-97'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-98'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2544,7 +2544,8 @@
 		const perfNeutralYday = perfNeutralYdayRaw.rows.length ? perfNeutralYdayRaw : aggrNeutralYday;
 		const perfRequestedYday = perfRequestedYdayRaw.rows.length ? perfRequestedYdayRaw : aggrRequestedYday;
 		const perfOptimizerYday = perfOptimizerYdayRaw.rows.length ? perfOptimizerYdayRaw : aggrOptimizerYday;
-		const pricingHistoryDebug = await fetchUpgradeAutomationPricingHistory(now, 8);
+		const pricingHistoryDebug = await fetchUpgradeAutomationPricingHistory(now, 15);
+		const componentPerformanceMetrics = await fetchUpgradeAutomationComponentPerformanceMetrics(now, pricingHistoryDebug.rows, 14);
 		const todayDay = now.toISOString().slice(0, 10);
 		const minAlphaDay = '2026-04-18';
 		const maxAlphaDayExclusive = todayDay;
@@ -2792,6 +2793,8 @@
 			requestedLpYesterday: perfRequestedYday.latestValue,
 			optimizerLpYesterday: perfOptimizerYday.latestValue,
 			installedYesterday: aggrInstalledYday.latestValue,
+			componentPerformanceMetrics: componentPerformanceMetrics.rows,
+			componentPerformanceMetricsError: componentPerformanceMetrics.error,
 			aephiaLpTodayLatest: aephiaLpDebug.latestToday,
 			aephiaLpYesterdayLatest: aephiaLpDebug.latestYesterday,
 			aephiaUpdatedAtLatest: aephiaLpDebug.latestTime || '',
@@ -3050,6 +3053,65 @@
 			return { rows, latest: rows.length ? rows[rows.length - 1] : null, error: '' };
 		} catch (e) {
 			return { rows: [], latest: null, error: String(e?.message || e || 'pricing_history_failed') };
+		}
+	}
+
+	async function fetchUpgradeAutomationComponentPerformanceMetrics(now = new Date(), pricingRows = [], daysBack = 14) {
+		if (!globalSettings.influxURL || !globalSettings.influxAuth || !globalSettings.influxDB) {
+			return { rows: [], error: 'missing_influx_config' };
+		}
+		try {
+			const todayStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0);
+			const startIso = new Date(todayStartMs - Math.max(1, Number(daysBack || 14)) * 86400000).toISOString();
+			const stopIso = new Date(todayStartMs).toISOString();
+			const lpAutoFactionFluxFilter = getUpgradeAutomationInfluxFactionFluxFilter(now);
+			const lpAutoReadBuckets = getUpgradeAutomationInfluxReadBuckets(now);
+			const installedFlux = `${buildUpgradeAutomationInfluxSourceFlux(lpAutoReadBuckets, `range(start: ${startIso}, stop: ${stopIso})`, [
+				'  |> filter(fn: (r) => r._measurement == "lp_auto_comp")',
+				`  |> filter(fn: (r) => ${lpAutoFactionFluxFilter})`,
+				'  |> filter(fn: (r) => r._field == "installed_today")'
+			])}
+  |> keep(columns: ["_time", "component", "_value"])`;
+			const csv = await queryInfluxFlux(installedFlux);
+			const installedRows = parseInfluxCsv(csv);
+			const latestByComponentDay = {};
+			for (const row of installedRows) {
+				const component = String(row.component || '');
+				const time = String(row._time || '');
+				const day = time.slice(0, 10);
+				if (!component || !day) continue;
+				const key = `${component}|${day}`;
+				if (!latestByComponentDay[key] || time > String(latestByComponentDay[key]._time || '')) latestByComponentDay[key] = row;
+			}
+			const todayDay = new Date(todayStartMs).toISOString().slice(0, 10);
+			const minDay = new Date(todayStartMs - Math.max(1, Number(daysBack || 14)) * 86400000).toISOString().slice(0, 10);
+			const pricingByDay = Object.fromEntries((pricingRows || [])
+				.map(r => [String(r.day || ''), Number(r.lpValue || 0)])
+				.filter(([day, lpValue]) => day >= minDay && day < todayDay && Number.isFinite(lpValue) && lpValue > 0));
+			const byComponent = {};
+			for (const row of Object.values(latestByComponentDay)) {
+				const component = String(row.component || '');
+				const day = String(row._time || '').slice(0, 10);
+				const lpValue = Number(pricingByDay[day] || 0);
+				if (!component || !day || !lpValue) continue;
+				const amount = Math.max(0, Math.floor(Number(row._value || 0)));
+				if (!amount) continue;
+				const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[component] || (component === 'Survey Data Unit' ? UPGRADE_AUTOMATION_COMPONENT_LP.SDU : 0) || 0);
+				if (!lpPerUnit) continue;
+				if (!byComponent[component]) byComponent[component] = { installed14d: 0, weightedValue: 0 };
+				byComponent[component].installed14d += amount;
+				byComponent[component].weightedValue += amount * lpPerUnit * lpValue;
+			}
+			return {
+				rows: Object.entries(byComponent).map(([component, row]) => ({
+					component,
+					installed14d: row.installed14d,
+					averageValue: row.installed14d > 0 ? row.weightedValue / row.installed14d : null
+				})),
+				error: ''
+			};
+		} catch (e) {
+			return { rows: [], error: String(e?.message || e || 'component_performance_failed') };
 		}
 	}
 
@@ -4708,13 +4770,7 @@
 				content += '<tr><td>LP Target Now Hourly</td><td align="right">' + Math.round(lpTargetNowInflux).toLocaleString() + '</td><td>LP Today</td><td align="right">' + Math.round(lpToday).toLocaleString() + '</td><td>Projected LP Today</td><td align="right">' + (projectedLpToday !== null ? Math.round(projectedLpToday).toLocaleString() : '-') + '</td></tr>';
 				content += '<tr><td>' + lpAggPreLabel + '</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrRelative ?? upgradeAutomationLpControl?.rawAggressiveness ?? upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td><td>Aggr. (abs.)</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrAbsolute ?? (1 + absAdjustment)).toFixed(3) + '</td><td style="color:' + lpAggColor + '">Aggr.</td><td align="right" style="color:' + lpAggColor + '">' + Number(upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td></tr>';
 				content += '<tr><td colspan="6">&nbsp;</td></tr>';
-				const yesterdayProfitAtlas = Number(upgradeAutomationExecutionSummary?.yesterdayProfitAtlas || 0);
-				const avg7dProfitAtlas = Number(upgradeAutomationExecutionSummary?.avg7dProfitAtlas || 0);
-				const executionAlphaAtlasPerDay = Number(upgradeAutomationExecutionSummary?.cleanExecutionAlphaValue || 0);
-				const requestedAlphaAtlasPerDay = Number((upgradeAutomationExecutionSummary?.cleanRequestedAlphaValue ?? upgradeAutomationExecutionSummary?.requestedAlphaAtlasPerDay) || 0);
-				const optimizerAlphaAtlasPerDay = Number((upgradeAutomationExecutionSummary?.cleanOptimizerAlphaValue ?? upgradeAutomationExecutionSummary?.optimizerAlphaAtlasPerDay) || 0);
 				content += '<tr><td>Installed LP Today</td><td align="right">' + Math.round(installedToday).toLocaleString() + '</td><td></td><td></td><td></td><td></td></tr>';
-				content += '<tr><td>Execution Alpha (ATLAS/day)</td><td align="right">' + Math.round(executionAlphaAtlasPerDay).toLocaleString() + '</td><td>Requested Alpha (ATLAS/day)</td><td align="right">' + Math.round(requestedAlphaAtlasPerDay).toLocaleString() + '</td><td>Optimizer Alpha (ATLAS/day)</td><td align="right">' + Math.round(optimizerAlphaAtlasPerDay).toLocaleString() + '</td></tr>';
 				content += '<tr><td>Neutral LP Target</td><td align="right">' + Math.round(neutralLpTargetFullDay).toLocaleString() + '</td><td>Requested LP Target</td><td align="right">' + Math.round(requestedLpTarget).toLocaleString() + '</td><td>Optimizer LP Target</td><td align="right">' + Math.round(achievableLpTargetFullDay).toLocaleString() + '</td></tr>';
 				if (upgradeAutomationLpControlError || upgradeAutomationExecutionSummaryError) {
 					const lpErrors = [upgradeAutomationLpControlError, upgradeAutomationExecutionSummaryError].filter(Boolean).join(' | ');
@@ -4752,117 +4808,27 @@
 			} else {
 				content += '<tr><td colspan="8">Component plan unavailable</td></tr>';
 			}
-			const optDebugNeutral = Math.round(Number(upgradeAutomationExecutionSummary?.neutralLpTarget || 0)).toLocaleString();
-			const optDebugRequested = Math.round(Number(upgradeAutomationExecutionSummary?.requestedLpTargetOpt || 0)).toLocaleString();
-			const optDebugAchievable = Math.round(Number(upgradeAutomationExecutionSummary?.achievableLpTargetOpt || 0)).toLocaleString();
-			const optDebugNeutralPast = Math.round(Number(upgradeAutomationExecutionSummary?.neutralLpPast || 0)).toLocaleString();
-			const optDebugTargetPast = Math.round(Number(upgradeAutomationExecutionSummary?.targetLpPast || 0)).toLocaleString();
-			const optDebugAchievablePast = Math.round(Number(upgradeAutomationExecutionSummary?.achievableLpPast || 0)).toLocaleString();
-			const optDebugNeutralCurrentHour = Math.round(Number(upgradeAutomationExecutionSummary?.neutralLpCurrentHour || 0)).toLocaleString();
-			const perfAtlasPool = Math.round(Number(upgradeAutomationExecutionSummary?.atlasPool || 0)).toLocaleString();
-			const perfLpRedemptionUsed = Math.round(Number(upgradeAutomationExecutionSummary?.lpRedemptionToday || 0)).toLocaleString();
-			const perfLpValueYesterday = Number(upgradeAutomationExecutionSummary?.lpValueToday || 0).toFixed(6);
-			const perfNeutralRevenueYesterday = Math.round(Number(upgradeAutomationExecutionSummary?.neutralRevenueYesterday || 0)).toLocaleString();
-			const perfStrategyRevenueYesterday = Math.round(Number(upgradeAutomationExecutionSummary?.strategyRevenueYesterday || 0)).toLocaleString();
-			const perfNeutralLpYesterday = Math.round(Number(upgradeAutomationExecutionSummary?.neutralLpYesterday || 0)).toLocaleString();
-			const perfRequestedLpYesterday = Math.round(Number(upgradeAutomationExecutionSummary?.requestedLpYesterday || 0)).toLocaleString();
-			const perfOptimizerLpYesterday = Math.round(Number(upgradeAutomationExecutionSummary?.optimizerLpYesterday || 0)).toLocaleString();
-			const perfInstalledYesterday = Math.round(Number(upgradeAutomationExecutionSummary?.installedYesterday || 0)).toLocaleString();
-			const perfRowNeutralLpTarget = Math.round(Number(upgradeAutomationExecutionSummary?.rowNeutralLpTarget || 0)).toLocaleString();
-			const perfRowOptimizerLpTarget = Math.round(Number(upgradeAutomationExecutionSummary?.rowOptimizerLpTarget || 0)).toLocaleString();
-			const perfRowNeutralLpTargetTime = String(upgradeAutomationExecutionSummary?.rowNeutralLpTargetTime || '-');
-			const perfRowOptimizerLpTargetTime = String(upgradeAutomationExecutionSummary?.rowOptimizerLpTargetTime || '-');
-			const perfRowNeutralLpTargetQuery = String(upgradeAutomationExecutionSummary?.rowNeutralLpTargetQuery || '-').replace(/[<>]/g, '');
-			const perfRowNeutralTargetsCsvRaw = String(upgradeAutomationExecutionSummary?.rowNeutralTargetsCsvRaw || '').replace(/[<>]/g, '');
-			const perfRowNeutralTargetsCsvFile = String(upgradeAutomationExecutionSummary?.rowNeutralTargetsCsvFile || '-').replace(/[<>]/g, '');
-			const perfDebugAggrLatestValue = Math.round(Number(upgradeAutomationExecutionSummary?.debugAggrLatestValue || 0)).toLocaleString();
-			const perfDebugAggrLatestTime = String(upgradeAutomationExecutionSummary?.debugAggrLatestTime || '-');
-			const perfCleanAggrNeutralValue = Math.round(Number(upgradeAutomationExecutionSummary?.aggrNeutralDebugValue || 0)).toLocaleString();
-			const perfCleanAggrNeutralTime = String(upgradeAutomationExecutionSummary?.aggrNeutralDebugTime || '-');
-			const perfCleanAggrNeutralError = String(upgradeAutomationExecutionSummary?.aggrNeutralDebugError || '-').replace(/[<>]/g, '');
-			const perfCleanAggrRequestedValue = Math.round(Number(upgradeAutomationExecutionSummary?.aggrRequestedDebugValue || 0)).toLocaleString();
-			const perfCleanAggrRequestedTime = String(upgradeAutomationExecutionSummary?.aggrRequestedDebugTime || '-');
-			const perfCleanAggrRequestedError = String(upgradeAutomationExecutionSummary?.aggrRequestedDebugError || '-').replace(/[<>]/g, '');
-			const perfCleanAggrOptimizerValue = Math.round(Number(upgradeAutomationExecutionSummary?.aggrOptimizerDebugValue || 0)).toLocaleString();
-			const perfCleanAggrOptimizerTime = String(upgradeAutomationExecutionSummary?.aggrOptimizerDebugTime || '-');
-			const perfCleanAggrOptimizerError = String(upgradeAutomationExecutionSummary?.aggrOptimizerDebugError || '-').replace(/[<>]/g, '');
-			const perfPricingDebugLatestDay = String(upgradeAutomationExecutionSummary?.pricingDebugLatestDay || '-');
-			const perfPricingDebugLatestValue = Number(upgradeAutomationExecutionSummary?.pricingDebugLatestValue || 0).toFixed(6);
-			const perfPricingDebugLatestRedemption = Math.round(Number(upgradeAutomationExecutionSummary?.pricingDebugLatestRedemption || 0)).toLocaleString();
-			const perfPricingDebugError = String(upgradeAutomationExecutionSummary?.pricingDebugError || '-').replace(/[<>]/g, '');
-			const perfCleanRequestedAlphaValue = Number(upgradeAutomationExecutionSummary?.cleanRequestedAlphaValue || 0).toFixed(3);
-			const perfCleanRequestedAlphaK = Number(upgradeAutomationExecutionSummary?.cleanRequestedAlphaK || 0).toFixed(6);
-			const perfCleanRequestedAlphaDays = Math.round(Number(upgradeAutomationExecutionSummary?.cleanRequestedAlphaDays || 0)).toLocaleString();
-			const perfCleanOptimizerAlphaValue = Number(upgradeAutomationExecutionSummary?.cleanOptimizerAlphaValue || 0).toFixed(3);
-			const perfCleanOptimizerAlphaK = Number(upgradeAutomationExecutionSummary?.cleanOptimizerAlphaK || 0).toFixed(6);
-			const perfCleanOptimizerAlphaDays = Math.round(Number(upgradeAutomationExecutionSummary?.cleanOptimizerAlphaDays || 0)).toLocaleString();
-			const perfCleanOptimizerMatchedDay1 = String(upgradeAutomationExecutionSummary?.cleanOptimizerMatchedDay1 || '-');
-			const perfCleanOptimizerMatchedDay2 = String(upgradeAutomationExecutionSummary?.cleanOptimizerMatchedDay2 || '-');
-			const perfCleanOptimizerMatchedDay1Neutral = Math.round(Number(upgradeAutomationExecutionSummary?.cleanOptimizerMatchedDay1Neutral || 0)).toLocaleString();
-			const perfCleanOptimizerMatchedDay2Neutral = Math.round(Number(upgradeAutomationExecutionSummary?.cleanOptimizerMatchedDay2Neutral || 0)).toLocaleString();
-			const perfCleanOptimizerMatchedDay1Optimizer = Math.round(Number(upgradeAutomationExecutionSummary?.cleanOptimizerMatchedDay1Optimizer || 0)).toLocaleString();
-			const perfCleanOptimizerMatchedDay2Optimizer = Math.round(Number(upgradeAutomationExecutionSummary?.cleanOptimizerMatchedDay2Optimizer || 0)).toLocaleString();
-			const perfCleanOptimizerMatchedDay1Pricing = Number(upgradeAutomationExecutionSummary?.cleanOptimizerMatchedDay1Pricing || 0).toFixed(6);
-			const perfCleanOptimizerMatchedDay2Pricing = Number(upgradeAutomationExecutionSummary?.cleanOptimizerMatchedDay2Pricing || 0).toFixed(6);
-			const perfCleanNeutralLatestValue = Math.round(Number(upgradeAutomationExecutionSummary?.cleanNeutralLatestValue || 0)).toLocaleString();
-			const perfCleanNeutralLatestTime = String(upgradeAutomationExecutionSummary?.cleanNeutralLatestTime || '-');
-			const perfDebugAggrAggressivenessValue = Number(upgradeAutomationExecutionSummary?.debugAggrAggressivenessValue || 0).toFixed(6);
-			const perfDebugAggrAggressivenessTime = String(upgradeAutomationExecutionSummary?.debugAggrAggressivenessTime || '-');
-			const perfDebugSettingsFactionValue = String(upgradeAutomationExecutionSummary?.debugSettingsFactionValue || '-');
-			const perfDebugSettingsFactionTime = String(upgradeAutomationExecutionSummary?.debugSettingsFactionTime || '-');
-			const perfDebugFrameworkCompValue = Math.round(Number(upgradeAutomationExecutionSummary?.debugFrameworkCompValue || 0)).toLocaleString();
-			const perfDebugFrameworkCompTime = String(upgradeAutomationExecutionSummary?.debugFrameworkCompTime || '-');
-			const perfDebugFrameworkPastCompValue = Math.round(Number(upgradeAutomationExecutionSummary?.debugFrameworkPastCompValue || 0)).toLocaleString();
-			const perfDebugFrameworkPastCompTime = String(upgradeAutomationExecutionSummary?.debugFrameworkPastCompTime || '-');
-			const perfDebugAggrPastTargetValue = Math.round(Number(upgradeAutomationExecutionSummary?.debugAggrPastTargetValue || 0)).toLocaleString();
-			const perfDebugAggrPastTargetTime = String(upgradeAutomationExecutionSummary?.debugAggrPastTargetTime || '-');
-			const perfLastTargetDay = String(upgradeAutomationExecutionSummary?.lastTargetDay || '-');
-			const perfLastPricingDay = String(upgradeAutomationExecutionSummary?.lastPricingDay || '-');
-			const perfTargetDayUsed = String(upgradeAutomationExecutionSummary?.targetDayUsed || '-');
-			const perfPricingDayUsed = String(upgradeAutomationExecutionSummary?.pricingDayUsed || '-');
-			const perfProfitYesterday = Number(upgradeAutomationExecutionSummary?.yesterdayProfitAtlas || 0);
-			const perfProfit7dAvg = Number(upgradeAutomationExecutionSummary?.avg7dProfitAtlas || 0);
-			const perfRequestedAlphaK = Number(upgradeAutomationExecutionSummary?.requestedAlphaK || 0);
-			const perfOptimizerAlphaK = Number(upgradeAutomationExecutionSummary?.optimizerAlphaK || 0);
-			const perfRequestedTimingProfit7d = Number(upgradeAutomationExecutionSummary?.requestedTimingProfit7d || 0);
-			const perfOptimizerTimingProfit7d = Number(upgradeAutomationExecutionSummary?.optimizerTimingProfit7d || 0);
-			const perfAlphaValidDays = Number(upgradeAutomationExecutionSummary?.alphaValidDays || 0);
-			const perfAlphaSumNeutralLp = Number(upgradeAutomationExecutionSummary?.alphaSumNeutralLp || 0);
-			const perfAlphaSumRequestedLp = Number(upgradeAutomationExecutionSummary?.alphaSumRequestedLp || 0);
-			const perfAlphaSumOptimizerLp = Number(upgradeAutomationExecutionSummary?.alphaSumOptimizerLp || 0);
-			const perfAlphaTargetDayCount = Number(upgradeAutomationExecutionSummary?.alphaTargetDayCount || 0);
-			const perfAlphaPricingDayCount = Number(upgradeAutomationExecutionSummary?.alphaPricingDayCount || 0);
-			const perfAlphaCompletedDayCount = Number(upgradeAutomationExecutionSummary?.alphaCompletedDayCount || 0);
-			const perfAlphaLastCompletedTargetDay = String(upgradeAutomationExecutionSummary?.alphaLastCompletedTargetDay || '-');
-			const perfAlphaLastCompletedPricingDay = String(upgradeAutomationExecutionSummary?.alphaLastCompletedPricingDay || '-');
-			const perfAlphaTargetRowsRawCount = Number(upgradeAutomationExecutionSummary?.alphaTargetRowsRawCount || 0);
-			const perfAlphaPointSeriesCount = Number(upgradeAutomationExecutionSummary?.alphaPointSeriesCount || 0);
-			const perfAlphaFirstTargetField = String(upgradeAutomationExecutionSummary?.alphaFirstTargetField || '-');
-			const perfAlphaLastTargetField = String(upgradeAutomationExecutionSummary?.alphaLastTargetField || '-');
-			const perfAlphaTargetsCsvLength = Number(upgradeAutomationExecutionSummary?.alphaTargetsCsvLength || 0);
-			const perfAlphaPointSeriesIsArray = Number(upgradeAutomationExecutionSummary?.alphaPointSeriesIsArray || 0);
-			const perfAlphaError = String(upgradeAutomationExecutionSummary?.alphaError || '-').replace(/[<>]/g, '');
-			const influxStatus = String(upgradeAutomationInfluxDebugStatus || 'n/a').replace(/[<>]/g, '');
-			const influxLineShort = String(upgradeAutomationInfluxDebugLine || '').replace(/[<>]/g, '').slice(0, 180);
-			const perfAephiaTodayValue = upgradeAutomationExecutionSummary?.aephiaLpTodayLatest;
-			const perfAephiaYdayValue = upgradeAutomationExecutionSummary?.aephiaLpYesterdayLatest;
-			const perfAephiaUpdatedRaw = upgradeAutomationExecutionSummary?.aephiaUpdatedAtLatest || '-';
-			const perfAephiaToday = perfAephiaTodayValue == null || !Number.isFinite(Number(perfAephiaTodayValue)) ? '-' : Math.round(Number(perfAephiaTodayValue || 0)).toLocaleString();
-			const perfAephiaYday = perfAephiaYdayValue == null || !Number.isFinite(Number(perfAephiaYdayValue)) ? '-' : Math.round(Number(perfAephiaYdayValue || 0)).toLocaleString();
-			const perfAephiaUpdatedAt = String(perfAephiaUpdatedRaw || '-').replace(/[<>]/g, '');
-			const bufferDaysNewObservedDrainLine = formatUpgradeAutomationObservedDrainDebugLine(upgradeAutomationInfluxInventoryGlobalWeightedDrain).replace(/[<>]/g, '');
-			content += '<tr style="opacity:0.5"><td colspan="8" style="font-size:85%;font-family:monospace">Pools src=' + Math.floor(Number(upgradeAutomationExecutionSummary?.sourcePoolCount || 0)).toLocaleString() + ' (' + Math.floor(Number(upgradeAutomationExecutionSummary?.sourcePoolMass || 0)).toLocaleString() + ' LP) dst=' + Math.floor(Number(upgradeAutomationExecutionSummary?.destPoolCount || 0)).toLocaleString() + ' (' + Math.floor(Number(upgradeAutomationExecutionSummary?.destPoolMass || 0)).toLocaleString() + ' LP) dir=' + String(upgradeAutomationExecutionSummary?.partitionDirection || '-').replace(/[<>]/g, '') + ' behind=' + Number(upgradeAutomationExecutionSummary?.behindRatio || 0).toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 }) + '</td></tr>';
-			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:85%">Buffer Days new</td><td colspan="6" style="font-size:85%;font-family:monospace;word-break:break-word"><b>Observed Drain</b> ' + bufferDaysNewObservedDrainLine + '</td></tr>';
-			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:85%">Past hours</td><td align="right" style="font-size:85%">' + optDebugNeutralPast + '<br><small>Neutral past</small></td><td align="right" style="font-size:85%">' + optDebugNeutralCurrentHour + '<br><small>Current hour</small></td><td align="right" style="font-size:85%">' + optDebugTargetPast + '<br><small>Target past</small></td><td align="right" style="font-size:85%">' + optDebugAchievablePast + '<br><small>Optimizer past</small></td><td></td><td></td></tr>';
-			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:85%">Performance alpha 1</td><td align="right" style="font-size:85%">' + perfCleanRequestedAlphaValue + '<br><small>clean requested alpha</small></td><td align="right" style="font-size:85%">' + perfCleanRequestedAlphaK + '<br><small>requested k</small></td><td align="right" style="font-size:85%">' + perfCleanRequestedAlphaDays + '<br><small>requested days</small></td><td align="right" style="font-size:85%">' + perfCleanOptimizerAlphaValue + '<br><small>clean optimizer alpha</small></td><td align="right" style="font-size:85%">' + perfCleanOptimizerAlphaK + '<br><small>optimizer k</small></td><td align="right" style="font-size:85%">' + perfCleanOptimizerAlphaDays + '<br><small>optimizer days</small></td></tr>';
-			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:85%">Performance alpha 2</td><td align="right" style="font-size:85%">' + perfNeutralLpYesterday + '<br><small>neutral yday</small></td><td align="right" style="font-size:85%">' + perfRequestedLpYesterday + '<br><small>requested yday</small></td><td align="right" style="font-size:85%">' + perfOptimizerLpYesterday + '<br><small>optimizer yday</small></td><td align="right" style="font-size:85%">' + perfInstalledYesterday + '<br><small>installed yday</small></td><td></td><td></td></tr>';
-			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:85%">Performance alpha 3</td><td align="right" style="font-size:85%">' + perfAephiaToday + '<br><small>lp_today_aephia</small></td><td align="right" style="font-size:85%">' + perfAephiaYday + '<br><small>lp_yday_aephia</small></td><td align="right" style="font-size:85%">' + perfAephiaUpdatedAt + '<br><small>aephia updated</small></td><td></td><td></td><td></td></tr>';
-			content += '<tr style="opacity:0.5"><td colspan="2" style="font-size:90%">Influx</td><td colspan="6" style="font-size:85%;word-break:break-all">' + influxStatus + (influxLineShort ? ('<br><span style="font-size:85%">' + influxLineShort + '</span>') : '') + '</td></tr>';
+			content += closeSection;
+			content += '<div class="lp-auto-section-gap"></div>';
 
-			try {
-				content += '<tbody style="display:none">' + buildLpAutomationSchedDebugRowsHtml() + '</tbody>';
-			} catch (e) {
-				content += '<tr style="display:none"><td colspan="8" style="color:#ff8080">Scheduler debug render error: ' + String(e?.message || e || 'unknown_error').replace(/[<>]/g, '') + '</td></tr>';
+			content += openSection('lp-auto-performance-metrics');
+			if (upgradeAutomationExecutionSummary?.neutralComponentPlan?.length) {
+				const metricRows = Array.isArray(upgradeAutomationExecutionSummary?.componentPerformanceMetrics) ? upgradeAutomationExecutionSummary.componentPerformanceMetrics : [];
+				const metricsByComponent = Object.fromEntries(metricRows.map(row => [String(row.component || ''), row]));
+				content += '<tr style="opacity:0.66"><td style="min-width:180px"><b>Performance Metrics<br>Component</b></td><td align="right" style="min-width:120px"><b>Installed 14d</b></td><td align="right" style="min-width:120px"><b>Average Value</b></td></tr>';
+				for (const row of upgradeAutomationExecutionSummary.neutralComponentPlan) {
+					const componentName = String(row.displayName || row.name || '');
+					const metric = metricsByComponent[componentName] || metricsByComponent[row.name] || (componentName === 'Survey Data Unit' ? metricsByComponent.SDU : null);
+					const installed14d = Math.floor(Number(metric?.installed14d || 0));
+					const installed14dDisplay = installed14d > 0 ? installed14d.toLocaleString() : '-';
+					const averageValue = installed14d > 0 && Number.isFinite(Number(metric?.averageValue)) ? Math.round(Number(metric.averageValue)).toLocaleString() : '-';
+					content += '<tr><td>' + componentName + '</td><td align="right">' + installed14dDisplay + '</td><td align="right">' + averageValue + '</td></tr>';
+				}
+				if (upgradeAutomationExecutionSummary?.componentPerformanceMetricsError) {
+					content += '<tr><td colspan="3" style="color:#ffb366">Performance metrics using available data; refresh issue: ' + String(upgradeAutomationExecutionSummary.componentPerformanceMetricsError).replace(/[<>]/g, '') + '</td></tr>';
+				}
+			} else {
+				content += '<tr><td colspan="3">Performance metrics unavailable</td></tr>';
 			}
 			content += closeSection;
 		} catch (e) {
