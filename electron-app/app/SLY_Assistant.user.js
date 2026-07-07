@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-100
+// @aephia-version 0.7.35-101
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-100'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-101'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4913,7 +4913,7 @@
 			if (upgradeAutomationExecutionSummary?.neutralComponentPlan?.length) {
 				const metricRows = Array.isArray(upgradeAutomationExecutionSummary?.componentPerformanceMetrics) ? upgradeAutomationExecutionSummary.componentPerformanceMetrics : [];
 				const metricsByComponent = Object.fromEntries(metricRows.map(row => [String(row.component || ''), row]));
-				content += '<tr style="opacity:0.66"><td style="min-width:180px"><b>Performance Metrics<br>Component</b></td><td align="right" style="min-width:96px"><b>Installed 14d</b></td><td align="right" style="min-width:120px"><b>Average Value</b></td><td align="right" style="min-width:96px"><b>Installed yday</b></td><td align="right" style="min-width:120px"><b>Average Value yday</b></td><td align="right" style="min-width:96px"><b>Price GM</b></td></tr>';
+				content += '<tr style="opacity:0.66"><td style="min-width:180px"><b>Performance Metrics<br>Component</b></td><td align="right" style="min-width:96px"><b>Installed 14d</b></td><td align="right" style="min-width:96px"><b>Installed yday</b></td><td align="right" style="min-width:120px"><b>ATLAS Value 14d avg</b></td><td align="right" style="min-width:120px"><b>ATLAS Value yday</b></td><td align="right" style="min-width:96px"><b>Price GM</b></td></tr>';
 				for (const row of upgradeAutomationExecutionSummary.neutralComponentPlan) {
 					const componentName = String(row.displayName || row.name || '');
 					const metric = metricsByComponent[componentName] || metricsByComponent[row.name] || (componentName === 'Survey Data Unit' ? metricsByComponent.SDU : null);
@@ -4924,7 +4924,7 @@
 					const installedYdayDisplay = installedYday > 0 ? installedYday.toLocaleString() : '-';
 					const averageValueYday = installedYday > 0 && Number.isFinite(Number(metric?.averageValueYday)) ? Number(metric.averageValueYday).toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }) : '-';
 					const priceGm = Number.isFinite(Number(metric?.priceGm)) && Number(metric.priceGm) > 0 ? Number(metric.priceGm).toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }) : '-';
-					content += '<tr><td>' + componentName + '</td><td align="right">' + installed14dDisplay + '</td><td align="right">' + averageValue + '</td><td align="right">' + installedYdayDisplay + '</td><td align="right">' + averageValueYday + '</td><td align="right">' + priceGm + '</td></tr>';
+					content += '<tr><td>' + componentName + '</td><td align="right">' + installed14dDisplay + '</td><td align="right">' + installedYdayDisplay + '</td><td align="right">' + averageValue + '</td><td align="right">' + averageValueYday + '</td><td align="right">' + priceGm + '</td></tr>';
 				}
 				if (upgradeAutomationExecutionSummary?.componentPerformanceMetricsError) {
 					content += '<tr><td colspan="6" style="color:#ffb366">Performance metrics using available data; refresh issue: ' + String(upgradeAutomationExecutionSummary.componentPerformanceMetricsError).replace(/[<>]/g, '') + '</td></tr>';
