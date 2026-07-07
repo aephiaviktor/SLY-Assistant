@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-102
+// @aephia-version 0.7.35-103
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-102'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-103'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2166,7 +2166,6 @@
 		const planning = getUpgradeAutomationPlanningHorizon(now);
 		const remainingHours = planning.planningHours;
 		const secondsInRemainingHours = remainingHours * 3600;
-		const blockSpecialNeutral = !!globalSettings?.upgradeAutomationBlockSpecialNeutral;
 		const rows = [];
 		for (const rawName of UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_ORDER) {
 			const canonicalName = rawName;
@@ -2187,7 +2186,7 @@
 			const bufferDaysPhantom = upgrade24h > 0 ? (inventoryPhantom / upgrade24h) : (inventoryPhantom > 0 ? Number.POSITIVE_INFINITY : null);
 			const phantomBlocked = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
 			const phantomUpgradeEligible = inventoryPhantom > 0 && !phantomBlocked;
-			const neutralPhaseBlocked = blockSpecialNeutral && isUpgradeAutomationNeutralSpecialBlockedComponent(canonicalName);
+			const neutralPhaseBlocked = isUpgradeAutomationNeutralSpecialBlockedComponent(canonicalName);
 			rows.push({
 				key: canonicalName,
 				name: canonicalName,

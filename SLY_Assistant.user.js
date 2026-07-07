@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-102
+// @aephia-version 0.7.35-103
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-102'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-103'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2354,6 +2354,7 @@
 			const specialRiskMultiplier = specialRiskControlled ? Math.max(0, Number(riskControl.multiplier || 0)) : 1;
 			const specialMaxCrew = specialRiskControlled ? Math.min(totalCrew, Math.max(0, Math.floor(totalCrew * specialRiskMultiplier))) : Number.POSITIVE_INFINITY;
 			const specialRiskBlocked = specialRiskControlled && specialMaxCrew <= 0;
+			const neutralPhaseBlocked = isUpgradeAutomationNeutralSpecialBlockedComponent(canonicalName);
 			rows.push({
 				key: canonicalName,
 				name: canonicalName,
@@ -2370,7 +2371,8 @@
 				bufferDaysGlobal,
 				phantomBlocked,
 				phantomUpgradeEligible,
-				neutralPhaseBlocked: specialRiskBlocked,
+				neutralPhaseBlocked,
+				targetPhaseBlocked: specialRiskBlocked,
 				specialRiskControlled,
 				specialRiskBlocked,
 				specialRiskMultiplier,
@@ -2508,7 +2510,7 @@
 		const currentTotal = () => rows.reduce((sum, row) => sum + (Number(row.neutralUpgradingHour || 0) * remainingNeutralHours + Number(row.finalUpgradingHour || 0) * remainingTargetHours) * Number(row.lpPerUnit || 0), 0);
 		if (direction === 'neutral' || !rows.length || !Number.isFinite(targetFinalLp)) return { rows, neutralLpTargetTotal, finalLpTargetTotal: currentTotal(), targetFinalLp };
 		const simulateRow = (row, projectedCrew) => {
-			if (!row?.phantomUpgradeEligible || row.neutralPhaseBlocked) return { legal: false };
+			if (!row?.phantomUpgradeEligible || row.targetPhaseBlocked) return { legal: false };
 			if (!Number.isFinite(projectedCrew) || projectedCrew < 0) return { legal: false };
 			if (Number.isFinite(Number(row.specialRiskMaxCrew)) && Math.max(0, Math.floor(Number(projectedCrew || 0))) > Number(row.specialRiskMaxCrew)) return { legal: false };
 			if (row.specialRiskControlled && Number.isFinite(Number(row.specialRiskMaxCrew))) {
@@ -2574,7 +2576,7 @@
 			const wantSource = sourceMass * destBias <= destMass * sourceBias;
 			if (wantSource) {
 				const row = direction === 'aggressive' ? orderedRows[left++] : orderedRows[right--];
-				if (!row || !row.phantomUpgradeEligible || row.neutralPhaseBlocked) continue;
+				if (!row || !row.phantomUpgradeEligible || row.targetPhaseBlocked) continue;
 				const key = String(row.displayName || row.name || '');
 				if (!sourceNames.has(key)) {
 					sourcePool.push(row);
@@ -2583,7 +2585,7 @@
 				}
 			} else {
 				const row = direction === 'aggressive' ? orderedRows[right--] : orderedRows[left++];
-				if (!row || !row.phantomUpgradeEligible || row.neutralPhaseBlocked) continue;
+				if (!row || !row.phantomUpgradeEligible || row.targetPhaseBlocked) continue;
 				const key = String(row.displayName || row.name || '');
 				if (!destNames.has(key)) {
 					destPool.push(row);
@@ -2593,7 +2595,7 @@
 			}
 		}
 		for (const row of orderedRows) {
-			if (!row.phantomUpgradeEligible || row.neutralPhaseBlocked) continue;
+			if (!row.phantomUpgradeEligible || row.targetPhaseBlocked) continue;
 			const key = String(row.displayName || row.name || '');
 			if (!sourceNames.has(key) && !destNames.has(key)) {
 				if (sourceMass * destBias <= destMass * sourceBias) {
@@ -5197,7 +5199,8 @@
 					const neutralBufferDisplay = !row.phantomUpgradeEligible || row.neutralBufferDays == null ? '' : (Number.isFinite(row.neutralBufferDays) ? Number(row.neutralBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
 					const actualSideStyle = row.actualOptimizerSource ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.actualOptimizerDestination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
 					const riskLabel = row.specialRiskControlled ? (' (risk ' + Math.round(Number(row.specialRiskMultiplier || 0) * 100) + '%)') : '';
-					const optimizerDisplayName = row.phantomBlocked ? '<span style="color:#ff8080">' + row.displayName + ' (blocked)</span>' : (row.specialRiskBlocked ? row.displayName + ' (risk blocked)' : row.displayName + riskLabel);
+					const neutralBlockedLabel = row.neutralPhaseBlocked && !row.specialRiskBlocked && highlightNeutral ? ' (neutral blocked)' : '';
+					const optimizerDisplayName = row.phantomBlocked ? '<span style="color:#ff8080">' + row.displayName + ' (blocked)</span>' : (row.specialRiskBlocked ? row.displayName + ' (risk blocked)' : row.displayName + neutralBlockedLabel + riskLabel);
 					content += '<tr><td' + actualSideStyle + '>' + optimizerDisplayName + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(upgradeAutomationExecutionSummary.neutralPhaseMode ? (row.neutralUpgradingPhase || 0) : (row.neutralUpgradingHour || 0)) || 0).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + neutralBufferDisplay + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalCrew || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalUpgradingHour || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + finalBufferDisplay + '</td></tr>';
 				}
 			} else {
