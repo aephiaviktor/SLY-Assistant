@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-108
+// @aephia-version 0.7.35-109
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-108'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-109'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -12779,7 +12779,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			for(const entry of manifest || []) {
 				if(!entry || !entry.res || !(Number(entry.amt || 0) > 0)) continue;
 				const rawAmount = Number(cargoAmounts[entry.res] || 0);
-				const effectiveAmount = Math.max(0, rawAmount - (globalSettings.transportKeep1 ? 1 : 0));
+				// Recovery uses cargo only as a direction signal after reload/update.
+				// Do not subtract transportKeep1 here; a fleet carrying exactly 1
+				// configured resource still tells us which leg it is on.
+				const effectiveAmount = Math.max(0, rawAmount);
 				if(effectiveAmount <= 0) continue;
 				const cargoSize = Number((cargoItems.find(r => r.token == entry.res) || {}).size || 1);
 				const matchedAmount = Math.min(effectiveAmount, Number(entry.amt || 0));
@@ -12800,6 +12803,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			if(preferredRouteIndex !== null && preferredRouteIndex !== undefined) {
 				const preferred = activeCandidates.find(candidate => Number(candidate.routeIndex) === Number(preferredRouteIndex));
 				if(preferred) return { recovered: true, reason: 'preferred_route_cargo_match', leg: preferred, cargoAmounts, candidates: scoredCandidates };
+				const indexed = scoredCandidates.find(candidate => Number(candidate.routeIndex) === Number(preferredRouteIndex));
+				if(indexed) return { recovered: true, reason: activeCandidates.length > 1 ? 'preferred_route_ambiguous_cargo' : 'preferred_route_index', leg: indexed, cargoAmounts, candidates: scoredCandidates };
 			}
 
 			if(activeCandidates.length === 1) {
@@ -13619,16 +13624,6 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					routeIndex: leg.routeIndex,
 					destinationManifest: leg.destinationManifest
 				})), activeTransportPlusRouteIndex);
-				if(!recovery.recovered && activeTransportPlusRouteIndex !== null && recovery.reason === 'no_cargo_match') {
-					const indexedLeg = transportPlusLegs[activeTransportPlusRouteIndex];
-					if(indexedLeg) {
-						recovery = {
-							recovered: true,
-							reason: 'preferred_route_index_no_cargo_match',
-							leg: indexedLeg
-						};
-					}
-				}
 				if(recovery.recovered) {
 					await recoverTransportMovement(i, fleetCoords, recovery, 'Supply Chain');
 				} else {

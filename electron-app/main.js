@@ -505,7 +505,13 @@ function findLatestUsableBackup()
 
 function liveNeedsRestoreFromBackup(live, liveHealth)
 {
-	return !live?.exists || Number(live.totalSize || 0) < 4096 || !liveHealth?.hasUsableSettings
+	// Do not restore merely because the string-based health scanner failed to
+	// recognize settings inside Chromium's LevelDB files. Compaction can make a
+	// valid current DB look "unusable" to this scanner, and restoring then can
+	// resurrect an older config. Only restore when the live DB is actually
+	// missing/tiny; userscript-level JSON fallback handles truly missing
+	// settings after startup.
+	return !live?.exists || Number(live.totalSize || 0) < 4096
 }
 
 function seedInitialLeveldbBackup()
@@ -561,8 +567,7 @@ function snapshotLeveldbToBackup()
 		if (!live.exists || live.totalSize === 0) return { ok: false, error: 'live leveldb is empty, skipping snapshot' }
 		const liveHealth = getLeveldbSettingsHealth(LEVELDB_DIR)
 		if (!liveHealth.hasUsableSettings) {
-			logToUpgradeLog(`[ELECTRON][LEVELDB-BAK] snapshot skipped unhealthy live ${formatSettingsHealth(liveHealth)}`)
-			return { ok: false, skipped: true, error: 'live leveldb has no configured globalSettings', live, liveHealth }
+			logToUpgradeLog(`[ELECTRON][LEVELDB-BAK] snapshot continuing despite scanner-unverified live ${formatSettingsHealth(liveHealth)}`)
 		}
 		if (fs.existsSync(LEVELDB_BAK_DIR)) {
 			try { fs.rmSync(LEVELDB_PREV_BAK_DIR, { recursive: true, force: true }) } catch (e) {}
