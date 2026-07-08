@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-104
+// @aephia-version 0.7.35-105
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-104'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-105'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4879,6 +4879,10 @@
 				const remainingHours = Math.floor(Number(upgradeAutomationExecutionSummary?.remainingHours || 0));
 				const phantomCrew = upgradeAutomationExecutionSummary?.crewTotal ?? '';
 				const installedToday = Number(upgradeAutomationExecutionSummary?.installedToday || 0);
+				const lpFactionYesterdayRaw = upgradeAutomationExecutionSummary?.aephiaLpYesterdayLatest;
+				const lpInstalledYesterdayRaw = upgradeAutomationExecutionSummary?.installedYesterday;
+				const lpFactionYesterday = Number(lpFactionYesterdayRaw);
+				const lpInstalledYesterday = Number(lpInstalledYesterdayRaw);
 				const neutralLpTarget = Number(upgradeAutomationExecutionSummary?.neutralLpTarget || 0);
 				const neutralLpTargetFullDay = Number(upgradeAutomationExecutionSummary?.neutralLpTargetFullDay || 0);
 				const achievableLpTargetFullDay = Number(upgradeAutomationExecutionSummary?.achievableLpTargetFullDay || 0);
@@ -4889,6 +4893,7 @@
 				const projectedLpToday = Number.isFinite(upgradeAutomationLpControl?.projectedLpToday) ? upgradeAutomationLpControl.projectedLpToday : null;
 				const absAdjustment = Number.isFinite(upgradeAutomationLpControl?.absAdjustment) ? upgradeAutomationLpControl.absAdjustment : 0;
 				content += '<tr><td>LP Target Now Hourly</td><td align="right">' + Math.round(lpTargetNowInflux).toLocaleString() + '</td><td>LP Today</td><td align="right">' + Math.round(lpToday).toLocaleString() + '</td><td>Projected LP Today</td><td align="right">' + (projectedLpToday !== null ? Math.round(projectedLpToday).toLocaleString() : '-') + '</td></tr>';
+				content += '<tr><td>LP Faction yday</td><td align="right">' + (lpFactionYesterdayRaw != null && Number.isFinite(lpFactionYesterday) ? Math.round(lpFactionYesterday).toLocaleString() : '-') + '</td><td>LP Installed yday</td><td align="right">' + (lpInstalledYesterdayRaw != null && Number.isFinite(lpInstalledYesterday) ? Math.round(lpInstalledYesterday).toLocaleString() : '-') + '</td><td></td><td></td></tr>';
 				content += '<tr><td>' + lpAggPreLabel + '</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrRelative ?? upgradeAutomationLpControl?.rawAggressiveness ?? upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td><td>Aggr. (abs.)</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrAbsolute ?? (1 + absAdjustment)).toFixed(3) + '</td><td style="color:' + lpAggColor + '">Aggr.</td><td align="right" style="color:' + lpAggColor + '">' + Number(upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td></tr>';
 				content += '<tr><td colspan="6">&nbsp;</td></tr>';
 				content += '<tr><td>Installed LP Today</td><td align="right">' + Math.round(installedToday).toLocaleString() + '</td><td></td><td></td><td></td><td></td></tr>';
