@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-107
+// @aephia-version 0.7.35-108
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-107'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-108'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -6334,10 +6334,11 @@ function renderAssistStats() {
         let extra = null;
 
 	if(fleet && fleet.exitWarpSubwarpPending) {
+		const pendingStateTag = fleet.exitWarpSubwarpPending == 1 ? 3 : 4;
 		let sector = null;
-		if(fleet.exitWarpSubwarpPending == 1) sector = sageProgram.coder.types.decode('MoveWarp', remainingData.subarray(1));
-		if(fleet.exitWarpSubwarpPending == 2) sector = sageProgram.coder.types.decode('MoveSubwarp', remainingData.subarray(1));
-		if(sector.toSector) { // only continue if there is a target sector. Otherwise we will assume a RPC mismatch and reset the pending state (after waiting some time to be sure)
+		if(remainingData[0] == pendingStateTag && fleet.exitWarpSubwarpPending == 1) sector = sageProgram.coder.types.decode('MoveWarp', remainingData.subarray(1));
+		if(remainingData[0] == pendingStateTag && fleet.exitWarpSubwarpPending == 2) sector = sageProgram.coder.types.decode('MoveSubwarp', remainingData.subarray(1));
+		if(sector && sector.toSector) { // only continue if there is a target sector. Otherwise we will assume a RPC mismatch and reset the pending state.
 			fleetState = 'Idle';
 			if(fleet.exitWarpSubwarpPending == 2) {
 				fleet.exitSubwarpWillBurnFuel = sector.fuelExpenditure.toNumber();
@@ -6345,9 +6346,10 @@ function renderAssistStats() {
 			extra = [sector.toSector[0].toNumber(), sector.toSector[1].toNumber()];
 			return [fleetState, extra];
 		} else {
-			cLog(1, `${FleetTimeStamp(fleet.label)} Exit warp/subwarp was pending, but no target sector found, resetting pending state`);
-			logError('Exit warp/subwarp was pending, but no target sector found, resetting pending state', fleet.label);
+			cLog(1, `${FleetTimeStamp(fleet.label)} Exit warp/subwarp was pending, but chain state tag is ${remainingData[0]}, resetting pending state`);
+			logError('Exit warp/subwarp was pending, but chain state no longer matched, resetting pending state', fleet.label);
 			fleet.exitWarpSubwarpPending = 0;
+			fleet.exitSubwarpWillBurnFuel = 0;
 		}
 	}
 
@@ -7140,12 +7142,17 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 			if(fleet.exitWarpSubwarpPending) {
 				let exitWarpSubwarpTx = null;
-				if(fleet.exitWarpSubwarpPending == 1) exitWarpSubwarpTx = await execExitWarp(fleet, true);
-				else exitWarpSubwarpTx = await execExitSubwarp(fleet, true);
-				if(ix.constructor === Array) {
-					ix = [exitWarpSubwarpTx].concat(ix);
-				} else {
-					ix = [exitWarpSubwarpTx,ix];
+				const fleetAcctInfo = fleet.publicKey ? await getAccountInfo(fleetName, 'queued exit state', fleet.publicKey) : null;
+				const chainStateTag = fleetAcctInfo ? fleetAcctInfo.data.subarray(439)[0] : null;
+				if(fleet.exitWarpSubwarpPending == 1 && chainStateTag == 3) exitWarpSubwarpTx = await execExitWarp(fleet, true);
+				else if(fleet.exitWarpSubwarpPending == 2 && chainStateTag == 4) exitWarpSubwarpTx = await execExitSubwarp(fleet, true);
+				else cLog(1,`${FleetTimeStamp(fleetName)} Skipping stale queued exit warp/subwarp, chain state tag: ${chainStateTag}`);
+				if(exitWarpSubwarpTx) {
+					if(ix.constructor === Array) {
+						ix = [exitWarpSubwarpTx].concat(ix);
+					} else {
+						ix = [exitWarpSubwarpTx,ix];
+					}
 				}
 				fleet.exitWarpSubwarpPending = 0;
 				fleet.exitSubwarpWillBurnFuel = 0;
@@ -13792,8 +13799,19 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		let lastBlock=null;
 		let allTxSlices=[];
 
-		if(fleet.exitWarpSubwarpPending == 1) { transactions = [await execExitWarp(fleet, true)].concat(transactions); fleet.exitWarpSubwarpPending = 0; }
-		if(fleet.exitWarpSubwarpPending == 2) { transactions = [await execExitSubwarp(fleet, true)].concat(transactions); fleet.exitWarpSubwarpPending = 0; fleet.exitSubwarpWillBurnFuel = 0; }
+		if(fleet.exitWarpSubwarpPending) {
+			const fleetAcctInfo = fleet.publicKey ? await getAccountInfo(fleet.label, 'queued exit state', fleet.publicKey) : null;
+			const chainStateTag = fleetAcctInfo ? fleetAcctInfo.data.subarray(439)[0] : null;
+			if(fleet.exitWarpSubwarpPending == 1 && chainStateTag == 3) {
+				transactions = [await execExitWarp(fleet, true)].concat(transactions);
+			} else if(fleet.exitWarpSubwarpPending == 2 && chainStateTag == 4) {
+				transactions = [await execExitSubwarp(fleet, true)].concat(transactions);
+			} else {
+				cLog(1,`${FleetTimeStamp(fleet.label)} Skipping stale queued exit warp/subwarp, chain state tag: ${chainStateTag}`);
+			}
+			fleet.exitWarpSubwarpPending = 0;
+			fleet.exitSubwarpWillBurnFuel = 0;
+		}
 
 		while(curPos+curSize <= transactions.length) {
 
