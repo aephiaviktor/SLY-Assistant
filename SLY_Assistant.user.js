@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-106
+// @aephia-version 0.7.35-107
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-106'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-107'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -13309,9 +13309,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
             if(userFleets[i].stopping) return;
 
-	            if (userFleets[i].moveTarget !== '') {
-	                const targetX = userFleets[i].moveTarget.split(',').length > 1 ? userFleets[i].moveTarget.split(',')[0].trim() : '';
-	                const targetY = userFleets[i].moveTarget.split(',').length > 1 ? userFleets[i].moveTarget.split(',')[1].trim() : '';
+			const savedMoveTarget = typeof fleetParsedData.moveTarget === 'string' ? fleetParsedData.moveTarget : '';
+			const activeMoveTarget = userFleets[i].moveTarget && userFleets[i].moveTarget !== '' ? userFleets[i].moveTarget : savedMoveTarget;
+	            if (activeMoveTarget !== '') {
+				userFleets[i].moveTarget = activeMoveTarget;
+	                const targetX = activeMoveTarget.split(',').length > 1 ? activeMoveTarget.split(',')[0].trim() : '';
+	                const targetY = activeMoveTarget.split(',').length > 1 ? activeMoveTarget.split(',')[1].trim() : '';
 	                const moveDist = calculateMovementDistance(fleetCoords, [targetX,targetY]);
 			let isStarbaseAndWarpSubwarp = userFleets[i].moveType == 'warpsubwarp' && ((fleetCoords[0] == starbaseX && fleetCoords[1] == starbaseY) || (fleetCoords[0] == destX && fleetCoords[1] == destY));
 	                await handleMovement(i, moveDist, targetX, targetY, isStarbaseAndWarpSubwarp);
@@ -13575,7 +13578,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 		if(userFleets[i].stopping) return;
 
-			const activeMoveTarget = userFleets[i].moveTarget !== '' ? userFleets[i].moveTarget : (fleetParsedData.moveTarget || '');
+			const activeMoveTarget = userFleets[i].moveTarget && userFleets[i].moveTarget !== '' ? userFleets[i].moveTarget : (fleetParsedData.moveTarget || '');
 			if (activeMoveTarget !== '') {
 				const activeMoveTargetCoords = ConvertCoords(activeMoveTarget);
 				if(!activeLeg && activeTransportPlusRouteIndex !== null) {

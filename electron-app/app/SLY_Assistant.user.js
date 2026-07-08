@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-106
+// @aephia-version 0.7.35-107
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-106'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-107'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -577,7 +577,13 @@
 		await GM.setValue(settingsGmKey, JSON.stringify(backup.settings));
 		for (const [key, value] of Object.entries(backup.fleetConfigs || {})) await GM.setValue(key, JSON.stringify(value));
 		// craftConfigs: only restore the user-persistent fields. The volatile
-		// runtime state is re-derived on reload from on-chain and the optimizer.
+		// runtime state (state, craftingId, craftingCoords, feeAtlas, amount,
+		// nextAmount, nextRuntime, lpAutomationUpdatedAt, lpAutomationCycleStamp,
+		// errorCount) is re-derived on reload from on-chain via
+		// recoverCraftingProcessesForAllSlots and from the optimizer's next cycle
+		// write via applyUpgradeAutomationExecutionToCraftConfig. Restoring the
+		// raw backup values would surface stale "Waiting for crew" / past
+		// nextFinishAt to the panel.
 		const PERSISTENT_CRAFT_CONFIG_KEYS = ['coordinates', 'item', 'special', 'belowAmount'];
 		for (const [key, value] of Object.entries(backup.craftConfigs || {})) {
 			if (!value || typeof value !== 'object') continue;
@@ -592,6 +598,53 @@
 		cLog(1, `[SLYA-STATE-BAK] restored missing current state from latest external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'} parseError=${parseError ? String(parseError) : 'none'}`);
 		try { await appendUpgradeAutomationLog(`[SLYA-STATE-BAK] restored missing current state from latest external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'} parseError=${parseError ? String(parseError) : 'none'}`); } catch (e) {}
 		return true;
+	}
+
+	// Post-reload reconcile: make sure the current cycle's optimizer plan is in
+	// GM even if the optimizer hasn't captured it yet this hour. The scheduler
+	// captures at xx:57 and writes at xx:57-:58. If the panel reloads in the
+	// middle of a non-standard cycle (e.g. phantom starbase was just resumed),
+	// the persisted plan may be missing and the slot loops would have nothing
+	// to act on for the current xx:59 target window. This re-derives the plan
+	// from the LP execution summary, persists it, and writes the craft configs
+	// immediately when the write deadline is already past.
+	async function reconcileUpgradeAutomationCraftConfigsAfterReload(reason) {
+		try {
+			if (typeof globalSettings === 'undefined' || !globalSettings || !globalSettings.upgradeAutomationEnabled) return;
+			const now = new Date();
+			const persistedPlan = await loadUpgradeAutomationSchedulerPlan(globalSettings, now);
+			if (persistedPlan && isUpgradeAutomationSchedulerPlanValidForHour(persistedPlan, globalSettings, now)) {
+				hydrateUpgradeAutomationSchedulerPlan(persistedPlan);
+				try { cLog(1, `[SLYA-RECONCILE] hydrated persisted plan cycleStamp=${persistedPlan.cycleStamp} rows=${(persistedPlan.rows || []).length} reason=${String(reason || 'unknown')}`); } catch (e) {}
+				return;
+			}
+			if (!upgradeAutomationExecutionSummary) {
+				try {
+					const fetched = await fetchUpgradeAutomationExecutionSummary();
+					if (fetched) {
+						upgradeAutomationExecutionSummary = fetched;
+						window.schedulerSummary = upgradeAutomationExecutionSummary;
+					}
+				} catch (e) { /* fall through; getUpgradeAutomationSchedulerRowsFromSummary will return empty */ }
+			}
+			const { rows, targetFinishAtUtc } = getUpgradeAutomationSchedulerRowsFromSummary(upgradeAutomationExecutionSummary || {}, globalSettings, now);
+			if (!Array.isArray(rows) || !rows.length || !targetFinishAtUtc) {
+				try { cLog(1, `[SLYA-RECONCILE] no current cycle plan derivable; waiting for xx:57 capture reason=${String(reason || 'unknown')}`); } catch (e) {}
+				return;
+			}
+			const schedule = { targetFinishAtUtc };
+			await persistUpgradeAutomationSchedulerPlan('reload-reconcile', rows, schedule, globalSettings, now);
+			const writeAfter = getUpgradeAutomationSchedulerWriteAfterUtc({ targetFinishAtUtc });
+			if (writeAfter && now.getTime() >= new Date(writeAfter).getTime()) {
+				await applyUpgradeAutomationExecutionToCraftConfig(rows, schedule, globalSettings, now);
+				await writeUpgradeAutomationSchedulerReceipt('reload-reconcile', { rows, targetFinishAtUtc }, globalSettings, now);
+				try { cLog(1, `[SLYA-RECONCILE] wrote current cycle plan immediately cycleStamp=${getUpgradeAutomationCycleStamp(now, globalSettings)} rows=${rows.length} target=${targetFinishAtUtc} reason=${String(reason || 'unknown')}`); } catch (e) {}
+			} else {
+				try { cLog(1, `[SLYA-RECONCILE] persisted current cycle plan cycleStamp=${getUpgradeAutomationCycleStamp(now, globalSettings)} rows=${rows.length} target=${targetFinishAtUtc} writeAfter=${writeAfter} reason=${String(reason || 'unknown')}`); } catch (e) {}
+			}
+		} catch (e) {
+			try { cLog(1, '[SLYA-RECONCILE] error:', e && e.message || e); } catch (_) {}
+		}
 	}
 
 	async function refreshUpgradeAutomationInfluxStats() {
@@ -1099,20 +1152,7 @@
 		const cumErr = state.dayKey === dayKey ? Number(state.cumErr || 0) : 0;
 		const ag = computeAggressivenessFromControl(control, cumErr, influxTarget, now);
 		const aggressivenessActive = isUpgradeAutomationAggressivenessActive(now);
-		const utcMinutes = now.getUTCMinutes() + (now.getUTCSeconds() / 60);
-		const windows = getUpgradeAutomationLpSnapshotWindows(now);
-		const hourlyValues = influxTarget.hourlyValues || {};
-		const prevVal = Number.isFinite(influxTarget.prevValue) ? influxTarget.prevValue : 0;
-		const nextVal = Number.isFinite(influxTarget.nextValue) ? influxTarget.nextValue : 0;
-		const lastHourVal = Number.isFinite(hourlyValues[23]) ? hourlyValues[23] : 0;
-		// LP added during the rest of the current hour
-		const frac = Math.max(0, (60 - utcMinutes) / 60);
-		const partialNextHour = (nextVal - prevVal) * frac;
-		// LP added from hour (nextHour+1) through hour 23 (remaining full hours)
-		const remainingFull = Math.max(0, lastHourVal - nextVal);
-		const projectedLpToday = Number.isFinite(control.todayTotal)
-			? control.todayTotal + partialNextHour + remainingFull
-			: null;
+		const projectedLpToday = computeUpgradeAutomationProjectedLpToday(control, influxTarget, now);
 		if (![control.progress, control.avg7Weighted, control.targetNow, control.todayTotal, ag.aggr].every(Number.isFinite)) {
 			throw new Error('lp_control_invalid_values');
 		}
@@ -1242,6 +1282,12 @@
 		return now.getUTCHours() < phaseHours;
 	}
 
+	function isUpgradeAutomationNextCycleTarget(settings = {}, now = new Date()) {
+		const phaseHours = Math.max(0, Math.min(23, parseIntDefault(settings?.upgradeAutomationAggressivenessStartHour, 12)));
+		const upcomingHour = (now.getUTCHours() + 1) % 24;
+		return upcomingHour >= phaseHours;
+	}
+
 	function isUpgradeAutomationNeutralPhaseActivationWindow(now = new Date()) {
 		const secondsPastHour = now.getUTCMinutes() * 60 + now.getUTCSeconds();
 		return secondsPastHour >= 50 * 60 && secondsPastHour < 51 * 60;
@@ -1278,9 +1324,7 @@
 		const componentOrder = UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_ORDER;
 		const fixedRowsByComponent = new Map();
 		for (const row of sourceRows) {
-			const phaseHours = Math.max(0, Math.min(23, parseIntDefault(settings?.upgradeAutomationAggressivenessStartHour, 12)));
-			const upcomingHour = (now.getUTCHours() + 1) % 24;
-			const useNeutral = upcomingHour < phaseHours;
+			const useNeutral = !isUpgradeAutomationNextCycleTarget(settings, now);
 			const crew = Math.max(0, Math.floor(Number(useNeutral ? row.crew : (row.finalCrew !== undefined ? row.finalCrew : row.crew)) || 0));
 			const neutralExecutionAmount = settings?.upgradeAutomationNeutralBlockSingleTx ? Number(row.neutralUpgradingPhase ?? computeUpgradeAutomationNeutralPhaseAmount(row, settings) ?? 0) : Number(row.neutralUpgradingHour || 0);
 			const upgradingHour = Math.max(0, Math.floor(Number(useNeutral ? neutralExecutionAmount : (row.finalUpgradingHour !== undefined ? row.finalUpgradingHour : neutralExecutionAmount)) || 0));
@@ -1869,6 +1913,115 @@
 		}
 	}
 
+	// Read-only panel refresh for non-LP-managed craft slots.
+	// Walks each non-LP slot's saved state, re-queries on-chain CraftingInstance +
+	// CraftingProcess accounts at the slot's craftingCoords, and updates the
+	// displayed `state` text if the slot's saved `craftingId` is no longer live
+	// on-chain (so the panel doesn't keep showing a stale "Waiting for crew" etc.).
+	// Does NOT mutate craftingId. Does NOT call execCancelCraft. Does NOT touch
+	// LP-managed slots. Does NOT write back to GM. Display-only, safe to run on
+	// a timer.
+	async function refreshNonLpCraftPanelFromChain() {
+		if (typeof sageProgram === 'undefined' || !sageProgram || !sageProgram.account || !sageProgram.account.craftingInstance) return;
+		if (typeof craftingProgram === 'undefined' || !craftingProgram || !craftingProgram.account || !craftingProgram.account.craftingProcess) return;
+		if (typeof userProfileAcct === 'undefined' || !userProfileAcct) return;
+		try {
+			const settings = (typeof globalSettings !== 'undefined' && globalSettings) ? globalSettings : {};
+			const totalCraftingJobs = Math.max(0, parseIntDefault(settings.craftingJobs, 0));
+			if (!totalCraftingJobs) return;
+			const startCraftSlot = Math.max(1, parseIntDefault(settings.upgradeAutomationStartCraftSlot, 1));
+			const managedLabels = new Set(getUpgradeAutomationManagedCraftLabels(settings));
+
+			// Build the list of non-LP slot labels: 1..totalCraftingJobs minus managed.
+			const nonLpLabels = [];
+			for (let i = 1; i <= totalCraftingJobs; i++) {
+				const label = 'craft' + i;
+				if (managedLabels.has(label)) continue;
+				nonLpLabels.push(label);
+			}
+			if (!nonLpLabels.length) return;
+
+			// Read each slot's saved state once. Skip slots without craftingCoords
+			// (never started) or without a craftingId (idle).
+			const slotByLabel = new Map();
+			const slotByCoords = new Map();
+			for (const label of nonLpLabels) {
+				let slot;
+				try {
+					const raw = await GM.getValue(label, '{}');
+					slot = raw ? JSON.parse(raw) : {};
+				} catch (e) { continue; }
+				const craftingId = Math.floor(Number(slot && slot.craftingId || 0));
+				if (!craftingId) continue;
+				const coords = String((slot && slot.craftingCoords) || (slot && slot.coordinates) || '').trim();
+				if (!coords) continue;
+				slotByLabel.set(label, { slot, craftingId, coords });
+				if (!slotByCoords.has(coords)) slotByCoords.set(coords, []);
+				slotByCoords.get(coords).push(label);
+			}
+			if (!slotByCoords.size) return;
+
+			let updated = 0;
+			for (const [coords, labels] of slotByCoords) {
+				const coordParts = coords.split(',').map(v => parseInt(String(v).trim(), 10));
+				if (coordParts.length !== 2 || !coordParts.every(Number.isFinite)) continue;
+				let starbase;
+				try { starbase = await getStarbaseFromCoords(coordParts[0], coordParts[1], true); } catch (e) { continue; }
+				if (!starbase || !starbase.publicKey) continue;
+				let starbasePlayer;
+				try { starbasePlayer = await getStarbasePlayer(userProfileAcct, starbase.publicKey); } catch (e) { continue; }
+				const starbasePlayerPk = starbasePlayer ? (starbasePlayer.publicKey || starbasePlayer) : null;
+				if (!starbasePlayerPk) continue;
+
+				let craftingInstances;
+				try {
+					craftingInstances = await sageProgram.account.craftingInstance.all([
+						{ memcmp: { offset: 11, bytes: starbasePlayerPk.toBase58() } }
+					]);
+				} catch (e) { continue; }
+
+				// Build the set of live craftingIds across all instances at this starbase.
+				const liveCraftingIds = new Set();
+				for (const craftingInstance of craftingInstances) {
+					let craftingProcesses;
+					try {
+						craftingProcesses = await craftingProgram.account.craftingProcess.all([
+							{ memcmp: { offset: 17, bytes: craftingInstance.publicKey.toBase58() } }
+						]);
+					} catch (e) { continue; }
+					for (const cp of craftingProcesses) {
+						try {
+							const cid = cp && cp.account && cp.account.craftingId && cp.account.craftingId.toNumber
+								? cp.account.craftingId.toNumber()
+								: Number(cp && cp.account && cp.account.craftingId || 0);
+							if (cid) liveCraftingIds.add(cid);
+						} catch (e) { /* skip */ }
+					}
+				}
+
+				// For each slot at these coords, if its saved craftingId is no longer
+				// live on-chain, the slot is stale: update the displayed state to
+				// 'Idle' and re-render. Do NOT write back to GM.
+				for (const label of labels) {
+					const rec = slotByLabel.get(label);
+					if (!rec) continue;
+					if (liveCraftingIds.has(rec.craftingId)) continue;
+					const currentState = String((rec.slot && rec.slot.state) || '');
+					if (currentState === 'Idle') continue;
+					try { cLog(2, FleetTimeStamp(label), '[CRAFT-PANEL-STALE] saved craftingId', rec.craftingId, 'not found in live processes at', coords + '; displaying Idle'); } catch (e) {}
+					try { updateFleetState({ label, state: 'Idle' }, 'Idle', true); } catch (e) {}
+					updated += 1;
+				}
+			}
+
+			if (updated > 0) {
+				try { renderAssistStats(); } catch (e) {}
+			}
+		} catch (e) {
+			try { cLog(1, '[CRAFT-PANEL-REFRESH] error:', e && e.message || e); } catch (_) {}
+		}
+	}
+
 	function getUpgradeAutomationLpUpgradeRecipeNames() {
 		return new Set(UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_ORDER.map(componentName => {
 			return componentName === 'Survey Data Unit' ? 'SDU Upgrade' : (componentName + ' Upgrade');
@@ -2178,12 +2331,13 @@
 		};
 	}
 
-	function computeUpgradeAutomationNeutralPlan(crewTotal, installedTodayByComponent = {}, now = new Date()) {
+	function computeUpgradeAutomationNeutralPlan(crewTotal, installedTodayByComponent = {}, now = new Date(), specialRiskControl = null) {
 		const totalCrew = Math.max(0, Math.floor(Number(crewTotal || 0)));
 		const minCrewThreshold = totalCrew * 0.01;
 		const planning = getUpgradeAutomationPlanningHorizon(now);
 		const remainingHours = planning.planningHours;
 		const secondsInRemainingHours = remainingHours * 3600;
+		const riskControl = specialRiskControl || computeUpgradeAutomationSpecialRiskControl(null, now);
 		const rows = [];
 		for (const rawName of UPGRADE_AUTOMATION_NEUTRAL_COMPONENT_ORDER) {
 			const canonicalName = rawName;
@@ -2204,6 +2358,10 @@
 			const bufferDaysPhantom = upgrade24h > 0 ? (inventoryPhantom / upgrade24h) : (inventoryPhantom > 0 ? Number.POSITIVE_INFINITY : null);
 			const phantomBlocked = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
 			const phantomUpgradeEligible = inventoryPhantom > 0 && !phantomBlocked;
+			const specialRiskControlled = !!riskControl?.enabled && isUpgradeAutomationNeutralSpecialBlockedComponent(canonicalName);
+			const specialRiskMultiplier = specialRiskControlled ? Math.max(0, Number(riskControl.multiplier || 0)) : 1;
+			const specialMaxCrew = specialRiskControlled ? Math.min(totalCrew, Math.max(0, Math.floor(totalCrew * specialRiskMultiplier))) : Number.POSITIVE_INFINITY;
+			const specialRiskBlocked = specialRiskControlled && specialMaxCrew <= 0;
 			const neutralPhaseBlocked = isUpgradeAutomationNeutralSpecialBlockedComponent(canonicalName);
 			rows.push({
 				key: canonicalName,
@@ -2222,6 +2380,12 @@
 				phantomBlocked,
 				phantomUpgradeEligible,
 				neutralPhaseBlocked,
+				targetPhaseBlocked: specialRiskBlocked,
+				specialRiskControlled,
+				specialRiskBlocked,
+				specialRiskMultiplier,
+				specialRiskMaxCrew: specialMaxCrew,
+				specialRiskReason: specialRiskControlled ? String(riskControl.reason || '') : '',
 				lpPerUnit: 0,
 				lpPerSecond: 0,
 				crew: 0,
@@ -2250,6 +2414,14 @@
 		};
 		const isProjectedNeutralCrewAllowed = (row, crew) => {
 			if (!row || !row.phantomUpgradeEligible || Number(row.inventoryPhantom || 0) <= 0 || Number(row.inventoryGlobal || 0) <= 0) return false;
+			if (Number.isFinite(Number(row.specialRiskMaxCrew)) && Math.max(0, Math.floor(Number(crew || 0))) > Number(row.specialRiskMaxCrew)) return false;
+			if (row.specialRiskControlled && Number.isFinite(Number(row.specialRiskMaxCrew))) {
+				const projectedSpecialCrew = rows.reduce((sum, candidate) => {
+					if (!candidate.specialRiskControlled) return sum;
+					return sum + (candidate === row ? Math.max(0, Math.floor(Number(crew || 0))) : Math.max(0, Math.floor(Number(candidate.crew || 0))));
+				}, 0);
+				if (projectedSpecialCrew > Number(row.specialRiskMaxCrew)) return false;
+			}
 			const projectedBuffer = projectNeutralBufferDays(row, crew);
 			const tier = getUpgradeAutomationBufferTier(projectedBuffer, row.inventoryGlobal);
 			return tier !== 'D' && tier !== 'D_ZERO';
@@ -2346,8 +2518,16 @@
 		const currentTotal = () => rows.reduce((sum, row) => sum + (Number(row.neutralUpgradingHour || 0) * remainingNeutralHours + Number(row.finalUpgradingHour || 0) * remainingTargetHours) * Number(row.lpPerUnit || 0), 0);
 		if (direction === 'neutral' || !rows.length || !Number.isFinite(targetFinalLp)) return { rows, neutralLpTargetTotal, finalLpTargetTotal: currentTotal(), targetFinalLp };
 		const simulateRow = (row, projectedCrew) => {
-			if (!row?.phantomUpgradeEligible) return { legal: false };
+			if (!row?.phantomUpgradeEligible || row.targetPhaseBlocked) return { legal: false };
 			if (!Number.isFinite(projectedCrew) || projectedCrew < 0) return { legal: false };
+			if (Number.isFinite(Number(row.specialRiskMaxCrew)) && Math.max(0, Math.floor(Number(projectedCrew || 0))) > Number(row.specialRiskMaxCrew)) return { legal: false };
+			if (row.specialRiskControlled && Number.isFinite(Number(row.specialRiskMaxCrew))) {
+				const projectedSpecialCrew = rows.reduce((sum, candidate) => {
+					if (!candidate.specialRiskControlled) return sum;
+					return sum + (candidate === row ? Math.max(0, Math.floor(Number(projectedCrew || 0))) : Math.max(0, Math.floor(Number(candidate.finalCrew || 0))));
+				}, 0);
+				if (projectedSpecialCrew > Number(row.specialRiskMaxCrew)) return { legal: false };
+			}
 			const projected = projectUpgradeAutomationFinalRow(row, projectedCrew, remainingHours);
 			const projectedHourly = Number(projected.finalUpgradingHour || 0);
 			const availableInventory = Number(row.inventoryGlobal || 0);
@@ -2404,7 +2584,7 @@
 			const wantSource = sourceMass * destBias <= destMass * sourceBias;
 			if (wantSource) {
 				const row = direction === 'aggressive' ? orderedRows[left++] : orderedRows[right--];
-				if (!row || !row.phantomUpgradeEligible) continue;
+				if (!row || !row.phantomUpgradeEligible || row.targetPhaseBlocked) continue;
 				const key = String(row.displayName || row.name || '');
 				if (!sourceNames.has(key)) {
 					sourcePool.push(row);
@@ -2413,7 +2593,7 @@
 				}
 			} else {
 				const row = direction === 'aggressive' ? orderedRows[right--] : orderedRows[left++];
-				if (!row || !row.phantomUpgradeEligible) continue;
+				if (!row || !row.phantomUpgradeEligible || row.targetPhaseBlocked) continue;
 				const key = String(row.displayName || row.name || '');
 				if (!destNames.has(key)) {
 					destPool.push(row);
@@ -2423,7 +2603,7 @@
 			}
 		}
 		for (const row of orderedRows) {
-			if (!row.phantomUpgradeEligible) continue;
+			if (!row.phantomUpgradeEligible || row.targetPhaseBlocked) continue;
 			const key = String(row.displayName || row.name || '');
 			if (!sourceNames.has(key) && !destNames.has(key)) {
 				if (sourceMass * destBias <= destMass * sourceBias) {
@@ -2436,6 +2616,61 @@
 					destMass += lpMassOf(row);
 				}
 			}
+		}
+		let specialPriorityTargetCrew = 0;
+		let specialPriorityActualCrew = 0;
+		let specialPriorityTransfers = 0;
+		const specialPriorityRows = rows.filter(row => row.specialRiskControlled && !row.specialRiskBlocked && row.phantomUpgradeEligible);
+		if (direction === 'aggressive' && specialPriorityRows.length) {
+			const totalPlannedCrew = rows.reduce((sum, row) => sum + Math.max(0, Math.floor(Number(row.finalCrew || 0))), 0);
+			const specialRiskMultiplier = Math.max(0, ...specialPriorityRows.map(row => Number(row.specialRiskMultiplier || 0)));
+			specialPriorityTargetCrew = Math.min(totalPlannedCrew, Math.floor(totalPlannedCrew * specialRiskMultiplier));
+			const specialCrewTotal = () => specialPriorityRows.reduce((sum, row) => sum + Math.max(0, Math.floor(Number(row.finalCrew || 0))), 0);
+			const specialGuardLimit = Math.max(100, totalPlannedCrew * Math.max(1, specialPriorityRows.length) * 2);
+			for (let guard = 0; guard < specialGuardLimit; guard++) {
+				const currentSpecialCrew = specialCrewTotal();
+				if (currentSpecialCrew >= specialPriorityTargetCrew) break;
+				const currentLp = currentTotal();
+				const distanceNow = Math.abs(targetFinalLp - currentLp);
+				const candidates = [];
+				for (const src of sourcePool) {
+					if (!src || src.specialRiskControlled || Number(src.finalCrew || 0) < 1) continue;
+					const srcSim = simulateRow(src, Math.max(0, Number(src.finalCrew || 0) - 1));
+					if (!srcSim.legal) continue;
+					const srcCurrentLp = (Number(src.neutralUpgradingHour || 0) * remainingNeutralHours + Number(src.finalUpgradingHour || 0) * remainingTargetHours) * Number(src.lpPerUnit || 0);
+					for (const dst of specialPriorityRows) {
+						if (dst === src) continue;
+						const dstSim = simulateRow(dst, Number(dst.finalCrew || 0) + 1);
+						if (!dstSim.legal) continue;
+						if (!pairDirectionAllowed(srcSim, dstSim)) continue;
+						const dstCurrentLp = (Number(dst.neutralUpgradingHour || 0) * remainingNeutralHours + Number(dst.finalUpgradingHour || 0) * remainingTargetHours) * Number(dst.lpPerUnit || 0);
+						const totalAfter = currentLp - srcCurrentLp - dstCurrentLp + Number(srcSim.projectedTotalComponentLp || 0) + Number(dstSim.projectedTotalComponentLp || 0);
+						const distanceAfter = Math.abs(targetFinalLp - totalAfter);
+						if (distanceAfter >= distanceNow) continue;
+						candidates.push({ src, dst, srcSim, dstSim, distanceAfter, totalAfter });
+					}
+				}
+				if (!candidates.length) break;
+				candidates.sort((a, b) => {
+					if (a.distanceAfter !== b.distanceAfter) return a.distanceAfter - b.distanceAfter;
+					const aDstLps = Number(a.dstSim.effectiveLpPerSecond || 0);
+					const bDstLps = Number(b.dstSim.effectiveLpPerSecond || 0);
+					if (aDstLps !== bDstLps) return bDstLps - aDstLps;
+					const aSrcLps = Number(a.srcSim.effectiveLpPerSecond || 0);
+					const bSrcLps = Number(b.srcSim.effectiveLpPerSecond || 0);
+					if (aSrcLps !== bSrcLps) return aSrcLps - bSrcLps;
+					return String(a.dst.displayName || a.dst.name || '').localeCompare(String(b.dst.displayName || b.dst.name || ''));
+				});
+				const best = candidates[0];
+				best.src.finalCrew = Math.max(0, Number(best.src.finalCrew || 0) - 1);
+				best.dst.finalCrew = Math.max(0, Number(best.dst.finalCrew || 0) + 1);
+				syncProjectedFields(best.src);
+				syncProjectedFields(best.dst);
+				actualSourceNames.add(String(best.src.displayName || best.src.name || ''));
+				actualDestNames.add(String(best.dst.displayName || best.dst.name || ''));
+				specialPriorityTransfers++;
+			}
+			specialPriorityActualCrew = specialCrewTotal();
 		}
 		const guardLimit = Math.max(1000, rows.length * Math.max(1, rows.reduce((sum, row) => sum + Math.max(0, Number(row.finalCrew || 0)), 0)) * 6);
 		for (let guard = 0; guard < guardLimit; guard++) {
@@ -2534,6 +2769,9 @@
 			poolSkewMultiplier,
 			behindRatio,
 			partitionDirection,
+			specialPriorityTargetCrew,
+			specialPriorityActualCrew,
+			specialPriorityTransfers,
 		};
 	}
 	async function fetchUpgradeAutomationExecutionSummary() {
@@ -2625,6 +2863,8 @@
 		const dayKey = now.toISOString().slice(0, 10);
 		const cumErr = state.dayKey === dayKey ? Number(state.cumErr || 0) : 0;
 		const ag = computeAggressivenessFromControl(control, cumErr, influxTarget, now);
+		const projectedLpToday = computeUpgradeAutomationProjectedLpToday(control, influxTarget, now);
+		const specialRiskControl = computeUpgradeAutomationSpecialRiskControl(projectedLpToday, now);
 		const nextHour = new Date(now.getTime());
 		nextHour.setUTCMinutes(0, 0, 0);
 		nextHour.setUTCHours(nextHour.getUTCHours() + 1);
@@ -2692,7 +2932,7 @@
 		const effectiveCrewTotal = (!globalSettings?.upgradeAutomationPhantomCrewUnlimited && globalSettings?.upgradeAutomationMaxPhantomCrew != null && Number(globalSettings.upgradeAutomationMaxPhantomCrew) > 0)
 			? Math.min(crewTotal, Number(globalSettings.upgradeAutomationMaxPhantomCrew))
 			: crewTotal;
-		const neutralComponentPlan = computeUpgradeAutomationNeutralPlan(effectiveCrewTotal, installedTodayByComponent, now);
+		const neutralComponentPlan = computeUpgradeAutomationNeutralPlan(effectiveCrewTotal, installedTodayByComponent, now, specialRiskControl);
 		const finalPlan = computeUpgradeAutomationFinalPlan(neutralComponentPlan, ag.aggr, now);
 		const requestedNeutralPhaseMode = !!globalSettings?.upgradeAutomationNeutralBlockSingleTx;
 		const neutralPhaseSnapshotKey = getUpgradeAutomationNeutralPhaseSnapshotKey(globalSettings, now);
@@ -2747,6 +2987,7 @@
 		const installedTargetNextHour = Math.max(0, installedTargetNow - installedToday) / Math.max(1, planning.planningHours);
 		const installedNeededNextHour = Math.max(0, installedTargetNextHour);
 		const aggressivenessActive = isUpgradeAutomationAggressivenessActive(now);
+		const nextCycleTarget = isUpgradeAutomationNextCycleTarget(globalSettings, now);
 		upgradeAutomationExecutionCrewDebug = crewDebug;
 		if (![ag.aggr, installedToday, installedTargetNow, installedGap, installedTargetNextHour, installedNeededNextHour, lpPerSecondNow].every(Number.isFinite)) {
 			throw new Error('execution_summary_invalid_values');
@@ -2759,6 +3000,18 @@
 			mode: ag.aggr >= 0.75 ? 'Catch-up' : ag.aggr <= 0.25 ? 'Suppress' : 'Balanced',
 			aggressiveness: ag.aggr,
 			aggressivenessActive,
+			projectedLpToday,
+			specialRiskControl,
+			specialRiskDebug: {
+				multiplier: Number(specialRiskControl?.multiplier ?? 1),
+				redemptionScore: Number(specialRiskControl?.redemptionScore ?? 1),
+				confidenceScore: Number(specialRiskControl?.confidenceScore ?? 0),
+				priorityActualCrew: Number(finalPlan.specialPriorityActualCrew || 0),
+				priorityTargetCrew: Number(finalPlan.specialPriorityTargetCrew || 0),
+				reason: String(specialRiskControl?.reason || '')
+			},
+			nextCycleMode: nextCycleTarget ? 'target' : 'neutral',
+			nextCycleTarget,
 			crewTotal,
 			effectiveCrewTotal,
 			crewBusy,
@@ -2796,6 +3049,9 @@
 			poolSkewMultiplier: finalPlan.poolSkewMultiplier,
 			behindRatio: finalPlan.behindRatio,
 			partitionDirection: finalPlan.partitionDirection,
+			specialPriorityTargetCrew: finalPlan.specialPriorityTargetCrew,
+			specialPriorityActualCrew: finalPlan.specialPriorityActualCrew,
+			specialPriorityTransfers: finalPlan.specialPriorityTransfers,
 			neutralComponentPlan: finalPlan.rows,
 			yesterdayProfitAtlas: profitStats.yesterdayProfitAtlas,
 			avg7dProfitAtlas: profitStats.avg7dProfitAtlas,
@@ -3758,10 +4014,7 @@
 		return totalMinutes >= activationMinutes;
 	}
 
-	function computeAbsoluteAggressivenessAdjustment(control, influxTarget, now) {
-		const boundaryLow = Math.max(0, Number(globalSettings?.upgradeAutomationAbsAggrBoundaryLow ?? 20_000_000_000));
-		const boundaryHigh = Math.max(boundaryLow + 1, Number(globalSettings?.upgradeAutomationAbsAggrBoundaryHigh ?? 35_000_000_000));
-		const maxImpact = 1;
+	function computeUpgradeAutomationProjectedLpToday(control, influxTarget, now = new Date()) {
 		const effectiveNow = now || new Date();
 		const utcMinutes = effectiveNow.getUTCMinutes() + (effectiveNow.getUTCSeconds() / 60);
 		const hourlyValues = influxTarget?.hourlyValues || {};
@@ -3770,10 +4023,40 @@
 		const lastHourVal = Number.isFinite(hourlyValues[23]) ? hourlyValues[23] : 0;
 		const frac = Math.max(0, (60 - utcMinutes) / 60);
 		const partialNextHour = (nextVal - prevVal) * frac;
-		const remainingFull = lastHourVal - nextVal;
-		const projectedLpToday = Number.isFinite(control?.todayTotal)
+		const remainingFull = Math.max(0, lastHourVal - nextVal);
+		return Number.isFinite(control?.todayTotal)
 			? control.todayTotal + partialNextHour + remainingFull
 			: null;
+	}
+
+	function computeUpgradeAutomationSpecialRiskControl(projectedLpToday, now = new Date()) {
+		const enabled = !!globalSettings?.upgradeAutomationBlockSpecialNeutral;
+		const boundaryLow = 15_000_000_000;
+		const boundaryMid = 22_500_000_000;
+		const boundaryHigh = 30_000_000_000;
+		const planning = getUpgradeAutomationPlanningHorizon(now);
+		const confidenceScore = Math.max(0, Math.min(1, 1 - (Number(planning.remainingHoursExact || 0) / 24)));
+		if (!enabled) {
+			return { enabled: false, multiplier: 1, redemptionScore: 1, confidenceScore, boundaryLow, boundaryMid, boundaryHigh, projectedLpToday: null, reason: 'disabled' };
+		}
+		const projected = Number(projectedLpToday);
+		if (!Number.isFinite(projected) || projected <= 0) {
+			return { enabled: true, multiplier: 0, redemptionScore: 0, confidenceScore, boundaryLow, boundaryMid, boundaryHigh, projectedLpToday: null, reason: 'missing_projected_lp' };
+		}
+		let redemptionScore = 0;
+		if (projected <= boundaryLow) redemptionScore = 2;
+		else if (projected <= boundaryMid) redemptionScore = 1 + ((boundaryMid - projected) / Math.max(1, boundaryMid - boundaryLow));
+		else if (projected >= boundaryHigh) redemptionScore = 0;
+		else redemptionScore = (boundaryHigh - projected) / Math.max(1, boundaryHigh - boundaryMid);
+		const multiplier = Math.max(0, Math.min(2, redemptionScore * confidenceScore));
+		return { enabled: true, multiplier, redemptionScore, confidenceScore, boundaryLow, boundaryMid, boundaryHigh, projectedLpToday: projected, reason: projected >= boundaryHigh ? 'above_upper_boundary' : 'dynamic' };
+	}
+
+	function computeAbsoluteAggressivenessAdjustment(control, influxTarget, now) {
+		const boundaryLow = Math.max(0, Number(globalSettings?.upgradeAutomationAbsAggrBoundaryLow ?? 20_000_000_000));
+		const boundaryHigh = Math.max(boundaryLow + 1, Number(globalSettings?.upgradeAutomationAbsAggrBoundaryHigh ?? 35_000_000_000));
+		const maxImpact = 1;
+		const projectedLpToday = computeUpgradeAutomationProjectedLpToday(control, influxTarget, now);
 
 		if (!Number.isFinite(projectedLpToday) || projectedLpToday <= 0) return 0;
 		const midpoint = (boundaryLow + boundaryHigh) / 2;
@@ -3951,7 +4234,13 @@
 			`,multiplier_rel=${Number(globalSettings?.upgradeAutomationRelMultiplier ?? 1)}` +
 			`,multiplier_abs=${Number(globalSettings?.upgradeAutomationAbsAggrMultiplier ?? 1)}` +
 			`,target_skew=${Number(globalSettings?.upgradeAutomationPoolSkewMultiplier ?? 3)}` +
-			`,neutral_special_block=${!!globalSettings?.upgradeAutomationBlockSpecialNeutral ? 1 : 0}i` +
+			`,dynamic_fstab_sdu_risk=${!!globalSettings?.upgradeAutomationBlockSpecialNeutral ? 1 : 0}i` +
+			`,fstab_sdu_risk_multiplier=${Number(executionSummary?.specialRiskControl?.multiplier ?? 1)}` +
+			`,fstab_sdu_redemption_score=${Number(executionSummary?.specialRiskControl?.redemptionScore ?? 1)}` +
+			`,fstab_sdu_risk_confidence=${Number(executionSummary?.specialRiskControl?.confidenceScore ?? 0)}` +
+			`,fstab_sdu_priority_target_crew=${Math.max(0, Math.floor(Number(executionSummary?.specialPriorityTargetCrew || 0)))}i` +
+			`,fstab_sdu_priority_actual_crew=${Math.max(0, Math.floor(Number(executionSummary?.specialPriorityActualCrew || 0)))}i` +
+			`,fstab_sdu_priority_transfers=${Math.max(0, Math.floor(Number(executionSummary?.specialPriorityTransfers || 0)))}i` +
 			`,lp_automation_on=${!!globalSettings.upgradeAutomationEnabled ? 1 : 0}i` +
 			`,faction_name=${influxFieldString(lpAutoFactionTag)}` +
 			`,snapshot_for_hour=${influxFieldString(snapshotForHour)}`
@@ -4525,6 +4814,7 @@
 			settingsParseError = String(e?.message || e || 'parse_error');
 		}
 		await restoreSlyaStateBackupIfCurrentSettingsMissing('load-global-settings', rawSettingsData, settingsParseError);
+		await reconcileUpgradeAutomationCraftConfigsAfterReload('load-global-settings');
 		try {
 			const loadedKeyCount = Object.keys(globalSettings || {}).length;
 			const loadedKeyLen = (globalSettings?.mySecretKey || '').length;
@@ -4853,7 +5143,7 @@
 			content += '<tr><td>LP Automation On/Off</td><td align="right"><input id="lpAutomationEnabledToggle" type="checkbox" ' + (lpAutomationEnabled ? 'checked' : '') + '></td><td colspan="4"></td></tr>';
 			content += '<tr><td>Faction</td><td align="right"><select id="upgradeAutomationFaction" style="width:66px">' + factionOptions + '</select></td><td></td><td style="padding-left:18px;">Lower Boundary</td><td align="right"><input id="upgradeAutomationAbsAggrBoundaryLow" type="number" min="0" max="1000" step="1" value="' + absAggrBoundaryLow + '" style="width:66px"></td><td>Billions</td></tr>';
 			content += '<tr><td>Neutral Phase length</td><td align="right"><input id="upgradeAutomationAggressivenessStartHour" type="number" min="0" max="23" step="1" value="' + selectedAggressivenessStartHour + '" style="width:66px"></td><td style="white-space:nowrap; text-align:left;">hours</td><td style="padding-left:18px;">Upper Boundary</td><td align="right"><input id="upgradeAutomationAbsAggrBoundaryHigh" type="number" min="0" max="1000" step="1" value="' + absAggrBoundaryHigh + '" style="width:66px"></td><td>Billions</td></tr>';
-			content += '<tr><td>Block FSTAB, SDU during Neutral Phase</td><td align="right"><input id="upgradeAutomationBlockSpecialNeutral" type="checkbox" ' + (blockSpecialNeutral ? 'checked' : '') + '></td><td></td><td style="padding-left:18px;">Multiplier rel.</td><td align="right"><input id="upgradeAutomationRelMultiplier" type="number" min="0" max="100" step="0.5" value="' + relMultiplier + '" style="width:66px"></td><td></td></tr>';
+			content += '<tr><td><span title="Scales Field Stabilizer and Survey Data Unit usage from projected LP redemption: 30B=0, 22.5B=1, 15B=2, then dampened by time remaining. Low-redemption target redistribution prioritizes this bucket first.">Dynamic FSTAB/SDU Risk Control</span></td><td align="right"><input id="upgradeAutomationBlockSpecialNeutral" type="checkbox" ' + (blockSpecialNeutral ? 'checked' : '') + '></td><td></td><td style="padding-left:18px;">Multiplier rel.</td><td align="right"><input id="upgradeAutomationRelMultiplier" type="number" min="0" max="100" step="0.5" value="' + relMultiplier + '" style="width:66px"></td><td></td></tr>';
 			content += '<tr><td>First automation slot</td><td align="right"><select id="lpAutomationStartCraftSlot" style="width:66px" ' + startCraftSlotDisabled + '>' + startCraftSlotOptions + '</select></td><td style="opacity:0.8">' + startCraftSlotStatus + '</td><td style="padding-left:18px;">Multiplier abs.</td><td align="right"><input id="upgradeAutomationAbsAggrMultiplier" type="number" min="0" max="100" step="0.5" value="' + absAggrMultiplier + '" style="width:66px"></td><td></td></tr>';
 			const currentPhantomCrew = Number(upgradeAutomationExecutionSummary?.crewTotal || 0);
 			const selectedMaxPhantomCrew = globalSettings.upgradeAutomationMaxPhantomCrew != null ? Math.max(0, parseIntDefault(globalSettings.upgradeAutomationMaxPhantomCrew, 0)) : currentPhantomCrew;
@@ -4922,10 +5212,12 @@
 
 			content += openSection('lp-auto-components');
 			if (upgradeAutomationExecutionSummary?.neutralComponentPlan?.length) {
-				const highlightNeutral = (new Date().getUTCHours() < Math.max(0, Math.min(23, Number(globalSettings?.upgradeAutomationAggressivenessStartHour ?? 12))));
+				const nextCycleTarget = typeof upgradeAutomationExecutionSummary.nextCycleTarget === 'boolean' ? upgradeAutomationExecutionSummary.nextCycleTarget : isUpgradeAutomationNextCycleTarget(globalSettings, new Date());
+				const nextCycleLabel = nextCycleTarget ? 'Target' : 'Neutral';
+				const highlightNeutral = !nextCycleTarget;
 				const neutralHighlightStyle = highlightNeutral ? ' style="background:rgba(80,200,120,0.16); box-shadow: inset 0 0 0 1px rgba(80,200,120,0.30);"' : '';
 				const finalHighlightStyle = !highlightNeutral ? ' style="background:rgba(80,200,120,0.16); box-shadow: inset 0 0 0 1px rgba(80,200,120,0.30);"' : '';
-				content += '<tr style="opacity:0.66"><td rowspan="2" style="min-width:180px"><b>Optimizer<br>Component</b></td><td rowspan="2" align="right" style="min-width:120px"><b>Installed Today</b></td><td colspan="3" align="center" style="min-width:270px"' + neutralHighlightStyle + '><b>Neutral</b></td><td colspan="3" align="center" style="min-width:270px"' + finalHighlightStyle + '><b>Target</b></td></tr>';
+				content += '<tr style="opacity:0.66"><td rowspan="2" style="min-width:180px"><b>Optimizer<br>Component</b><br><small>Next cycle: ' + nextCycleLabel + '</small></td><td rowspan="2" align="right" style="min-width:120px"><b>Installed Today</b></td><td colspan="3" align="center" style="min-width:270px"' + neutralHighlightStyle + '><b>Neutral</b></td><td colspan="3" align="center" style="min-width:270px"' + finalHighlightStyle + '><b>Target</b></td></tr>';
 			content += '<tr style="opacity:0.66"><td align="right" style="min-width:72px"' + neutralHighlightStyle + '><b>Crew</b></td><td align="right" style="min-width:96px"' + neutralHighlightStyle + '><b>' + (upgradeAutomationExecutionSummary.neutralPhaseMode ? 'Upgrading / Phase' : 'Upgrading<br>/ Hour') + '</b></td><td align="right" style="min-width:78px"' + neutralHighlightStyle + '><b>Buffer Days</b></td><td align="right" style="min-width:72px"' + finalHighlightStyle + '><b>Crew</b></td><td align="right" style="min-width:96px"' + finalHighlightStyle + '><b>Upgrading<br>/ Hour</b></td><td align="right" style="min-width:78px"' + finalHighlightStyle + '><b>Buffer Days</b></td></tr>';
 				for (const row of upgradeAutomationExecutionSummary.neutralComponentPlan) {
 					const finalCraft24h = Number(row.craft24h || 0);
@@ -4935,8 +5227,9 @@
 					const neutralUpgradingDay = Number(row.neutralUpgradingDay || 0);
 					const neutralBufferDisplay = !row.phantomUpgradeEligible || row.neutralBufferDays == null ? '' : (Number.isFinite(row.neutralBufferDays) ? Number(row.neutralBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
 					const actualSideStyle = row.actualOptimizerSource ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.actualOptimizerDestination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
-					const showNeutralBlockedLabel = row.neutralPhaseBlocked && highlightNeutral;
-					const optimizerDisplayName = row.phantomBlocked ? '<span style="color:#ff8080">' + row.displayName + ' (blocked)</span>' : (showNeutralBlockedLabel ? row.displayName + ' (neutral blocked)' : row.displayName);
+					const riskLabel = row.specialRiskControlled ? (' (risk ' + Math.round(Number(row.specialRiskMultiplier || 0) * 100) + '%)') : '';
+					const neutralBlockedLabel = row.neutralPhaseBlocked && !row.specialRiskBlocked && highlightNeutral ? ' (neutral blocked)' : '';
+					const optimizerDisplayName = row.phantomBlocked ? '<span style="color:#ff8080">' + row.displayName + ' (blocked)</span>' : (row.specialRiskBlocked ? row.displayName + ' (risk blocked)' : row.displayName + neutralBlockedLabel + riskLabel);
 					content += '<tr><td' + actualSideStyle + '>' + optimizerDisplayName + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(upgradeAutomationExecutionSummary.neutralPhaseMode ? (row.neutralUpgradingPhase || 0) : (row.neutralUpgradingHour || 0)) || 0).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + neutralBufferDisplay + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalCrew || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalUpgradingHour || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + finalBufferDisplay + '</td></tr>';
 				}
 			} else {
@@ -5152,6 +5445,7 @@ function renderAssistStats() {
 	});
 	setInterval(() => { refreshUpgradeAutomationInfluxStats(); }, 5 * 60 * 1000);
 	setInterval(() => { refreshUpgradeAutomationExecutionSummary(); }, 5 * 60 * 1000);
+	setInterval(() => { refreshNonLpCraftPanelFromChain(); }, 5 * 60 * 1000);
 	setInterval(async () => {
 		try {
 				if (!globalSettings.upgradeAutomationEnabled) return;
@@ -7498,7 +7792,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		cLog(1,`${FleetTimeStamp(fleet.label)} Undock ${assignment} Startup`);
 
-		if(assignment == 'Transport' || assignment == 'Mine') {
+		if(assignment == 'Transport' || assignment == 'Supply Chain' || assignment == 'Mine') {
 			const fleetAcctInfo = await solanaReadConnection.getAccountInfo(fleet.publicKey);
 			const [fleetState, extra] = getFleetState(fleetAcctInfo, fleet);
 			if (fleetState === 'StarbaseLoadingBay') {
@@ -8824,12 +9118,259 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			}
 		}
 
-		return { amountLoaded, transaction };
+		return { amountLoaded, transaction, currentAmount: currentAmmoCnt };
+	}
+
+	function transportSubwarpPrefToMoveType(subwarpPref) {
+		return subwarpPref == 1 ? 'subwarp' : (subwarpPref == 2 ? 'warpsubwarp' : (subwarpPref == 3 ? 'warp-subwarp-warp' : 'warp'));
+	}
+
+	function transportMoveTypeToSubwarpPref(moveType) {
+		if(moveType == 'subwarp') return 1;
+		if(moveType == 'warpsubwarp') return 2;
+		if(moveType == 'warp-subwarp-warp') return 3;
+		return 0;
+	}
+
+	function cloneTransportManifest(manifest) {
+		return manifest.map(entry => ({...entry}));
+	}
+
+	function getTransportCoordKey(coord) {
+		if(Array.isArray(coord)) return coord.map(value => String(value).trim()).join(',');
+		return String(coord || '').replace(/\s+/g, '');
+	}
+
+	function getTransportTotalKey(res, amt, sourceCoord = '', destCoord = '', routePrefix = '') {
+		const baseKey = String(res || '') + ':' + Math.max(0, Math.floor(Number(amt || 0)));
+		const sourceKey = getTransportCoordKey(sourceCoord);
+		const destKey = getTransportCoordKey(destCoord);
+		if(sourceKey || destKey || routePrefix) return String(routePrefix || 'route') + '|' + sourceKey + '>' + destKey + '|' + baseKey;
+		return baseKey;
+	}
+
+	function getTransportCrewTotalKey(crew, sourceCoord = '', destCoord = '', routePrefix = '') {
+		const baseKey = String(Math.max(0, Math.floor(Number(crew || 0))));
+		const sourceKey = getTransportCoordKey(sourceCoord);
+		const destKey = getTransportCoordKey(destCoord);
+		if(sourceKey || destKey || routePrefix) return String(routePrefix || 'route') + '|' + sourceKey + '>' + destKey + '|crew:' + baseKey;
+		return baseKey;
+	}
+
+	function getTransportTotalContext(sourceCoord, destCoord, routePrefix) {
+		return {
+			sourceCoord: sourceCoord || '',
+			destCoord: destCoord || '',
+			routePrefix: routePrefix || ''
+		};
+	}
+
+	function getLegacyTransportTotalContext(prefix, starbaseCoord, targetCoord) {
+		const toStarbase = String(prefix || '').indexOf('transportSBResource') === 0;
+		return getTransportTotalContext(
+			toStarbase ? targetCoord : starbaseCoord,
+			toStarbase ? starbaseCoord : targetCoord,
+			prefix
+		);
+	}
+
+	function getTransportSavedDispatched(savedEntry, enabledKey, dispatchedKey, keyKey, currentKey) {
+		if(!savedEntry || !savedEntry[enabledKey]) return 0;
+		if(savedEntry[keyKey] && savedEntry[keyKey] !== currentKey) return 0;
+		return Math.max(0, Math.floor(Number(savedEntry[dispatchedKey] || 0)));
+	}
+
+	function applyTransportTotalRemaining(manifest) {
+		return manifest.map(entry => {
+			const nextEntry = {...entry};
+			if(nextEntry.cargoTotal) {
+				nextEntry.amt = Math.max(0, Math.floor(Number(nextEntry.amt || 0)) - Math.max(0, Math.floor(Number(nextEntry.cargoDispatched || 0))));
+			}
+			if(nextEntry.crewTotal) {
+				nextEntry.crew = Math.max(0, Math.floor(Number(nextEntry.crew || 0)) - Math.max(0, Math.floor(Number(nextEntry.crewDispatched || 0))));
+			}
+			return nextEntry;
+		});
+	}
+
+	function applyTransportLoadedTotals(manifest, loadedCargo, loadedCrew) {
+		for (let entryIndex=0; entryIndex<manifest.length; entryIndex++) {
+			const entry = manifest[entryIndex];
+			if(!entry) continue;
+			if(entry.cargoTotal) {
+				entry.cargoDispatched = Math.min(
+					Math.max(0, Math.floor(Number(entry.amt || 0))),
+					Math.max(0, Math.floor(Number(entry.cargoDispatched || 0))) + Math.max(0, Math.floor(Number((loadedCargo || {})[entryIndex] || 0)))
+				);
+				entry.cargoTotalKey = entry.cargoTotalKey || getTransportTotalKey(entry.res, entry.amt);
+			}
+			if(entryIndex === 0 && entry.crewTotal) {
+				entry.crewDispatched = Math.min(
+					Math.max(0, Math.floor(Number(entry.crew || 0))),
+					Math.max(0, Math.floor(Number(entry.crewDispatched || 0))) + Math.max(0, Math.floor(Number(loadedCrew || 0)))
+				);
+				entry.crewTotalKey = entry.crewTotalKey || getTransportCrewTotalKey(entry.crew);
+			}
+		}
+	}
+
+	function logTransportCrewDecision(fleet, legLabel, totalManifest, loadManifest, unloadManifest, needToLoadCrew, needToUnloadCrew) {
+		const totalCrewEntry = (totalManifest && totalManifest[0]) || {};
+		const loadCrewEntry = (loadManifest && loadManifest[0]) || {};
+		const unloadCrewEntry = (unloadManifest && unloadManifest[0]) || {};
+		const totalCrew = Math.max(0, Math.floor(Number(totalCrewEntry.crew || 0)));
+		const loadCrew = Math.max(0, Math.floor(Number(loadCrewEntry.crew || 0)));
+		const unloadCrew = Math.max(0, Math.floor(Number(unloadCrewEntry.crew || 0)));
+		if(totalCrew <= 0 && loadCrew <= 0 && unloadCrew <= 0 && needToLoadCrew <= 0 && needToUnloadCrew <= 0) return;
+
+		cLog(1, `${FleetTimeStamp(fleet.label)} Transport crew decision ${legLabel}: totalCrew=${totalCrew}, remainingCrew=${loadCrew}, unloadManifestCrew=${unloadCrew}, crewTotal=${!!totalCrewEntry.crewTotal}, dispatched=${Math.max(0, Math.floor(Number(totalCrewEntry.crewDispatched || 0)))}, crewCount=${fleet.crewCount}, requiredCrew=${fleet.requiredCrew}, passengerCapacity=${fleet.passengerCapacity}, needToLoadCrew=${needToLoadCrew}, needToUnloadCrew=${needToUnloadCrew}`);
+	}
+
+	function mergeTransportTotalState(routes, savedRoutes, routeContexts = []) {
+		return routes.map((route, routeIndex) => {
+			const savedRoute = Array.isArray(savedRoutes) ? (savedRoutes[routeIndex] || {}) : {};
+			const savedManifest = Array.isArray(savedRoute.manifest) ? savedRoute.manifest : [];
+			const totalContext = routeContexts[routeIndex] || {};
+			const manifest = (route.manifest || []).map((entry, entryIndex) => {
+				const savedEntry = savedManifest[entryIndex] || {};
+				const nextEntry = {...entry};
+				const cargoTotalKey = getTransportTotalKey(nextEntry.res, nextEntry.amt, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+				const crewTotalKey = getTransportCrewTotalKey(nextEntry.crew, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+				nextEntry.cargoDispatched = nextEntry.cargoTotal && savedEntry.cargoTotal && savedEntry.cargoTotalKey === cargoTotalKey ? Math.max(0, Math.floor(Number(savedEntry.cargoDispatched || 0))) : 0;
+				nextEntry.cargoTotalKey = cargoTotalKey;
+				nextEntry.crewDispatched = entryIndex === 0 && nextEntry.crewTotal && savedEntry.crewTotal && savedEntry.crewTotalKey === crewTotalKey ? Math.max(0, Math.floor(Number(savedEntry.crewDispatched || 0))) : 0;
+				nextEntry.crewTotalKey = crewTotalKey;
+				return nextEntry;
+			});
+			return {...route, manifest};
+		});
+	}
+
+	function getTransportPlusTargetCount(fleetParsedData, target1Coord = '') {
+		const savedCount = parseInt(fleetParsedData && fleetParsedData.transportPlusTargetCount);
+		if(savedCount > 0) return savedCount;
+
+		if(fleetParsedData && Array.isArray(fleetParsedData.transportPlusTargets) && fleetParsedData.transportPlusTargets.length > 0) {
+			return fleetParsedData.transportPlusTargets.length;
+		}
+
+		if(fleetParsedData && fleetParsedData.transportPlusTarget2) return 2;
+		return target1Coord ? 2 : 1;
+	}
+
+	function getTransportPlusTargets(fleetParsedData, target1Coord = '', targetCount = null) {
+		let targets = fleetParsedData && Array.isArray(fleetParsedData.transportPlusTargets) ? fleetParsedData.transportPlusTargets.slice() : [];
+		if(targets.length < 1 && target1Coord) targets.push(target1Coord);
+		if(targets.length < 2 && fleetParsedData && fleetParsedData.transportPlusTarget2) targets.push(fleetParsedData.transportPlusTarget2);
+		if(target1Coord) {
+			if(targets.length < 1) targets.push(target1Coord);
+			else targets[0] = target1Coord;
+		}
+
+		if(targetCount !== null) {
+			while(targets.length < targetCount) targets.push('');
+			targets = targets.slice(0, targetCount);
+			if(target1Coord && targets.length > 0) targets[0] = target1Coord;
+		}
+
+		return targets;
+	}
+
+	function getTransportPlusRouteContexts(starbaseCoord, targetCoordsOrValues) {
+		const targets = Array.isArray(targetCoordsOrValues) ? targetCoordsOrValues : [];
+		const contexts = [];
+		for(let routeIndex=0; routeIndex<targets.length + 1; routeIndex++) {
+			const sourceCoord = routeIndex === 0 ? starbaseCoord : targets[routeIndex - 1];
+			const destCoord = routeIndex < targets.length ? targets[routeIndex] : starbaseCoord;
+			contexts.push(getTransportTotalContext(sourceCoord, destCoord, 'transportPlusRoute' + routeIndex));
+		}
+		return contexts;
+	}
+
+	function getTransportPlusRoutes(fleetParsedData, routeCount = 3, routeContexts = []) {
+		const savedRoutes = fleetParsedData && Array.isArray(fleetParsedData.transportPlusRoutes) ? fleetParsedData.transportPlusRoutes : [];
+		const routes = [];
+		for(let routeIndex=0; routeIndex<routeCount; routeIndex++) {
+			const savedRoute = savedRoutes[routeIndex] || {};
+			const routeSubwarpPref = typeof savedRoute.subwarpPref != 'undefined' ? savedRoute.subwarpPref : transportMoveTypeToSubwarpPref(savedRoute.moveType);
+			const savedManifest = Array.isArray(savedRoute.manifest) ? savedRoute.manifest : [];
+			const totalContext = routeContexts[routeIndex] || {};
+			const manifest = [];
+			for(let manifestIndex=0; manifestIndex<4; manifestIndex++) {
+				const savedEntry = savedManifest[manifestIndex] || {};
+				const res = savedEntry.res || '';
+				const amt = savedEntry.amt || 0;
+				const crew = savedEntry.crew || 0;
+				const cargoTotalKey = getTransportTotalKey(res, amt, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+				const crewTotalKey = getTransportCrewTotalKey(crew, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+				manifest.push({
+					res: res,
+					amt: amt,
+					crew: crew,
+					cargoTotal: !!savedEntry.cargoTotal,
+					cargoDispatched: getTransportSavedDispatched(savedEntry, 'cargoTotal', 'cargoDispatched', 'cargoTotalKey', cargoTotalKey),
+					cargoTotalKey: cargoTotalKey,
+					crewTotal: !!savedEntry.crewTotal,
+					crewDispatched: getTransportSavedDispatched(savedEntry, 'crewTotal', 'crewDispatched', 'crewTotalKey', crewTotalKey),
+					crewTotalKey: crewTotalKey
+				});
+			}
+			routes.push({
+				subwarpPref: routeSubwarpPref || 0,
+				moveType: savedRoute.moveType || transportSubwarpPrefToMoveType(routeSubwarpPref || 0),
+				manifest: manifest
+			});
+		}
+		return routes;
+	}
+
+	function getTransportPlusRouteIndex(fleetParsedData, routeCount = null) {
+		const savedRouteIndex = parseInt(fleetParsedData && fleetParsedData.transportPlusRouteIndex);
+		if(isNaN(savedRouteIndex) || savedRouteIndex < 0) return null;
+		if(routeCount !== null && savedRouteIndex >= routeCount) return null;
+		return savedRouteIndex;
+	}
+
+	function validateTransportLegFuel(fleet, sourceCoords, destCoords, moveType, roundTrip = true) {
+		if (
+			isNaN(Number(sourceCoords[0])) || isNaN(Number(sourceCoords[1])) ||
+			isNaN(Number(destCoords[0])) || isNaN(Number(destCoords[1]))
+		) {
+			return { valid: false, moveType: moveType };
+		}
+		let effectiveMoveType = moveType;
+		const warpCost = calcWarpFuelReq(fleet, sourceCoords, destCoords, moveType == 'warpsubwarp');
+		if (warpCost > fleet.fuelCapacity) {
+			const subwarpCost = calculateSubwarpFuelBurn(fleet, calculateMovementDistance(sourceCoords, destCoords));
+			if (subwarpCost * (roundTrip ? 2 : 1) > fleet.fuelCapacity) {
+				return { valid: false, moveType: effectiveMoveType };
+			}
+			effectiveMoveType = 'subwarp';
+		}
+		return { valid: true, moveType: effectiveMoveType };
+	}
+
+	async function persistFleetTransportRouteState(i, moveType, moveTarget, transportPlusRouteIndex = null) {
+		const fleetPK = userFleets[i].publicKey.toString();
+		const fleetParsedData = JSON.parse(await GM.getValue(fleetPK, '{}'));
+		fleetParsedData.moveType = moveType;
+		fleetParsedData.subwarpPref = transportMoveTypeToSubwarpPref(moveType);
+		fleetParsedData.moveTarget = moveTarget;
+		if(transportPlusRouteIndex !== null && !isNaN(transportPlusRouteIndex)) fleetParsedData.transportPlusRouteIndex = transportPlusRouteIndex;
+		await saveFleetConfig(fleetPK, fleetParsedData, 'assist-move-type');
+
+		userFleets[i].moveType = moveType;
+		userFleets[i].moveTarget = moveTarget;
+		if(transportPlusRouteIndex !== null && !isNaN(transportPlusRouteIndex)) userFleets[i].transportPlusRouteIndex = transportPlusRouteIndex;
 	}
 
 	async function addAssistInput(fleet) {
 			let fleetSavedData = await GM.getValue(fleet.publicKey.toString(), '{}');
 			let fleetParsedData = JSON.parse(fleetSavedData);
+			let transportPlusTargetCount = getTransportPlusTargetCount(fleetParsedData, fleetParsedData && fleetParsedData.dest ? fleetParsedData.dest : '');
+			let transportPlusTargetValues = getTransportPlusTargets(fleetParsedData, fleetParsedData && fleetParsedData.dest ? fleetParsedData.dest : '', transportPlusTargetCount);
+			let transportPlusRouteContexts = getTransportPlusRouteContexts(fleetParsedData && fleetParsedData.starbase ? fleetParsedData.starbase : '', transportPlusTargetValues);
+			let transportPlusRoutes = getTransportPlusRoutes(fleetParsedData, transportPlusTargetCount + 1, transportPlusRouteContexts);
 			let fleetRow = document.createElement('tr');
 			fleetRow.classList.add('assist-fleet-row');
 			fleetRow.setAttribute('pk', fleet.publicKey.toString());
@@ -8839,7 +9380,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let fleetLabelTd = document.createElement('td');
 			fleetLabelTd.appendChild(fleetLabel);
 
-			let assistAssignments = ['','Scan','Mine','Transport'];
+			let assistAssignments = ['','Scan','Mine','Transport','Supply Chain'];
 			let assignmentOptionsStr = '';
 			let fleetAssignment = document.createElement('select');
 			assistAssignments.forEach( function(assignment) {assignmentOptionsStr += '<option value="' + assignment + '">' + assignment + '</option>';});
@@ -8901,6 +9442,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
    			*/
 			let fleetSubwarpPref = document.createElement('select');
 			fleetSubwarpPref.style.width = '85px';
+			fleetSubwarpPref.style.display = fleetParsedData && fleetParsedData.assignment == 'Supply Chain' ? 'none' : 'inline-block';
 			fleetSubwarpPref.innerHTML = '<option value="0">Warp</option><option value="1">Subwarp</option><option value="2">Warp(SB) / Subwarp</option><option value="3">Warp, Subwarp, Warp, ...</option>';
 			if(fleetParsedData) { if(fleetParsedData.subwarpPref == 'false') fleetParsedData.subwarpPref=0; if(fleetParsedData.subwarpPref == 'true') fleetParsedData.subwarpPref=1; } // compatibility to old version
 			fleetSubwarpPref.value = fleetParsedData && fleetParsedData.subwarpPref ? fleetParsedData.subwarpPref : 0;
@@ -9165,148 +9707,155 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const transportResources = [''].concat(cargoItems.map((r) => r.name));
 			let transportOptStr = '';
 			transportResources.forEach( function(resource) {transportOptStr += '<option value="' + resource + '">' + resource + '</option>';});
-			let transportResource1 = document.createElement('select');
-			transportResource1.innerHTML = transportOptStr;
-			let transportResource1Token = fleetParsedData && fleetParsedData.transportResource1 && fleetParsedData.transportResource1 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportResource1) : '';
-			transportResource1.value = transportResource1Token && transportResource1Token.name ? transportResource1Token.name : '';
-			let transportResource1Perc = document.createElement('input');
-			transportResource1Perc.setAttribute('type', 'text');
-			transportResource1Perc.placeholder = '0';
-			transportResource1Perc.style.width = '60px';
-			transportResource1Perc.value = fleetParsedData && fleetParsedData.transportResource1Perc ? fleetParsedData.transportResource1Perc : '';
+			const createTransportResourceDiv = (savedEntry, includeCrew = false) => {
+				let transportResource = document.createElement('select');
+				transportResource.classList.add('transport-resource-select');
+				transportResource.innerHTML = transportOptStr;
+				transportResource.style.width = '74px';
+				let transportResourceToken = savedEntry && savedEntry.res ? cargoItems.find(r => r.token == savedEntry.res) : '';
+				transportResource.value = transportResourceToken && transportResourceToken.name ? transportResourceToken.name : '';
+				let transportResourcePerc = document.createElement('input');
+				transportResourcePerc.classList.add('transport-resource-amount');
+				transportResourcePerc.setAttribute('type', 'text');
+				transportResourcePerc.placeholder = '0';
+				transportResourcePerc.style.width = '64px';
+				transportResourcePerc.value = savedEntry && savedEntry.amt ? savedEntry.amt : '';
+				let transportResourceTotal = document.createElement('input');
+				transportResourceTotal.classList.add('transport-resource-total');
+				transportResourceTotal.setAttribute('type', 'checkbox');
+				transportResourceTotal.title = 'Treat this cargo amount as a total to dispatch, not per roundtrip.';
+				transportResourceTotal.setAttribute('aria-label', 'Cargo total');
+				transportResourceTotal.checked = !!(savedEntry && savedEntry.cargoTotal);
+				let transportResourceDiv = document.createElement('div');
+				transportResourceDiv.classList.add('transport-resource-entry');
+				if(includeCrew) {
+					let transportResourceCrewBlock = document.createElement('div');
+					transportResourceCrewBlock.style.display = 'inline-block';
+					let transportResourceCrewText = document.createElement('span');
+					transportResourceCrewText.innerHTML = 'Crew:';
+					let transportResourceCrew = document.createElement('input');
+					transportResourceCrew.classList.add('transport-crew-amount');
+					transportResourceCrew.setAttribute('type', 'text');
+					transportResourceCrew.placeholder = '0';
+					transportResourceCrew.style.width = '46px';
+					transportResourceCrew.value = savedEntry && savedEntry.crew ? savedEntry.crew : '';
+					let transportResourceCrewTotal = document.createElement('input');
+					transportResourceCrewTotal.classList.add('transport-crew-total');
+					transportResourceCrewTotal.setAttribute('type', 'checkbox');
+					transportResourceCrewTotal.title = 'Treat this crew amount as a total to dispatch, not per roundtrip.';
+					transportResourceCrewTotal.setAttribute('aria-label', 'Crew total');
+					transportResourceCrewTotal.checked = !!(savedEntry && savedEntry.crewTotal);
+					transportResourceCrewBlock.appendChild(transportResourceCrewText);
+					transportResourceCrewBlock.appendChild(transportResourceCrew);
+					transportResourceCrewBlock.appendChild(transportResourceCrewTotal);
+					transportResourceDiv.appendChild(transportResourceCrewBlock);
+				}
+				transportResourceDiv.appendChild(transportResource);
+				transportResourceDiv.appendChild(transportResourcePerc);
+				transportResourceDiv.appendChild(transportResourceTotal);
+				return transportResourceDiv;
+			};
+			const padTransportPlusIndex = (index) => String(index).padStart(2, '0');
+			const getTransportPlusRouteLabel = (routeIndex, targetCount) => {
+				if(routeIndex === 0) return `Starbase -> Target ${padTransportPlusIndex(1)}`;
+				if(routeIndex === targetCount) return `Target ${padTransportPlusIndex(targetCount)} -> Starbase`;
+				return `Target ${padTransportPlusIndex(routeIndex)} -> Target ${padTransportPlusIndex(routeIndex + 1)}`;
+			};
+			const createTransportPlusTargetSelect = (targetValue) => {
+				let transportPlusTarget = document.createElement('select');
+				transportPlusTarget.classList.add('transport-plus-target-select');
+				transportPlusTarget.style.width = '80px';
+				transportPlusTarget.appendChild(document.createElement('option'));
+				validTargets.forEach(target => {
+					let transportPlusTargetOption = document.createElement('option');
+					transportPlusTargetOption.value = target.x + ',' + target.y;
+					transportPlusTargetOption.innerHTML = target.name + '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[' + target.x + ',' + target.y + ']';
+					if(transportPlusTargetOption.value == targetValue) transportPlusTargetOption.setAttribute('selected', 'selected');
+					transportPlusTarget.appendChild(transportPlusTargetOption);
+				});
+				return transportPlusTarget;
+			};
+			const readTransportPlusRouteBlock = (routeElem) => {
+				let routeSubwarpPref = parseInt(routeElem.querySelector('.transport-plus-movetype').value) || 0;
+				let manifest = Array.from(routeElem.querySelectorAll('.transport-resource-entry')).map((entryElem, entryIndex) => {
+					let resourceName = entryElem.querySelector('.transport-resource-select').value;
+					let resourceToken = resourceName !== '' ? cargoItems.find(r => r.name == resourceName).token : '';
+					let resourceAmt = parseIntKMG(entryElem.querySelector('.transport-resource-amount').value) || 0;
+					let crewAmt = entryIndex == 0 && entryElem.querySelector('.transport-crew-amount') ? parseIntKMG(entryElem.querySelector('.transport-crew-amount').value) || 0 : 0;
+					return {
+						res: resourceToken,
+						amt: resourceAmt,
+						crew: crewAmt,
+						cargoTotal: !!entryElem.querySelector('.transport-resource-total')?.checked,
+						crewTotal: entryIndex == 0 ? !!entryElem.querySelector('.transport-crew-total')?.checked : false
+					};
+				});
+				return {
+					subwarpPref: routeSubwarpPref,
+					moveType: transportSubwarpPrefToMoveType(routeSubwarpPref),
+					manifest: manifest
+				};
+			};
+			const createTransportPlusRoute = (routeIndex, targetCount) => {
+				const routeData = transportPlusRoutes[routeIndex] || { subwarpPref: 0, manifest: [] };
+				let routeWrapper = document.createElement('div');
+				routeWrapper.classList.add('assist-transport-plus-route');
+				routeWrapper.setAttribute('data-route-index', String(routeIndex + 1));
 
-			let transportResource1CrewBlock = document.createElement('div');
-			transportResource1CrewBlock.style.display = 'inline-block';
-			let transportResource1CrewText = document.createElement('span');
-			transportResource1CrewText.innerHTML='Crew:';
-			let transportResource1Crew = document.createElement('input');
-			transportResource1Crew.setAttribute('type', 'text');
-			transportResource1Crew.placeholder = '0';
-			transportResource1Crew.style.width = '50px';
-			transportResource1Crew.style.marginRight = '10px';
-			transportResource1Crew.value = fleetParsedData && fleetParsedData.transportResource1Crew ? fleetParsedData.transportResource1Crew : '';
+				let routeHeader = document.createElement('div');
+				routeHeader.classList.add('transport-plus-route-header');
 
-			let transportResource1Div = document.createElement('div');
-			transportResource1Div.appendChild(transportResource1);
-			transportResource1Div.appendChild(transportResource1Perc);
-			transportResource1CrewBlock.appendChild(transportResource1CrewText);
-			transportResource1CrewBlock.appendChild(transportResource1Crew);
-			transportResource1Div.appendChild(transportResource1CrewBlock);
+				let routeLabel = document.createElement('strong');
+				routeLabel.innerHTML = `Route ${padTransportPlusIndex(routeIndex + 1)}:`;
+				let routeDirection = document.createElement('span');
+				routeDirection.innerHTML = getTransportPlusRouteLabel(routeIndex, targetCount);
 
-			let transportResource2 = document.createElement('select');
-			transportResource2.innerHTML = transportOptStr;
-			let transportResource2Token = fleetParsedData && fleetParsedData.transportResource2 && fleetParsedData.transportResource2 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportResource2) : '';
-			transportResource2.value = transportResource2Token && transportResource2Token.name ? transportResource2Token.name : '';
-			let transportResource2Perc = document.createElement('input');
-			transportResource2Perc.setAttribute('type', 'text');
-			transportResource2Perc.placeholder = '0';
-			transportResource2Perc.style.width = '60px';
-			transportResource2Perc.style.marginRight = '10px';
-			transportResource2Perc.value = fleetParsedData && fleetParsedData.transportResource2Perc ? fleetParsedData.transportResource2Perc : '';
-			let transportResource2Div = document.createElement('div');
-			transportResource2Div.appendChild(transportResource2);
-			transportResource2Div.appendChild(transportResource2Perc);
+				let routeMoveTypeLabel = document.createElement('span');
+				routeMoveTypeLabel.innerHTML = 'Warp/Subwarp:';
+				let routeMoveType = document.createElement('select');
+				routeMoveType.classList.add('transport-plus-movetype');
+				routeMoveType.style.width = '110px';
+				routeMoveType.innerHTML = '<option value="0">Warp</option><option value="1">Subwarp</option><option value="2">Warp(SB) / Subwarp</option><option value="3">Warp, Subwarp, Warp, ...</option>';
+				routeMoveType.value = routeData.subwarpPref || 0;
 
-			let transportResource3 = document.createElement('select');
-			transportResource3.innerHTML = transportOptStr;
-			let transportResource3Token = fleetParsedData && fleetParsedData.transportResource3 && fleetParsedData.transportResource3 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportResource3) : '';
-			transportResource3.value = transportResource3Token && transportResource3Token.name ? transportResource3Token.name : '';
-			let transportResource3Perc = document.createElement('input');
-			transportResource3Perc.setAttribute('type', 'text');
-			transportResource3Perc.placeholder = '0';
-			transportResource3Perc.style.width = '60px';
-			transportResource3Perc.style.marginRight = '10px';
-			transportResource3Perc.value = fleetParsedData && fleetParsedData.transportResource3Perc ? fleetParsedData.transportResource3Perc : '';
-			let transportResource3Div = document.createElement('div');
-			transportResource3Div.appendChild(transportResource3);
-			transportResource3Div.appendChild(transportResource3Perc);
+				routeHeader.appendChild(routeLabel);
+				routeHeader.appendChild(routeDirection);
+				routeHeader.appendChild(routeMoveTypeLabel);
+				routeHeader.appendChild(routeMoveType);
 
-			let transportResource4 = document.createElement('select');
-			transportResource4.innerHTML = transportOptStr;
-			let transportResource4Token = fleetParsedData && fleetParsedData.transportResource4 && fleetParsedData.transportResource4 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportResource4) : '';
-			transportResource4.value = transportResource4Token && transportResource4Token.name ? transportResource4Token.name : '';
-			let transportResource4Perc = document.createElement('input');
-			transportResource4Perc.setAttribute('type', 'text');
-			transportResource4Perc.placeholder = '0';
-			transportResource4Perc.style.width = '60px';
-			transportResource4Perc.value = fleetParsedData && fleetParsedData.transportResource4Perc ? fleetParsedData.transportResource4Perc : '';
-			let transportResource4Div = document.createElement('div');
-			transportResource4Div.appendChild(transportResource4);
-			transportResource4Div.appendChild(transportResource4Perc);
+				let routeManifest = document.createElement('div');
+				routeManifest.classList.add('transport-plus-route-manifest');
+				for(let manifestIndex=0; manifestIndex<4; manifestIndex++) {
+					routeManifest.appendChild(createTransportResourceDiv(routeData.manifest[manifestIndex], manifestIndex == 0));
+				}
+
+				routeWrapper.appendChild(routeHeader);
+				routeWrapper.appendChild(routeManifest);
+				return routeWrapper;
+			};
+			const createLegacyTransportResourceDiv = (prefix, includeCrew = false) => {
+				return createTransportResourceDiv({
+					res: fleetParsedData && fleetParsedData[prefix] ? fleetParsedData[prefix] : '',
+					amt: fleetParsedData && fleetParsedData[prefix + 'Perc'] ? fleetParsedData[prefix + 'Perc'] : '',
+					crew: fleetParsedData && fleetParsedData[prefix + 'Crew'] ? fleetParsedData[prefix + 'Crew'] : '',
+					cargoTotal: !!(fleetParsedData && fleetParsedData[prefix + 'Total']),
+					crewTotal: !!(fleetParsedData && fleetParsedData[prefix + 'CrewTotal'])
+				}, includeCrew);
+			};
+			let transportResource1Div = createLegacyTransportResourceDiv('transportResource1', true);
+			let transportResource2Div = createLegacyTransportResourceDiv('transportResource2');
+			let transportResource3Div = createLegacyTransportResourceDiv('transportResource3');
+			let transportResource4Div = createLegacyTransportResourceDiv('transportResource4');
 
 			let transportLabel2 = document.createElement('div');
 			transportLabel2.innerHTML = 'To Starbase:';
 			transportLabel2.style.width = '84px';
 			transportLabel2.style.minWidth = '84px';
 
-			let transportSBResource1 = document.createElement('select');
-			transportSBResource1.innerHTML = transportOptStr;
-			let transportSBResource1Token = fleetParsedData && fleetParsedData.transportSBResource1 && fleetParsedData.transportSBResource1 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportSBResource1) : '';
-			transportSBResource1.value = transportSBResource1Token && transportSBResource1Token.name ? transportSBResource1Token.name : '';
-			let transportSBResource1Perc = document.createElement('input');
-			transportSBResource1Perc.setAttribute('type', 'text');
-			transportSBResource1Perc.placeholder = '0';
-			transportSBResource1Perc.style.width = '60px';
-			transportSBResource1Perc.value = fleetParsedData && fleetParsedData.transportSBResource1Perc ? fleetParsedData.transportSBResource1Perc : '';
-
-			let transportSBResource1CrewBlock = document.createElement('div');
-			transportSBResource1CrewBlock.style.display = 'inline-block';
-			let transportSBResource1CrewText = document.createElement('span');
-			transportSBResource1CrewText.innerHTML='Crew:';
-			let transportSBResource1Crew = document.createElement('input');
-			transportSBResource1Crew.setAttribute('type', 'text');
-			transportSBResource1Crew.placeholder = '0';
-			transportSBResource1Crew.style.width = '50px';
-			transportSBResource1Crew.style.marginRight = '10px';
-			transportSBResource1Crew.value = fleetParsedData && fleetParsedData.transportSBResource1Crew ? fleetParsedData.transportSBResource1Crew : '';
-
-			let transportSBResource1Div = document.createElement('div');
-			transportSBResource1Div.appendChild(transportSBResource1);
-			transportSBResource1Div.appendChild(transportSBResource1Perc);
-			transportSBResource1CrewBlock.appendChild(transportSBResource1CrewText);
-			transportSBResource1CrewBlock.appendChild(transportSBResource1Crew);
-			transportSBResource1Div.appendChild(transportSBResource1CrewBlock);
-
-			let transportSBResource2 = document.createElement('select');
-			transportSBResource2.innerHTML = transportOptStr;
-			let transportSBResource2Token = fleetParsedData && fleetParsedData.transportSBResource2 && fleetParsedData.transportSBResource2 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportSBResource2) : '';
-			transportSBResource2.value = transportSBResource2Token && transportSBResource2Token.name ? transportSBResource2Token.name : '';
-			let transportSBResource2Perc = document.createElement('input');
-			transportSBResource2Perc.setAttribute('type', 'text');
-			transportSBResource2Perc.placeholder = '0';
-			transportSBResource2Perc.style.width = '60px';
-			transportSBResource2Perc.style.marginRight = '10px';
-			transportSBResource2Perc.value = fleetParsedData && fleetParsedData.transportSBResource2Perc ? fleetParsedData.transportSBResource2Perc : '';
-			let transportSBResource2Div = document.createElement('div');
-			transportSBResource2Div.appendChild(transportSBResource2);
-			transportSBResource2Div.appendChild(transportSBResource2Perc);
-
-			let transportSBResource3 = document.createElement('select');
-			transportSBResource3.innerHTML = transportOptStr;
-			let transportSBResource3Token = fleetParsedData && fleetParsedData.transportSBResource3 && fleetParsedData.transportSBResource3 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportSBResource3) : '';
-			transportSBResource3.value = transportSBResource3Token && transportSBResource3Token.name ? transportSBResource3Token.name : '';
-			let transportSBResource3Perc = document.createElement('input');
-			transportSBResource3Perc.setAttribute('type', 'text');
-			transportSBResource3Perc.placeholder = '0';
-			transportSBResource3Perc.style.width = '60px';
-			transportSBResource3Perc.style.marginRight = '10px';
-			transportSBResource3Perc.value = fleetParsedData && fleetParsedData.transportSBResource3Perc ? fleetParsedData.transportSBResource3Perc : '';
-			let transportSBResource3Div = document.createElement('div');
-			transportSBResource3Div.appendChild(transportSBResource3);
-			transportSBResource3Div.appendChild(transportSBResource3Perc);
-
-			let transportSBResource4 = document.createElement('select');
-			transportSBResource4.innerHTML = transportOptStr;
-			let transportSBResource4Token = fleetParsedData && fleetParsedData.transportSBResource4 && fleetParsedData.transportSBResource4 !== '' ? cargoItems.find(r => r.token == fleetParsedData.transportSBResource4) : '';
-			transportSBResource4.value = transportSBResource4Token && transportSBResource4Token.name ? transportSBResource4Token.name : '';
-			let transportSBResource4Perc = document.createElement('input');
-			transportSBResource4Perc.setAttribute('type', 'text');
-			transportSBResource4Perc.placeholder = '0';
-			transportSBResource4Perc.style.width = '60px';
-			transportSBResource4Perc.value = fleetParsedData && fleetParsedData.transportSBResource4Perc ? fleetParsedData.transportSBResource4Perc : '';
-			let transportSBResource4Div = document.createElement('div');
-			transportSBResource4Div.appendChild(transportSBResource4);
-			transportSBResource4Div.appendChild(transportSBResource4Perc);
+			let transportSBResource1Div = createLegacyTransportResourceDiv('transportSBResource1', true);
+			let transportSBResource2Div = createLegacyTransportResourceDiv('transportSBResource2');
+			let transportSBResource3Div = createLegacyTransportResourceDiv('transportSBResource3');
+			let transportSBResource4Div = createLegacyTransportResourceDiv('transportSBResource4');
 
 			let transportTd = document.createElement('td');
 			transportTd.setAttribute('colspan', '8');
@@ -9335,6 +9884,94 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			transportRow.appendChild(transportTd);
 			targetElem.appendChild(transportRow);
 
+			let transportPlusRow = document.createElement('tr');
+			transportPlusRow.classList.add('assist-transport-plus-row');
+			transportPlusRow.style.display = fleetParsedData && fleetParsedData.assignment == 'Supply Chain' ? 'table-row' : 'none';
+			fleetParsedData && fleetParsedData.assignment == 'Supply Chain' && fleetRow.classList.add('show-top-border');
+			let transportPlusTd = document.createElement('td');
+			transportPlusTd.setAttribute('colspan', '8');
+
+			let transportPlusLocationWrapper = document.createElement('div');
+			transportPlusLocationWrapper.classList.add('transport-plus-locations');
+			let transportPlusTargetCountLabel = document.createElement('span');
+			transportPlusTargetCountLabel.innerHTML = 'Targets:';
+			let transportPlusTargetCountInput = document.createElement('input');
+			transportPlusTargetCountInput.classList.add('transport-plus-target-count');
+			transportPlusTargetCountInput.setAttribute('type', 'number');
+			transportPlusTargetCountInput.setAttribute('min', '1');
+			transportPlusTargetCountInput.setAttribute('max', '20');
+			transportPlusTargetCountInput.style.width = '45px';
+			transportPlusTargetCountInput.value = transportPlusTargetCount;
+			let transportPlusTargetNote = document.createElement('span');
+			transportPlusTargetNote.innerHTML = 'Target 01 uses the main Target field above.';
+			transportPlusLocationWrapper.appendChild(transportPlusTargetCountLabel);
+			transportPlusLocationWrapper.appendChild(transportPlusTargetCountInput);
+			transportPlusLocationWrapper.appendChild(transportPlusTargetNote);
+
+			let transportPlusTargetsWrapper = document.createElement('div');
+			transportPlusTargetsWrapper.classList.add('transport-plus-targets');
+
+			let transportPlusRoutesWrapper = document.createElement('div');
+			transportPlusRoutesWrapper.classList.add('transport-plus-routes');
+
+			const syncTransportPlusEditorState = () => {
+				transportPlusTargetValues[0] = fleetDestCoordSelect.value || transportPlusTargetValues[0] || '';
+				transportPlusTargetsWrapper.querySelectorAll('.transport-plus-target-select').forEach((selectElem, targetIndex) => {
+					transportPlusTargetValues[targetIndex + 1] = selectElem.value;
+				});
+				const currentRouteElems = transportPlusRoutesWrapper.querySelectorAll('.assist-transport-plus-route');
+				if(currentRouteElems.length > 0) {
+					transportPlusRoutes = Array.from(currentRouteElems).map(readTransportPlusRouteBlock);
+				}
+			};
+
+			const normalizeTransportPlusEditorState = () => {
+				transportPlusTargetCount = Math.max(1, Math.min(20, parseInt(transportPlusTargetCount) || 1));
+				transportPlusTargetValues = getTransportPlusTargets({ transportPlusTargets: transportPlusTargetValues }, fleetDestCoordSelect.value || transportPlusTargetValues[0] || '', transportPlusTargetCount);
+				const routeContexts = getTransportPlusRouteContexts(fleetStarbaseCoordSelect.value || fleetParsedData.starbase || '', transportPlusTargetValues);
+				transportPlusRoutes = getTransportPlusRoutes({ transportPlusRoutes: transportPlusRoutes }, transportPlusTargetCount + 1, routeContexts);
+			};
+
+			const renderTransportPlusConfig = () => {
+				normalizeTransportPlusEditorState();
+
+				transportPlusTargetsWrapper.replaceChildren();
+				for(let targetIndex=1; targetIndex<transportPlusTargetCount; targetIndex++) {
+					let transportPlusTargetWrapper = document.createElement('div');
+					transportPlusTargetWrapper.classList.add('transport-plus-target');
+					let transportPlusTargetLabel = document.createElement('span');
+					transportPlusTargetLabel.innerHTML = `Target ${padTransportPlusIndex(targetIndex + 1)}:`;
+					let transportPlusTargetSelect = createTransportPlusTargetSelect(transportPlusTargetValues[targetIndex]);
+					transportPlusTargetWrapper.appendChild(transportPlusTargetLabel);
+					transportPlusTargetWrapper.appendChild(transportPlusTargetSelect);
+					transportPlusTargetsWrapper.appendChild(transportPlusTargetWrapper);
+				}
+
+				transportPlusRoutesWrapper.replaceChildren();
+				for(let routeIndex=0; routeIndex<transportPlusTargetCount + 1; routeIndex++) {
+					transportPlusRoutesWrapper.appendChild(createTransportPlusRoute(routeIndex, transportPlusTargetCount));
+				}
+
+				transportPlusRow.querySelectorAll('.transport-resource-entry select').forEach(selectElem => {
+					selectElem.onchange = handleTransportResourceChange;
+					selectElem.dispatchEvent(new Event("change"));
+				});
+			};
+
+			transportPlusTargetCountInput.onchange = function() {
+				syncTransportPlusEditorState();
+				transportPlusTargetCount = this.value;
+				renderTransportPlusConfig();
+				transportPlusTargetCountInput.value = transportPlusTargetCount;
+			};
+
+			transportPlusTd.appendChild(transportPlusLocationWrapper);
+			transportPlusTd.appendChild(transportPlusTargetsWrapper);
+			transportPlusTd.appendChild(transportPlusRoutesWrapper);
+			transportPlusRow.appendChild(transportPlusTd);
+			targetElem.appendChild(transportPlusRow);
+			renderTransportPlusConfig();
+
 			let padRow = document.createElement('tr');
 			padRow.classList.add('assist-pad-row');
 			padRow.style.display = fleetParsedData && fleetParsedData.assignment ? 'table-row' : 'none';
@@ -9344,19 +9981,21 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			padRow.appendChild(padRowTd);
 			targetElem.appendChild(padRow);
 
-			transportResource1.onchange = transportResource2.onchange = transportResource3.onchange = transportResource4.onchange = transportSBResource1.onchange = transportSBResource2.onchange = transportSBResource3.onchange = transportSBResource4.onchange =
-			function() {
+			function handleTransportResourceChange() {
 				if(this.value=='') this.style.backgroundColor='white';
 				else this.style.backgroundColor='#fff0d0';
 			}
-			transportResource1.dispatchEvent(new Event("change"));
-			transportResource2.dispatchEvent(new Event("change"));
-			transportResource3.dispatchEvent(new Event("change"));
-			transportResource4.dispatchEvent(new Event("change"));
-			transportSBResource1.dispatchEvent(new Event("change"));
-			transportSBResource2.dispatchEvent(new Event("change"));
-			transportSBResource3.dispatchEvent(new Event("change"));
-			transportSBResource4.dispatchEvent(new Event("change"));
+			[transportResource1Div, transportResource2Div, transportResource3Div, transportResource4Div, transportSBResource1Div, transportSBResource2Div, transportSBResource3Div, transportSBResource4Div].forEach(entryDiv => {
+				if(!entryDiv) return;
+				const selectElem = entryDiv.querySelector('.transport-resource-select');
+				if(!selectElem) return;
+				selectElem.onchange = handleTransportResourceChange;
+				selectElem.dispatchEvent(new Event('change'));
+			});
+			transportPlusRow.querySelectorAll('.transport-resource-entry select').forEach(selectElem => {
+				selectElem.onchange = handleTransportResourceChange;
+				selectElem.dispatchEvent(new Event("change"));
+			});
 
 			fleetAssignment.onchange = function() {
 					if (fleetAssignment.value == 'Scan') {
@@ -9364,37 +10003,56 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 							scanRow2.style.display = 'table-row';
 							mineRow.style.display = 'none';
 							transportRow.style.display = 'none';
+							transportPlusRow.style.display = 'none';
 							padRow.style.display = 'table-row';
 							fleetRow.classList.add('show-top-border');
 							fleetDestCoord.style.display = 'inline-block';
 							fleetDestCoordSelect.style.display = 'none';
+							fleetSubwarpPref.style.display = 'inline-block';
 					} else if (fleetAssignment.value == 'Mine') {
 							mineRow.style.display = 'table-row';
 							scanRow.style.display = 'none';
 							scanRow2.style.display = 'none';
 							transportRow.style.display = 'none';
+							transportPlusRow.style.display = 'none';
 							padRow.style.display = 'table-row';
 							fleetRow.classList.add('show-top-border');
 							fleetDestCoord.style.display = 'none';
 							fleetDestCoordSelect.style.display = 'inline-block';
+							fleetSubwarpPref.style.display = 'inline-block';
 					} else if (fleetAssignment.value == 'Transport') {
 							transportRow.style.display = 'table-row';
 							scanRow.style.display = 'none';
 							scanRow2.style.display = 'none';
 							mineRow.style.display = 'none';
+							transportPlusRow.style.display = 'none';
 							padRow.style.display = 'table-row';
 							fleetRow.classList.add('show-top-border');
 							fleetDestCoord.style.display = 'none';
 							fleetDestCoordSelect.style.display = 'inline-block';
+							fleetSubwarpPref.style.display = 'inline-block';
+					} else if (fleetAssignment.value == 'Supply Chain') {
+							transportPlusRow.style.display = 'table-row';
+							transportRow.style.display = 'none';
+							scanRow.style.display = 'none';
+							scanRow2.style.display = 'none';
+							mineRow.style.display = 'none';
+							padRow.style.display = 'table-row';
+							fleetRow.classList.add('show-top-border');
+							fleetDestCoord.style.display = 'none';
+							fleetDestCoordSelect.style.display = 'inline-block';
+							fleetSubwarpPref.style.display = 'none';
 					} else {
 							scanRow.style.display = 'none';
 							scanRow2.style.display = 'none';
 							mineRow.style.display = 'none';
 							transportRow.style.display = 'none';
+							transportPlusRow.style.display = 'none';
 							padRow.style.display = 'none';
 							fleetRow.classList.remove('show-top-border');
 							fleetDestCoord.style.display = 'none';
 							fleetDestCoordSelect.style.display = 'inline-block';
+							fleetSubwarpPref.style.display = 'inline-block';
 					}
 			};
 
@@ -9745,6 +10403,48 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		return retryAt;
 	}
 
+	const TRANSPORT_UNLOAD_RETRY_DELAY_MS = 120000;
+	const TRANSPORT_UNLOAD_RETRY_MAX = 3;
+	const TRANSPORT_UNLOAD_RETRY_MARKER = 'Transport unload retry';
+
+	function getTransportUnloadRetry(fleet) {
+		if(!fleet || !fleet.state || !fleet.state.includes(TRANSPORT_UNLOAD_RETRY_MARKER)) return null;
+		return {
+			retryAt: Number(fleet.transportUnloadRetryAt || 0),
+			count: Number(fleet.transportUnloadRetryCount || 0),
+			coord: fleet.transportUnloadRetryCoord || ''
+		};
+	}
+
+	function clearTransportUnloadRetry(fleet) {
+		if(!fleet) return;
+		fleet.transportUnloadRetryAt = 0;
+		fleet.transportUnloadRetryCount = 0;
+		fleet.transportUnloadRetryCoord = '';
+		fleet.transportUnloadRetryError = '';
+	}
+
+	function scheduleTransportUnloadRetry(fleet, unloadResult, unloadCoord) {
+		if(!globalSettings.transportStopOnError || !unloadResult || !unloadResult.error) return false;
+
+		const retryCount = Number(fleet.transportUnloadRetryCount || 0) + 1;
+		if(retryCount > TRANSPORT_UNLOAD_RETRY_MAX) {
+			clearTransportUnloadRetry(fleet);
+			cLog(1,`${FleetTimeStamp(fleet.label)} Transporting - ${fleet.state} (unload retry limit reached)`);
+			return true;
+		}
+
+		const retryAt = Date.now() + TRANSPORT_UNLOAD_RETRY_DELAY_MS;
+		const retryError = fleet.state || 'ERROR: Transport unload failed';
+		fleet.transportUnloadRetryAt = retryAt;
+		fleet.transportUnloadRetryCount = retryCount;
+		fleet.transportUnloadRetryCoord = unloadCoord;
+		fleet.transportUnloadRetryError = retryError;
+		updateFleetState(fleet, `${retryError} | ${TRANSPORT_UNLOAD_RETRY_MARKER} ${retryCount}/${TRANSPORT_UNLOAD_RETRY_MAX} ⌛ ${TimeToStr(new Date(retryAt))}`, true);
+		cLog(1,`${FleetTimeStamp(fleet.label)} ${TRANSPORT_UNLOAD_RETRY_MARKER} scheduled in ${Math.round(TRANSPORT_UNLOAD_RETRY_DELAY_MS / 1000)}s (${retryCount}/${TRANSPORT_UNLOAD_RETRY_MAX})`);
+		return true;
+	}
+
 	function buildScanBlock(destX, destY, overridePattern, overridePatternLength) {
 		let { scanBlockPattern, scanBlockLength }  = globalSettings;
 		if(typeof overridePattern != "undefined" && overridePattern != '') {
@@ -9844,6 +10544,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		let scanRows2 = document.querySelectorAll('#assistModal .assist-scan2-row');
 		let mineRows = document.querySelectorAll('#assistModal .assist-mine-row');
 		let transportRows = document.querySelectorAll('#assistModal .assist-transport-row > td');
+		let transportPlusRows = document.querySelectorAll('#assistModal .assist-transport-plus-row > td');
 		let errElem = document.querySelectorAll('#assist-modal-error');
 		let errBool = false;
 		let fleetSaveCount = 0;
@@ -9858,7 +10559,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		const fleetLoopStart = slyaPerfNowMs();
 		for (let [i, row] of fleetRows.entries()) {
 
-			const inputError = (msg, innerHtml, type) => {
+			const inputError = (msg, innerHtml, type, extraElems = []) => {
 				// type 1: Distance exceeds fuel capacity
 				// type 2: Identical starbase/target sectors
 				cLog(1, msg);
@@ -9866,6 +10567,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				row.children[2].children[1].style.border = '2px solid red';
 				row.children[3].firstChild.style.border = '2px solid red';
 				if(type==1) row.children[7].firstChild.style.border = '2px solid red';
+				extraElems.forEach(elem => elem && (elem.style.border = '2px solid red'));
 				errElem[0].innerHTML = innerHtml;
 				errBool = true;
 				rowErrBool = true;
@@ -9873,6 +10575,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 			let rowErrBool = false;
 			let fleetPK = row.getAttribute('pk');
+			let fleetSavedData = await GM.getValue(fleetPK, '{}');
+			let fleetParsedData = JSON.parse(fleetSavedData);
 			let fleetName = row.children[0].firstChild.innerText;
 			let fleetAssignment = row.children[1].firstChild.value;
 			//let fleetDestCoord = validateCoordInput(row.children[2].firstChild.value);	//fleetDestCoord = fleetDestCoord ? fleetDestCoord.replace('.', ',') : fleetDestCoord;
@@ -9887,26 +10591,92 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let subwarpPref = parseInt(row.children[4].firstChild.value) || 0;
 			let userFleetIndex = userFleets.findIndex(item => {return item.publicKey == fleetPK});
 			//let moveType = subwarpPref == true ? 'subwarp' : 'warp';
-			let moveType = subwarpPref == 1 ? 'subwarp' : (subwarpPref == 2 ? 'warpsubwarp' : (subwarpPref == 3 ? 'warp-subwarp-warp' : 'warp') );
+			let moveType = transportSubwarpPrefToMoveType(subwarpPref);
 
 			const destCoords = ConvertCoords(fleetDestCoord);
 			const starbaseCoords = ConvertCoords(fleetStarbaseCoord);
+			let transportPlusTargetCount = Math.max(1, Math.min(20, parseInt(transportPlusRows[i].querySelector('.transport-plus-target-count').value) || 1));
+			let transportPlusTargetValues = [fleetDestCoord];
+			transportPlusRows[i].querySelectorAll('.transport-plus-target-select').forEach((selectElem, targetIndex) => {
+				transportPlusTargetValues[targetIndex + 1] = selectElem.value;
+			});
+			transportPlusTargetValues = getTransportPlusTargets({ transportPlusTargets: transportPlusTargetValues }, fleetDestCoord, transportPlusTargetCount);
+			let transportPlusRouteElems = transportPlusRows[i].querySelectorAll('.assist-transport-plus-route');
+			const transportPlusRouteContexts = getTransportPlusRouteContexts(fleetStarbaseCoord, transportPlusTargetValues);
+			let transportPlusRoutes = Array.from(transportPlusRouteElems).map(routeElem => {
+				let routeSubwarpPref = parseInt(routeElem.querySelector('.transport-plus-movetype').value) || 0;
+				let manifest = Array.from(routeElem.querySelectorAll('.transport-resource-entry')).map((entryElem, entryIndex) => {
+					let resourceName = entryElem.querySelector('.transport-resource-select').value;
+					let resourceToken = resourceName !== '' ? cargoItems.find(r => r.name == resourceName).token : '';
+					let resourceAmt = parseIntKMG(entryElem.querySelector('.transport-resource-amount').value) || 0;
+					let crewAmt = entryIndex == 0 && entryElem.querySelector('.transport-crew-amount') ? parseIntKMG(entryElem.querySelector('.transport-crew-amount').value) || 0 : 0;
+					return {
+						res: resourceToken,
+						amt: resourceAmt,
+						crew: crewAmt,
+						cargoTotal: !!entryElem.querySelector('.transport-resource-total')?.checked,
+						crewTotal: entryIndex == 0 ? !!entryElem.querySelector('.transport-crew-total')?.checked : false
+					};
+				});
+				return {
+					subwarpPref: routeSubwarpPref,
+					moveType: transportSubwarpPrefToMoveType(routeSubwarpPref),
+					manifest: manifest
+				};
+			});
+			transportPlusRoutes = mergeTransportTotalState(transportPlusRoutes, fleetParsedData && fleetParsedData.transportPlusRoutes, transportPlusRouteContexts);
+			transportPlusRoutes = getTransportPlusRoutes({ transportPlusRoutes: transportPlusRoutes }, transportPlusTargetValues.length + 1, transportPlusRouteContexts);
+			const transportPlusTargetCoords = transportPlusTargetValues.map(coord => ConvertCoords(coord));
 
-			if(fleetAssignment !== '') {
-				//let warpCost = calculateWarpFuelBurn(userFleets[userFleetIndex], moveDist);
-				let warpCost = calcWarpFuelReq(userFleets[userFleetIndex], starbaseCoords, destCoords, moveType == 'warpsubwarp' );
-				if (warpCost > userFleets[userFleetIndex].fuelCapacity) {
-					let subwarpCost = calculateSubwarpFuelBurn(userFleets[userFleetIndex], calculateMovementDistance(starbaseCoords, destCoords));
-					if (subwarpCost * 2 > userFleets[userFleetIndex].fuelCapacity) {
-						inputError('ERROR: Fleet will not have enough fuel to return to starbase', 'ERROR: Distance exceeds fuel capacity', 1);
-					} else {
-						moveType = 'subwarp';
-					}
+			if(fleetAssignment !== '' && fleetAssignment !== 'Supply Chain') {
+				const moveTypeValidation = validateTransportLegFuel(userFleets[userFleetIndex], starbaseCoords, destCoords, moveType, true);
+				if (!moveTypeValidation.valid) {
+					inputError('ERROR: Fleet will not have enough fuel to return to starbase', 'ERROR: Distance exceeds fuel capacity', 1);
+				} else {
+					moveType = moveTypeValidation.moveType;
 				}
 			}
 
 			if(fleetAssignment === 'Transport' && starbaseCoords[0]==destCoords[0] && starbaseCoords[1]==destCoords[1]) {
 				inputError('ERROR: Starbase and target sectors are identical.', 'ERROR: Identical starbase/target sectors', 2);
+			}
+			if(fleetAssignment === 'Supply Chain') {
+				const extraTargetElems = Array.from(transportPlusRows[i].querySelectorAll('.transport-plus-target-select'));
+				if(transportPlusTargetValues.some(coord => !coord)) {
+					inputError('ERROR: Supply Chain is missing one or more targets.', 'ERROR: Missing Supply Chain target', 2, extraTargetElems);
+				}
+				const transportPlusStops = [fleetStarbaseCoord].concat(transportPlusTargetValues).concat([fleetStarbaseCoord]);
+				const hasConsecutiveDuplicateTransportPlusLocation = transportPlusStops.some((coord, coordIndex) => coordIndex > 0 && coord && coord === transportPlusStops[coordIndex - 1]);
+				if(hasConsecutiveDuplicateTransportPlusLocation) {
+					inputError('ERROR: Consecutive Supply Chain locations must be different.', 'ERROR: Consecutive Supply Chain sectors are identical', 2, extraTargetElems);
+				}
+
+				let routeChecks = [
+					{ source: starbaseCoords, dest: transportPlusTargetCoords[0], roundTrip: true, route: transportPlusRoutes[0] }
+				];
+				for(let routeIndex=1; routeIndex<transportPlusTargetCoords.length; routeIndex++) {
+					routeChecks.push({
+						source: transportPlusTargetCoords[routeIndex - 1],
+						dest: transportPlusTargetCoords[routeIndex],
+						roundTrip: false,
+						route: transportPlusRoutes[routeIndex]
+					});
+				}
+				routeChecks.push({
+					source: transportPlusTargetCoords[transportPlusTargetCoords.length - 1],
+					dest: starbaseCoords,
+					roundTrip: false,
+					route: transportPlusRoutes[transportPlusTargetCoords.length]
+				});
+				for(const routeCheck of routeChecks) {
+					const validation = validateTransportLegFuel(userFleets[userFleetIndex], routeCheck.source, routeCheck.dest, routeCheck.route.moveType, routeCheck.roundTrip);
+					if(!validation.valid) {
+						inputError('ERROR: Supply Chain route exceeds fuel capacity', 'ERROR: Distance exceeds fuel capacity', 1, extraTargetElems);
+						break;
+					}
+					routeCheck.route.moveType = validation.moveType;
+					routeCheck.route.subwarpPref = transportMoveTypeToSubwarpPref(validation.moveType);
+				}
 			}
 
 			let scanMin = parseInt(scanRows[i].children[1].children[0].children[1].value) || 0;
@@ -9928,43 +10698,67 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let fleetMineResource = mineRows[i].children[1].children[1].value;
 			fleetMineResource = fleetMineResource !== '' ? cargoItems.find(r => r.name == fleetMineResource).token : '';
 
+			const readTransportResourceEntry = (entryElem, includeCrew = false) => {
+				let resource = entryElem.querySelector('.transport-resource-select').value;
+				resource = resource !== '' ? cargoItems.find(r => r.name == resource).token : '';
+				return {
+					res: resource,
+					amt: parseIntKMG(entryElem.querySelector('.transport-resource-amount').value) || 0,
+					cargoTotal: !!entryElem.querySelector('.transport-resource-total')?.checked,
+					crew: includeCrew && entryElem.querySelector('.transport-crew-amount') ? parseIntKMG(entryElem.querySelector('.transport-crew-amount').value) || 0 : 0,
+					crewTotal: includeCrew ? !!entryElem.querySelector('.transport-crew-total')?.checked : false
+				};
+			};
+
 			let transportToTarget = transportRows[i].querySelectorAll(':scope > .transport-to-target > div');
-			let transportResource1 = transportToTarget[1].children[0].value;
-			transportResource1 = transportResource1 !== '' ? cargoItems.find(r => r.name == transportResource1).token : '';
-			let transportResource1Perc = parseIntKMG(transportToTarget[1].children[1].value) || 0;
-			let transportResource1Crew = parseIntKMG(transportToTarget[1].children[2].children[1].value) || 0;
-			let transportResource2 = transportToTarget[2].children[0].value;
-			transportResource2 = transportResource2 !== '' ? cargoItems.find(r => r.name == transportResource2).token : '';
-			let transportResource2Perc = parseIntKMG(transportToTarget[2].children[1].value) || 0;
-			let transportResource3 = transportToTarget[3].children[0].value;
-			transportResource3 = transportResource3 !== '' ? cargoItems.find(r => r.name == transportResource3).token : '';
-			let transportResource3Perc = parseIntKMG(transportToTarget[3].children[1].value) || 0;
-			let transportResource4 = transportToTarget[4].children[0].value;
-			transportResource4 = transportResource4 !== '' ? cargoItems.find(r => r.name == transportResource4).token : '';
-			let transportResource4Perc = parseIntKMG(transportToTarget[4].children[1].value) || 0;
+			let transportResource1Entry = readTransportResourceEntry(transportToTarget[1], true);
+			let transportResource2Entry = readTransportResourceEntry(transportToTarget[2]);
+			let transportResource3Entry = readTransportResourceEntry(transportToTarget[3]);
+			let transportResource4Entry = readTransportResourceEntry(transportToTarget[4]);
 
 			let transportToStarbase = transportRows[i].querySelectorAll(':scope > .transport-to-starbase > div');
-			let transportSBResource1 = transportToStarbase[1].children[0].value;
-			transportSBResource1 = transportSBResource1 !== '' ? cargoItems.find(r => r.name == transportSBResource1).token : '';
-			let transportSBResource1Perc = parseIntKMG(transportToStarbase[1].children[1].value) || 0;
-			let transportSBResource1Crew = parseIntKMG(transportToStarbase[1].children[2].children[1].value) || 0;
-			let transportSBResource2 = transportToStarbase[2].children[0].value;
-			transportSBResource2 = transportSBResource2 !== '' ? cargoItems.find(r => r.name == transportSBResource2).token : '';
-			let transportSBResource2Perc = parseIntKMG(transportToStarbase[2].children[1].value) || 0;
-			let transportSBResource3 = transportToStarbase[3].children[0].value;
-			transportSBResource3 = transportSBResource3 !== '' ? cargoItems.find(r => r.name == transportSBResource3).token : '';
-			let transportSBResource3Perc = parseIntKMG(transportToStarbase[3].children[1].value) || 0;
-			let transportSBResource4 = transportToStarbase[4].children[0].value;
-			transportSBResource4 = transportSBResource4 !== '' ? cargoItems.find(r => r.name == transportSBResource4).token : '';
-			let transportSBResource4Perc = parseIntKMG(transportToStarbase[4].children[1].value) || 0;
+			let transportSBResource1Entry = readTransportResourceEntry(transportToStarbase[1], true);
+			let transportSBResource2Entry = readTransportResourceEntry(transportToStarbase[2]);
+			let transportSBResource3Entry = readTransportResourceEntry(transportToStarbase[3]);
+			let transportSBResource4Entry = readTransportResourceEntry(transportToStarbase[4]);
 
 			if (rowErrBool === false) {
-				let fleetSavedData = await GM.getValue(fleetPK, '{}');
-				let fleetParsedData = JSON.parse(fleetSavedData);
 				let fleetMoveTarget = fleetParsedData && fleetParsedData.moveTarget ? fleetParsedData.moveTarget : '';
+				let fleetTransportPlusRouteIndex = getTransportPlusRouteIndex(fleetParsedData, transportPlusRoutes.length);
+				if(fleetAssignment !== 'Supply Chain') fleetTransportPlusRouteIndex = null;
+				if(fleetAssignment === 'Supply Chain') {
+					let activeTransportPlusRouteIndex = fleetTransportPlusRouteIndex;
+					if(activeTransportPlusRouteIndex === null) {
+						activeTransportPlusRouteIndex = transportPlusRoutes.findIndex((route, routeIndex) => {
+							const expectedDestCoords = routeIndex < transportPlusTargetValues.length ? transportPlusTargetCoords[routeIndex] : starbaseCoords;
+							return CoordsEqual(ConvertCoords(fleetMoveTarget), expectedDestCoords);
+						});
+					}
+					const activeTransportPlusRoute = activeTransportPlusRouteIndex !== null && activeTransportPlusRouteIndex > -1 ? transportPlusRoutes[activeTransportPlusRouteIndex] : transportPlusRoutes[0];
+					subwarpPref = activeTransportPlusRoute.subwarpPref;
+					moveType = activeTransportPlusRoute.moveType;
+				}
 				let scanBlock = buildScanBlock(destCoords[0], destCoords[1], scanPattern, scanPatternLength);
 
 				let fleetScanEnd = fleetParsedData && fleetParsedData.scanEnd ? fleetParsedData.scanEnd : 0;
+				const getLegacyCargoDispatched = (prefix, entry) => {
+					const totalContext = getLegacyTransportTotalContext(prefix, fleetStarbaseCoord, fleetDestCoord);
+					const key = getTransportTotalKey(entry.res, entry.amt, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+					return entry.cargoTotal && fleetParsedData && fleetParsedData[prefix + 'Total'] && fleetParsedData[prefix + 'TotalKey'] === key ? Math.max(0, Math.floor(Number(fleetParsedData[prefix + 'Dispatched'] || 0))) : 0;
+				};
+				const getLegacyCrewDispatched = (prefix, entry) => {
+					const totalContext = getLegacyTransportTotalContext(prefix, fleetStarbaseCoord, fleetDestCoord);
+					const key = getTransportCrewTotalKey(entry.crew, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+					return entry.crewTotal && fleetParsedData && fleetParsedData[prefix + 'CrewTotal'] && fleetParsedData[prefix + 'CrewTotalKey'] === key ? Math.max(0, Math.floor(Number(fleetParsedData[prefix + 'CrewDispatched'] || 0))) : 0;
+				};
+				const getLegacyCargoTotalKey = (prefix, entry) => {
+					const totalContext = getLegacyTransportTotalContext(prefix, fleetStarbaseCoord, fleetDestCoord);
+					return getTransportTotalKey(entry.res, entry.amt, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+				};
+				const getLegacyCrewTotalKey = (prefix, entry) => {
+					const totalContext = getLegacyTransportTotalContext(prefix, fleetStarbaseCoord, fleetDestCoord);
+					return getTransportCrewTotalKey(entry.crew, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+				};
 
 				//await GM.setValue(fleetPK, `{\"name\": \"${fleetName}\", \"assignment\": \"${fleetAssignment}\", \"mineResource\": \"${fleetMineResource}\", \"dest\": \"${fleetDestCoord}\", \"starbase\": \"${fleetStarbaseCoord}\", \"moveType\": \"${moveType}\", \"subwarpPref\": \"${subwarpPref}\", \"moveTarget\": \"${fleetMoveTarget}\", \"transportResource1\": \"${transportResource1}\", \"transportResource1Perc\": ${transportResource1Perc}, \"transportResource1Crew\": ${transportResource1Crew}, \"transportResource2\": \"${transportResource2}\", \"transportResource2Perc\": ${transportResource2Perc}, \"transportResource3\": \"${transportResource3}\", \"transportResource3Perc\": ${transportResource3Perc}, \"transportResource4\": \"${transportResource4}\", \"transportResource4Perc\": ${transportResource4Perc}, \"transportSBResource1\": \"${transportSBResource1}\", \"transportSBResource1Perc\": ${transportSBResource1Perc}, \"transportSBResource1Crew\": ${transportSBResource1Crew}, \"transportSBResource2\": \"${transportSBResource2}\", \"transportSBResource2Perc\": ${transportSBResource2Perc}, \"transportSBResource3\": \"${transportSBResource3}\", \"transportSBResource3Perc\": ${transportSBResource3Perc}, \"transportSBResource4\": \"${transportSBResource4}\", \"transportSBResource4Perc\": ${transportSBResource4Perc}, \"scanBlock\": ${JSON.stringify(scanBlock)}, \"scanMin\": ${scanMin}, \"scanMin2\": ${scanMin2}, \"scanMin3\": ${scanMin3}, \"scanSearchDist\": ${scanSearchDist}, \"scanClusterFactor\": ${scanClusterFactor}, \"scanNeighborhoodMinGood\": ${scanNeighborhoodMinGood}, \"scanCheckWhileCooldownLeft\": ${scanCheckWhileCooldownLeft}, \"scanBypassPercent\": ${scanBypassPercent}, \"scanHomeAtPercent\": ${scanHomeAtPercent}, \"scanPattern\": \"${scanPattern}\", \"scanPatternLength\": ${scanPatternLength}, \"scanMove\": \"${scanMove}\", \"scanEnd\": ${fleetScanEnd} }`);
 				let fleet = {
@@ -9976,24 +10770,59 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					moveType: moveType,
 					subwarpPref: subwarpPref,
 					moveTarget: fleetMoveTarget,
-					transportResource1: transportResource1,
-					transportResource1Perc: transportResource1Perc,
-					transportResource1Crew: transportResource1Crew,
-					transportResource2: transportResource2,
-					transportResource2Perc: transportResource2Perc,
-					transportResource3: transportResource3,
-					transportResource3Perc: transportResource3Perc,
-					transportResource4: transportResource4,
-					transportResource4Perc: transportResource4Perc,
-					transportSBResource1: transportSBResource1,
-					transportSBResource1Perc: transportSBResource1Perc,
-					transportSBResource1Crew: transportSBResource1Crew,
-					transportSBResource2: transportSBResource2,
-					transportSBResource2Perc: transportSBResource2Perc,
-					transportSBResource3: transportSBResource3,
-					transportSBResource3Perc: transportSBResource3Perc,
-					transportSBResource4: transportSBResource4,
-					transportSBResource4Perc: transportSBResource4Perc,
+					transportResource1: transportResource1Entry.res,
+					transportResource1Perc: transportResource1Entry.amt,
+					transportResource1Total: transportResource1Entry.cargoTotal,
+					transportResource1Dispatched: getLegacyCargoDispatched('transportResource1', transportResource1Entry),
+					transportResource1TotalKey: getLegacyCargoTotalKey('transportResource1', transportResource1Entry),
+					transportResource1Crew: transportResource1Entry.crew,
+					transportResource1CrewTotal: transportResource1Entry.crewTotal,
+					transportResource1CrewDispatched: getLegacyCrewDispatched('transportResource1', transportResource1Entry),
+					transportResource1CrewTotalKey: getLegacyCrewTotalKey('transportResource1', transportResource1Entry),
+					transportResource2: transportResource2Entry.res,
+					transportResource2Perc: transportResource2Entry.amt,
+					transportResource2Total: transportResource2Entry.cargoTotal,
+					transportResource2Dispatched: getLegacyCargoDispatched('transportResource2', transportResource2Entry),
+					transportResource2TotalKey: getLegacyCargoTotalKey('transportResource2', transportResource2Entry),
+					transportResource3: transportResource3Entry.res,
+					transportResource3Perc: transportResource3Entry.amt,
+					transportResource3Total: transportResource3Entry.cargoTotal,
+					transportResource3Dispatched: getLegacyCargoDispatched('transportResource3', transportResource3Entry),
+					transportResource3TotalKey: getLegacyCargoTotalKey('transportResource3', transportResource3Entry),
+					transportResource4: transportResource4Entry.res,
+					transportResource4Perc: transportResource4Entry.amt,
+					transportResource4Total: transportResource4Entry.cargoTotal,
+					transportResource4Dispatched: getLegacyCargoDispatched('transportResource4', transportResource4Entry),
+					transportResource4TotalKey: getLegacyCargoTotalKey('transportResource4', transportResource4Entry),
+					transportSBResource1: transportSBResource1Entry.res,
+					transportSBResource1Perc: transportSBResource1Entry.amt,
+					transportSBResource1Total: transportSBResource1Entry.cargoTotal,
+					transportSBResource1Dispatched: getLegacyCargoDispatched('transportSBResource1', transportSBResource1Entry),
+					transportSBResource1TotalKey: getLegacyCargoTotalKey('transportSBResource1', transportSBResource1Entry),
+					transportSBResource1Crew: transportSBResource1Entry.crew,
+					transportSBResource1CrewTotal: transportSBResource1Entry.crewTotal,
+					transportSBResource1CrewDispatched: getLegacyCrewDispatched('transportSBResource1', transportSBResource1Entry),
+					transportSBResource1CrewTotalKey: getLegacyCrewTotalKey('transportSBResource1', transportSBResource1Entry),
+					transportSBResource2: transportSBResource2Entry.res,
+					transportSBResource2Perc: transportSBResource2Entry.amt,
+					transportSBResource2Total: transportSBResource2Entry.cargoTotal,
+					transportSBResource2Dispatched: getLegacyCargoDispatched('transportSBResource2', transportSBResource2Entry),
+					transportSBResource2TotalKey: getLegacyCargoTotalKey('transportSBResource2', transportSBResource2Entry),
+					transportSBResource3: transportSBResource3Entry.res,
+					transportSBResource3Perc: transportSBResource3Entry.amt,
+					transportSBResource3Total: transportSBResource3Entry.cargoTotal,
+					transportSBResource3Dispatched: getLegacyCargoDispatched('transportSBResource3', transportSBResource3Entry),
+					transportSBResource3TotalKey: getLegacyCargoTotalKey('transportSBResource3', transportSBResource3Entry),
+					transportSBResource4: transportSBResource4Entry.res,
+					transportSBResource4Perc: transportSBResource4Entry.amt,
+					transportSBResource4Total: transportSBResource4Entry.cargoTotal,
+					transportSBResource4Dispatched: getLegacyCargoDispatched('transportSBResource4', transportSBResource4Entry),
+					transportSBResource4TotalKey: getLegacyCargoTotalKey('transportSBResource4', transportSBResource4Entry),
+					transportPlusTargetCount: transportPlusTargetCount,
+					transportPlusTarget2: transportPlusTargetValues[1] || '',
+					transportPlusTargets: transportPlusTargetValues,
+					transportPlusRoutes: transportPlusRoutes,
+					transportPlusRouteIndex: fleetTransportPlusRouteIndex,
 					scanBlock: scanBlock,
 					scanMin: scanMin,
 					scanMin2: scanMin2,
@@ -10016,9 +10845,20 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				fleetSaveTotalMs += fleetSaveMs;
 				fleetSaveMaxMs = Math.max(fleetSaveMaxMs, fleetSaveMs);
 
+				const transportConfigKeys = Object.keys(fleet).filter(key =>
+					key.indexOf('transportResource') === 0 ||
+					key.indexOf('transportSBResource') === 0 ||
+					key.indexOf('transportPlus') === 0
+				);
+				for(const key of transportConfigKeys) {
+					userFleets[userFleetIndex][key] = fleet[key];
+				}
 				userFleets[userFleetIndex].mineResource = fleetMineResource;
 				userFleets[userFleetIndex].destCoord = fleetDestCoord;
 				userFleets[userFleetIndex].starbaseCoord = fleetStarbaseCoord;
+				userFleets[userFleetIndex].transportPlusTarget2 = transportPlusTargetValues[1] || '';
+				userFleets[userFleetIndex].transportPlusTargets = transportPlusTargetValues;
+				userFleets[userFleetIndex].transportPlusRouteIndex = fleetTransportPlusRouteIndex;
 				userFleets[userFleetIndex].moveType = moveType;
 				userFleets[userFleetIndex].scanBlock = scanBlock;
 				userFleets[userFleetIndex].scanMin = scanMin;
@@ -10217,6 +11057,65 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		header.addEventListener('touchstart', onDown, { passive: false });
 		container.addEventListener('mousedown', () => bringAssistWindowToFront(container));
 		container.addEventListener('touchstart', () => bringAssistWindowToFront(container), { passive: true });
+	}
+
+	function makeAssistModalContentDraggable(modalSelector) {
+		const modal = document.querySelector(modalSelector);
+		const content = modal?.querySelector('.assist-modal-content');
+		const header = content?.querySelector('.assist-modal-header');
+		if (!modal || !content || !header || content.dataset.dragInit === '1') return;
+		content.dataset.dragInit = '1';
+		let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+		const clampToViewport = (left, top) => {
+			const rect = content.getBoundingClientRect();
+			const maxLeft = Math.max(0, window.innerWidth - rect.width);
+			const maxTop = Math.max(0, window.innerHeight - Math.min(rect.height, window.innerHeight));
+			return {
+				left: Math.max(0, Math.min(left, maxLeft)),
+				top: Math.max(0, Math.min(top, maxTop))
+			};
+		};
+		const anchorContent = () => {
+			const rect = content.getBoundingClientRect();
+			const pos = clampToViewport(rect.left, rect.top);
+			content.style.position = 'absolute';
+			content.style.left = pos.left + 'px';
+			content.style.top = pos.top + 'px';
+			content.style.margin = '0';
+			content.style.transform = 'none';
+		};
+		const onMove = (e) => {
+			const clientX = e.clientX ?? (e.touches && e.touches[0]?.clientX) ?? startX;
+			const clientY = e.clientY ?? (e.touches && e.touches[0]?.clientY) ?? startY;
+			const pos = clampToViewport(startLeft + (clientX - startX), startTop + (clientY - startY));
+			content.style.left = pos.left + 'px';
+			content.style.top = pos.top + 'px';
+			e.preventDefault?.();
+		};
+		const onUp = () => {
+			document.removeEventListener('mousemove', onMove);
+			document.removeEventListener('mouseup', onUp);
+			document.removeEventListener('touchmove', onMove);
+			document.removeEventListener('touchend', onUp);
+		};
+		const onDown = (e) => {
+			if (e.target?.closest('button, input, select, textarea, a, .assist-modal-close')) return;
+			bringAssistWindowToFront(modal);
+			anchorContent();
+			startLeft = parseFloat(content.style.left) || 0;
+			startTop = parseFloat(content.style.top) || 0;
+			startX = e.clientX ?? (e.touches && e.touches[0]?.clientX) ?? startLeft;
+			startY = e.clientY ?? (e.touches && e.touches[0]?.clientY) ?? startTop;
+			document.addEventListener('mousemove', onMove, { passive: false });
+			document.addEventListener('mouseup', onUp);
+			document.addEventListener('touchmove', onMove, { passive: false });
+			document.addEventListener('touchend', onUp);
+			e.preventDefault?.();
+		};
+		header.addEventListener('mousedown', onDown);
+		header.addEventListener('touchstart', onDown, { passive: false });
+		content.addEventListener('mousedown', () => bringAssistWindowToFront(modal));
+		content.addEventListener('touchstart', () => bringAssistWindowToFront(modal), { passive: true });
 	}
 
 	async function assistStatToggle(el) { //statsadd
@@ -10527,6 +11426,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			document.querySelectorAll('#assistModal .assist-mine-row').forEach(e => e.remove());
 			document.querySelectorAll('#assistModal .assist-pad-row').forEach(e => e.remove());
 			document.querySelectorAll('#assistModal .assist-transport-row').forEach(e => e.remove());
+			document.querySelectorAll('#assistModal .assist-transport-plus-row').forEach(e => e.remove());
             document.querySelectorAll('#assistModal .assist-craft-row').forEach(e => e.remove());
 			for (let fleet of userFleets) addAssistInput(fleet);
             for (let i=1; i < globalSettings.craftingJobs+1; i++) addCraftingInput(i);
@@ -11789,15 +12689,31 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		return result;
 	}
 
+	function getParsedTokenAmount(parsedTokenAccounts, mint) {
+		const tokenAccount = parsedTokenAccounts.value.find(item => item.account.data.parsed.info.mint === mint);
+		return tokenAccount ? tokenAccount.account.data.parsed.info.tokenAmount.uiAmount : 0;
+	}
+
+	async function getTransportAmmoBankAmount(fleet) {
+		if(!globalSettings.transportUseAmmoBank) return 0;
+		const ammoMint = sageGameAcct.account.mints.ammo.toString();
+		const fleetCurrentAmmoBank = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.ammoBank, {programId: tokenProgramPK});
+		return getParsedTokenAmount(fleetCurrentAmmoBank, ammoMint);
+	}
+
     async function checkCargo(currentManifest, destinationManifest, fleet) {
         const fleetCurrentCargo = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.cargoHold, {programId: tokenProgramPK});
         const cargoCnt = fleetCurrentCargo.value.reduce((n, {account}) => n + account.data.parsed.info.tokenAmount.uiAmount * cargoItems.find(r => r.token == account.data.parsed.info.mint).size, 0);
+		const ammoMint = sageGameAcct.account.mints.ammo.toString();
+		const destinationHasAmmo = destinationManifest.some(entry => entry.res === ammoMint && entry.amt > 0);
+		const ammoBankAmount = destinationHasAmmo ? await getTransportAmmoBankAmount(fleet) : 0;
         let needToLoad = false;
         let needToUnload = false;
         for (const entry of destinationManifest) {
             if (entry.res && entry.amt > 0) {
                 let currentCargoObj = fleetCurrentCargo.value.find(item => item.account.data.parsed.info.mint === entry.res);
                 let currentCargoResAmt = currentCargoObj ? currentCargoObj.account.data.parsed.info.tokenAmount.uiAmount : 0;
+				if(entry.res === ammoMint) currentCargoResAmt += ammoBankAmount;
                 if (currentCargoResAmt < entry.amt) needToLoad = true;
                 if (currentCargoResAmt > entry.amt) {
                     needToUnload = true;
@@ -11843,9 +12759,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 			if(globalSettings.transportUseAmmoBank) {
 				const ammoMint = sageGameAcct.account.mints.ammo.toString();
-				const fleetCurrentAmmoBank = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.ammoBank, {programId: tokenProgramPK});
-				const currentAmmo = fleetCurrentAmmoBank.value.find(item => item.account.data.parsed.info.mint === ammoMint);
-				const ammoBankAmount = currentAmmo ? Number(currentAmmo.account.data.parsed.info.tokenAmount.uiAmount || 0) : 0;
+				const ammoBankAmount = await getTransportAmmoBankAmount(fleet);
 				if(ammoBankAmount > 0) cargoAmounts[ammoMint] = (cargoAmounts[ammoMint] || 0) + ammoBankAmount;
 			}
 
@@ -11868,13 +12782,18 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			return { score, matches };
 		}
 
-		async function inferTransportRecoveryLeg(fleet, candidates) {
+		async function inferTransportRecoveryLeg(fleet, candidates, preferredRouteIndex = null) {
 			const cargoAmounts = await getTransportRecoveryCargoAmounts(fleet);
 			const scoredCandidates = (candidates || []).map(candidate => {
 				const manifestScore = scoreTransportRecoveryManifest(candidate.destinationManifest || candidate.manifest || [], cargoAmounts);
 				return { ...candidate, score: manifestScore.score, matches: manifestScore.matches };
 			});
 			const activeCandidates = scoredCandidates.filter(candidate => candidate.score > 0);
+
+			if(preferredRouteIndex !== null && preferredRouteIndex !== undefined) {
+				const preferred = activeCandidates.find(candidate => Number(candidate.routeIndex) === Number(preferredRouteIndex));
+				if(preferred) return { recovered: true, reason: 'preferred_route_cargo_match', leg: preferred, cargoAmounts, candidates: scoredCandidates };
+			}
 
 			if(activeCandidates.length === 1) {
 				return { recovered: true, reason: 'single_cargo_match', leg: activeCandidates[0], cargoAmounts, candidates: scoredCandidates };
@@ -11891,20 +12810,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		async function recoverTransportMovement(i, fleetCoords, recovery, logPrefix) {
 			const leg = recovery && recovery.leg;
 			if(!leg || !leg.destCoord) return false;
-			const fleetPK = userFleets[i].publicKey.toString();
-			const fleetSavedData = await GM.getValue(fleetPK, '{}');
-			const fleetParsedData = JSON.parse(fleetSavedData);
-			fleetParsedData.moveType = leg.moveType || userFleets[i].moveType;
-			fleetParsedData.subwarpPref = transportMoveTypeToSubwarpPref(fleetParsedData.moveType);
-			fleetParsedData.moveTarget = leg.destCoord;
-			await saveFleetConfig(fleetPK, fleetParsedData, 'transport-recovery-route-save');
-			userFleets[i].moveType = fleetParsedData.moveType;
-			userFleets[i].moveTarget = leg.destCoord;
+			await persistFleetTransportRouteState(i, leg.moveType || userFleets[i].moveType, leg.destCoord, leg.routeIndex);
 			cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${logPrefix} - recovered route to ${leg.destCoord} (${recovery.reason})`);
 			const [targetX, targetY] = ConvertCoords(leg.destCoord);
 			const moveDist = calculateMovementDistance(fleetCoords, [targetX, targetY]);
 			let isStarbaseAndWarpSubwarp = false;
-			if(userFleets[i].moveType == 'warpsubwarp') {
+			if((leg.moveType || userFleets[i].moveType) == 'warpsubwarp') {
 				const sourceCoords = leg.sourceCoord ? ConvertCoords(leg.sourceCoord) : [];
 				const destCoords = leg.destCoord ? ConvertCoords(leg.destCoord) : [];
 				isStarbaseAndWarpSubwarp =
@@ -12005,22 +12916,63 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		});
 	}
 
+	function getLegacyTransportManifestEntry(fleetParsedData, prefix, includeCrew = false, totalContext = {}) {
+		const res = fleetParsedData[prefix] || '';
+		const amt = fleetParsedData[prefix + 'Perc'] || 0;
+		const crew = includeCrew ? (fleetParsedData[prefix + 'Crew'] || 0) : 0;
+		const cargoTotalKey = getTransportTotalKey(res, amt, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+		const crewTotalKey = getTransportCrewTotalKey(crew, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+		return {
+			res: res,
+			amt: amt,
+			crew: crew,
+			totalPrefix: prefix,
+			cargoTotal: !!fleetParsedData[prefix + 'Total'],
+			cargoDispatched: getTransportSavedDispatched(fleetParsedData, prefix + 'Total', prefix + 'Dispatched', prefix + 'TotalKey', cargoTotalKey),
+			cargoTotalKey: cargoTotalKey,
+			crewTotal: includeCrew && !!fleetParsedData[prefix + 'CrewTotal'],
+			crewDispatched: includeCrew ? getTransportSavedDispatched(fleetParsedData, prefix + 'CrewTotal', prefix + 'CrewDispatched', prefix + 'CrewTotalKey', crewTotalKey) : 0,
+			crewTotalKey: crewTotalKey
+		};
+	}
+
+	async function persistLegacyTransportManifestTotals(i, manifest) {
+		const fleetPK = userFleets[i].publicKey.toString();
+		const fleetSavedData = await GM.getValue(fleetPK, '{}');
+		const fleetParsedData = JSON.parse(fleetSavedData);
+		for(const entry of manifest) {
+			if(!entry || !entry.totalPrefix) continue;
+			const prefix = entry.totalPrefix;
+			fleetParsedData[prefix + 'Total'] = !!entry.cargoTotal;
+			fleetParsedData[prefix + 'Dispatched'] = Math.max(0, Math.floor(Number(entry.cargoDispatched || 0)));
+			fleetParsedData[prefix + 'TotalKey'] = entry.cargoTotalKey || getTransportTotalKey(entry.res, entry.amt);
+			if(entry.crewTotal || Object.prototype.hasOwnProperty.call(fleetParsedData, prefix + 'CrewTotal')) {
+				fleetParsedData[prefix + 'CrewTotal'] = !!entry.crewTotal;
+				fleetParsedData[prefix + 'CrewDispatched'] = Math.max(0, Math.floor(Number(entry.crewDispatched || 0)));
+				fleetParsedData[prefix + 'CrewTotalKey'] = entry.crewTotalKey || getTransportCrewTotalKey(entry.crew);
+			}
+		}
+		await saveFleetConfig(fleetPK, fleetParsedData, 'transport-config-save');
+	}
+
     async function handleTransport(i, fleetState, fleetCoords) {
         const [destX, destY] = ConvertCoords(userFleets[i].destCoord);
         const [starbaseX, starbaseY] = ConvertCoords(userFleets[i].starbaseCoord);
 
         const fleetParsedData = JSON.parse(await GM.getValue(userFleets[i].publicKey.toString(), '{}'));
+		const targetTotalContext = getLegacyTransportTotalContext('transportResource1', userFleets[i].starbaseCoord, userFleets[i].destCoord);
+		const starbaseTotalContext = getLegacyTransportTotalContext('transportSBResource1', userFleets[i].starbaseCoord, userFleets[i].destCoord);
         let targetCargoManifest = [
-            {res: fleetParsedData.transportResource1, amt: fleetParsedData.transportResource1Perc, crew: fleetParsedData.transportResource1Crew },
-            {res: fleetParsedData.transportResource2, amt: fleetParsedData.transportResource2Perc,},
-            {res: fleetParsedData.transportResource3, amt: fleetParsedData.transportResource3Perc,},
-            {res: fleetParsedData.transportResource4, amt: fleetParsedData.transportResource4Perc,},
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource1', true, targetTotalContext),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource2', false, getLegacyTransportTotalContext('transportResource2', userFleets[i].starbaseCoord, userFleets[i].destCoord)),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource3', false, getLegacyTransportTotalContext('transportResource3', userFleets[i].starbaseCoord, userFleets[i].destCoord)),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportResource4', false, getLegacyTransportTotalContext('transportResource4', userFleets[i].starbaseCoord, userFleets[i].destCoord)),
         ];
         let starbaseCargoManifest = [
-            {res: fleetParsedData.transportSBResource1, amt: fleetParsedData.transportSBResource1Perc, crew: fleetParsedData.transportSBResource1Crew},
-            {res: fleetParsedData.transportSBResource2, amt: fleetParsedData.transportSBResource2Perc,},
-            {res: fleetParsedData.transportSBResource3, amt: fleetParsedData.transportSBResource3Perc,},
-            {res: fleetParsedData.transportSBResource4, amt: fleetParsedData.transportSBResource4Perc,},
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource1', true, starbaseTotalContext),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource2', false, getLegacyTransportTotalContext('transportSBResource2', userFleets[i].starbaseCoord, userFleets[i].destCoord)),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource3', false, getLegacyTransportTotalContext('transportSBResource3', userFleets[i].starbaseCoord, userFleets[i].destCoord)),
+            getLegacyTransportManifestEntry(fleetParsedData, 'transportSBResource4', false, getLegacyTransportTotalContext('transportSBResource4', userFleets[i].starbaseCoord, userFleets[i].destCoord)),
         ];
         const hasTargetManifest = hasTransportManifest(targetCargoManifest);
         const hasStarbaseManifest = hasTransportManifest(starbaseCargoManifest);
@@ -12031,25 +12983,28 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
             if (fleetCoords[0] == starbaseX && fleetCoords[1] == starbaseY) {
                 userFleets[i].resupplying = true;
 
-                let checkCargoResult = await checkCargo(starbaseCargoManifest, targetCargoManifest, userFleets[i]);
+				const targetTotalManifest = cloneTransportManifest(targetCargoManifest);
+				let targetLoadManifest = applyTransportTotalRemaining(targetTotalManifest);
+                let checkCargoResult = await checkCargo(starbaseCargoManifest, targetLoadManifest, userFleets[i]);
                 starbaseCargoManifest = checkCargoResult.currentManifest;
-                targetCargoManifest = checkCargoResult.destinationManifest;
+                targetLoadManifest = checkCargoResult.destinationManifest;
 
 		let needToUnloadCrew = 0;
 		if((starbaseCargoManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && (userFleets[i].crewCount - userFleets[i].requiredCrew > 0)) {
 			needToUnloadCrew = userFleets[i].crewCount - userFleets[i].requiredCrew;
 		}
 		let needToLoadCrew = 0;
-		if((targetCargoManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && ((userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount - needToUnloadCrew) > 0)) {
-			needToLoadCrew = Math.min(userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount, targetCargoManifest[0].crew);
+		if((targetLoadManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && ((userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount - needToUnloadCrew) > 0)) {
+			needToLoadCrew = Math.min(userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount, targetLoadManifest[0].crew);
 		}
-		if(starbaseCargoManifest[0].crew > 0 || targetCargoManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
+		logTransportCrewDecision(userFleets[i], 'to target', targetTotalManifest, targetLoadManifest, starbaseCargoManifest, needToLoadCrew, needToUnloadCrew);
+		if(starbaseCargoManifest[0].crew > 0 || targetLoadManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
 
                 const fuelData = await getFleetFuelData(userFleets[i], [starbaseX, starbaseY], [destX, destY], true);
 		//previously we only checked for "fuelData.fuelNeeded > 0" below, but fuelNeeded is always greater than 0 - it is just the fuel needed for the warp/subwarp.
 		//this broke the check if the fleet needs to do the dock/undock sequence and the sequence was always executed
 		//We need to explicitly calculate the needed fuel minus the available fuel, just like in handleTransportRefueling()
-		const fuelEntry = targetCargoManifest.find(e => e.res === sageGameAcct.account.mints.fuel.toString()) || {amt: 0};
+		const fuelEntry = targetLoadManifest.find(e => e.res === sageGameAcct.account.mints.fuel.toString()) || {amt: 0};
 		const totalFuel = fuelData.fuelNeeded + fuelEntry.amt;
 		let fuelToAdd = Math.min(fuelData.capacity, totalFuel) - fuelData.amount;
 		// Check for "Fuel to 100% for transporters" (roundTrip only = source starbase)
@@ -12063,6 +13018,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     let transportLoadUnloadSingleTx=globalSettings.transportLoadUnloadSingleTx;
                     let transactions = [];
                     let unloadedAmountInTransaction = 0;
+					let loadedCrew = 0;
+					let loadedCargo = {};
 
                     let resp = await execDock(userFleets[i], userFleets[i].starbaseCoord, transportLoadUnloadSingleTx);
                     if(transportLoadUnloadSingleTx && resp) {
@@ -12083,17 +13040,27 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			}
 			else if(transportLoadUnloadSingleTx && crewResp) {
 				transactions.push(crewResp);
+				loadedCrew = needToLoadCrew;
+			} else if(crewResp) {
+				loadedCrew = needToLoadCrew;
 			}
                     }
 
                     if (hasStarbaseManifest || checkCargoResult.needToUnload) {
                         resp = await handleTransportUnloading(userFleets[i], userFleets[i].starbaseCoord, starbaseCargoManifest, transportLoadUnloadSingleTx);
+                        if(scheduleTransportUnloadRetry(userFleets[i], resp, userFleets[i].starbaseCoord)) {
+				userFleets[i].resupplying = false;
+				return;
+			}
+			clearTransportUnloadRetry(userFleets[i]);
                         if(transportLoadUnloadSingleTx) {
 				transactions = transactions.concat(resp.transactions);
 				unloadedAmountInTransaction = resp.unloadedAmount;
-					const splitResult = await flushTransportBundleForCargoOverlap(userFleets[i], transactions, resp, targetCargoManifest, checkCargoResult.needToLoad || fuelToAdd > 0);
+					const splitResult = await flushTransportBundleForCargoOverlap(userFleets[i], transactions, resp, targetLoadManifest, checkCargoResult.needToLoad || fuelToAdd > 0);
 				transactions = splitResult.transactions;
-				if(splitResult.flushed) unloadedAmountInTransaction = 0;
+				if(splitResult.flushed) {
+					unloadedAmountInTransaction = 0;
+				}
 				if(splitResult.error) {
 					userFleets[i].resupplying = false;
 					return;
@@ -12110,7 +13077,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     } else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Unloading skipped - No resources specified`);
 
                     //Refueling at Starbase
-                    let refuelResp = await handleTransportRefueling(userFleets[i], userFleets[i].starbaseCoord, [starbaseX, starbaseY], [destX, destY], true, 0, targetCargoManifest, transportLoadUnloadSingleTx);
+                    let refuelResp = await handleTransportRefueling(userFleets[i], userFleets[i].starbaseCoord, [starbaseX, starbaseY], [destX, destY], true, 0, targetLoadManifest, transportLoadUnloadSingleTx);
                     if (refuelResp.status === 0) {
                         userFleets[i].state = refuelResp.detail;
                         return;
@@ -12130,18 +13097,18 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			}
                     }
 
-                    let fuelIndex = targetCargoManifest.findIndex(e => e.res === sageGameAcct.account.mints.fuel.toString());
+                    let fuelIndex = targetLoadManifest.findIndex(e => e.res === sageGameAcct.account.mints.fuel.toString());
                     if (fuelIndex > -1) {
-                        targetCargoManifest[fuelIndex].amt = targetCargoManifest[fuelIndex].amt - refuelResp.amount;
+                        targetLoadManifest[fuelIndex].amt = targetLoadManifest[fuelIndex].amt - refuelResp.amount;
                         //when using a combined load tx, we need to take into account the amount loaded into the fuel tank, because the starbase still reports the original amount (otherwise we may get an ix error instead a "NotEnoughResource" error)
-                        if(transportLoadUnloadSingleTx && refuelResp.alreadyLoaded) targetCargoManifest[fuelIndex].alreadyLoadedInTransaction = refuelResp.alreadyLoaded;
+                        if(transportLoadUnloadSingleTx && refuelResp.alreadyLoaded) targetLoadManifest[fuelIndex].alreadyLoadedInTransaction = refuelResp.alreadyLoaded;
                     }
 
                     //Loading at Starbase
-                    if (hasTargetManifest) {
-                        const loadedCargo = await handleTransportLoading(i, userFleets[i].starbaseCoord, targetCargoManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
-                        cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargo.success);
-                        if(!loadedCargo.success) {
+                    if (hasTransportManifest(targetLoadManifest)) {
+                        const loadedCargoResult = await handleTransportLoading(i, userFleets[i].starbaseCoord, targetLoadManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
+                        cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargoResult.success);
+                        if(!loadedCargoResult.success) {
                             //const newFleetState = `ERROR: No more cargo to load`;
                             //cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${newFleetState}`);
                             //userFleets[i].state = newFleetState;
@@ -12149,8 +13116,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                             userFleets[i].resupplying = false;
                             return;
                         } else if(transportLoadUnloadSingleTx) {
-                            transactions = transactions.concat(loadedCargo.transactions);
-				if(loadedCargo.transactions.length > 0) {
+                            transactions = transactions.concat(loadedCargoResult.transactions);
+				if(loadedCargoResult.transactions.length > 0) {
 					const splitResult = await flushTransportBundle(userFleets[i], transactions, 'after cargo load before undock', 'Loading');
 					transactions = splitResult.transactions;
 					if(splitResult.error) {
@@ -12159,6 +13126,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					}
 				}
 			}
+						loadedCargo = loadedCargoResult.loadedCargo || {};
                     } else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Loading skipped - No resources specified`);
 
                     let undockResult = await execUndock(userFleets[i], userFleets[i].starbaseCoord, transportLoadUnloadSingleTx);
@@ -12170,6 +13138,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     }
                     //cLog(4,`${FleetTimeStamp(userFleets[i].label)} userFleets[i]: `, undockResult);
                     let fleetState = await solanaReadConnection.getAccountInfoAndContext(userFleets[i].publicKey, {minContextSlot: undockResult.slot});
+					applyTransportLoadedTotals(targetTotalManifest, loadedCargo, loadedCrew);
+					await persistLegacyTransportManifestTotals(i, targetTotalManifest);
                 }
                 userFleets[i].moveTarget = userFleets[i].destCoord;
                 userFleets[i].resupplying = false;
@@ -12180,24 +13150,27 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
             else if (fleetCoords[0] == destX && fleetCoords[1] == destY) {
                 userFleets[i].resupplying = true;
 
-                let checkCargoResult = await checkCargo(targetCargoManifest, starbaseCargoManifest, userFleets[i]);
+				const starbaseTotalManifest = cloneTransportManifest(starbaseCargoManifest);
+				let starbaseLoadManifest = applyTransportTotalRemaining(starbaseTotalManifest);
+                let checkCargoResult = await checkCargo(targetCargoManifest, starbaseLoadManifest, userFleets[i]);
                 targetCargoManifest = checkCargoResult.currentManifest;
-                starbaseCargoManifest = checkCargoResult.destinationManifest;
+                starbaseLoadManifest = checkCargoResult.destinationManifest;
 
 		let needToUnloadCrew = 0;
 		if((targetCargoManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && (userFleets[i].crewCount - userFleets[i].requiredCrew > 0)) {
 			needToUnloadCrew = userFleets[i].crewCount - userFleets[i].requiredCrew;
 		}
 		let needToLoadCrew = 0;
-		if((starbaseCargoManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && ((userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount - needToUnloadCrew) > 0)) {
-			needToLoadCrew = Math.min(userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount, starbaseCargoManifest[0].crew);
+		if((starbaseLoadManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && ((userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount - needToUnloadCrew) > 0)) {
+			needToLoadCrew = Math.min(userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount, starbaseLoadManifest[0].crew);
 		}
-		if(starbaseCargoManifest[0].crew > 0 || targetCargoManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
+		logTransportCrewDecision(userFleets[i], 'to starbase', starbaseTotalManifest, starbaseLoadManifest, targetCargoManifest, needToLoadCrew, needToUnloadCrew);
+		if(starbaseLoadManifest[0].crew > 0 || targetCargoManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
 
                 const fuelData = await getFleetFuelData(userFleets[i], [destX, destY], [starbaseX, starbaseY], false);
 		//previously we only checked for "fuelData.fuelNeeded > 0" below, but fuelNeeded is always greater than 0 - it is just the fuel needed for the warp/subwarp.
 		//We need to explicitly calculate the needed fuel minus the available fuel, just like in handleTransportRefueling()
-		const fuelEntry = starbaseCargoManifest.find(e => e.res === sageGameAcct.account.mints.fuel.toString()) || {amt: 0};
+		const fuelEntry = starbaseLoadManifest.find(e => e.res === sageGameAcct.account.mints.fuel.toString()) || {amt: 0};
 		const totalFuel = fuelData.fuelNeeded + fuelEntry.amt;
 		let fuelToAdd = Math.min(fuelData.capacity, totalFuel) - fuelData.amount;
 
@@ -12208,6 +13181,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     let transportLoadUnloadSingleTx=globalSettings.transportLoadUnloadSingleTx;
                     let transactions = [];
                     let unloadedAmountInTransaction = 0;
+					let loadedCrew = 0;
+					let loadedCargo = {};
 
                     let resp = await execDock(userFleets[i], userFleets[i].destCoord, transportLoadUnloadSingleTx);
                     if(transportLoadUnloadSingleTx && resp) {
@@ -12227,6 +13202,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				updateFleetState(userFleets[i], 'WARNING: Not enough crew');
 			} else if(transportLoadUnloadSingleTx && crewResp) {
 				transactions.push(crewResp);
+				loadedCrew = needToLoadCrew;
+			} else if(crewResp) {
+				loadedCrew = needToLoadCrew;
 			}
                     }
 
@@ -12235,10 +13213,15 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     if (hasTargetManifest || checkCargoResult.needToUnload) {
                         const unloadResult = await handleTransportUnloading(userFleets[i], userFleets[i].destCoord, targetCargoManifest, transportLoadUnloadSingleTx);
                         fuelUnloadDeficit = unloadResult.fuelUnloadDeficit;
+                        if(scheduleTransportUnloadRetry(userFleets[i], unloadResult, userFleets[i].destCoord)) {
+				userFleets[i].resupplying = false;
+				return;
+			}
+			clearTransportUnloadRetry(userFleets[i]);
                         if(transportLoadUnloadSingleTx) {
 				transactions = transactions.concat(unloadResult.transactions);
 				unloadedAmountInTransaction = unloadResult.unloadedAmount;
-					const splitResult = await flushTransportBundleForCargoOverlap(userFleets[i], transactions, unloadResult, starbaseCargoManifest, checkCargoResult.needToLoad || fuelToAdd > 0);
+					const splitResult = await flushTransportBundleForCargoOverlap(userFleets[i], transactions, unloadResult, starbaseLoadManifest, checkCargoResult.needToLoad || fuelToAdd > 0);
 				transactions = splitResult.transactions;
 				if(splitResult.flushed) unloadedAmountInTransaction = 0;
 				if(splitResult.error) {
@@ -12257,7 +13240,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     } else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Unloading skipped - No resources specified`);
 
                     //Refueling at Target
-                    let refuelResp = await handleTransportRefueling(userFleets[i], userFleets[i].destCoord, [destX, destY], [starbaseX, starbaseY], false, fuelUnloadDeficit, starbaseCargoManifest, transportLoadUnloadSingleTx);
+                    let refuelResp = await handleTransportRefueling(userFleets[i], userFleets[i].destCoord, [destX, destY], [starbaseX, starbaseY], false, fuelUnloadDeficit, starbaseLoadManifest, transportLoadUnloadSingleTx);
                     if (refuelResp.status === 0) {
                         userFleets[i].state = refuelResp.detail;
                         return;
@@ -12277,16 +13260,16 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			}
                     }
 
-                    let fuelIndex = starbaseCargoManifest.findIndex(e => e.res === sageGameAcct.account.mints.fuel.toString());
+                    let fuelIndex = starbaseLoadManifest.findIndex(e => e.res === sageGameAcct.account.mints.fuel.toString());
                     if (fuelIndex > -1) {
-                        starbaseCargoManifest[fuelIndex].amt = starbaseCargoManifest[fuelIndex].amt - refuelResp.amount;
+                        starbaseLoadManifest[fuelIndex].amt = starbaseLoadManifest[fuelIndex].amt - refuelResp.amount;
                     }
 
                     //Loading at Target
-                    if(hasStarbaseManifest) {
-                        const loadedCargo = await handleTransportLoading(i, userFleets[i].destCoord, starbaseCargoManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
-                        cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargo.success);
-                        if(!loadedCargo.success) {
+                    if(hasTransportManifest(starbaseLoadManifest)) {
+                        const loadedCargoResult = await handleTransportLoading(i, userFleets[i].destCoord, starbaseLoadManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
+                        cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargoResult.success);
+                        if(!loadedCargoResult.success) {
                             //const newFleetState = `ERROR: No more cargo to load`;
                             //cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${newFleetState}`);
                             //userFleets[i].state = newFleetState;
@@ -12294,8 +13277,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                             userFleets[i].resupplying = false;
                             return;
                         } else if(transportLoadUnloadSingleTx) {
-				transactions = transactions.concat(loadedCargo.transactions);
-				if(loadedCargo.transactions.length > 0) {
+				transactions = transactions.concat(loadedCargoResult.transactions);
+				if(loadedCargoResult.transactions.length > 0) {
 					const splitResult = await flushTransportBundle(userFleets[i], transactions, 'after cargo load before undock', 'Loading');
 					transactions = splitResult.transactions;
 					if(splitResult.error) {
@@ -12304,6 +13287,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					}
 				}
 			}
+			loadedCargo = loadedCargoResult.loadedCargo || {};
                     } else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Loading skipped - No resources specified`);
 
                     let undockResult = await execUndock(userFleets[i], userFleets[i].destCoord, transportLoadUnloadSingleTx);
@@ -12315,6 +13299,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                     }
                     //cLog(4,`${FleetTimeStamp(userFleets[i].label)} userFleets[i]: `, undockResult);
                     let fleetState = await solanaReadConnection.getAccountInfoAndContext(userFleets[i].publicKey, {minContextSlot: undockResult.slot});
+					applyTransportLoadedTotals(starbaseTotalManifest, loadedCargo, loadedCrew);
+					await persistLegacyTransportManifestTotals(i, starbaseTotalManifest);
                 }
                 userFleets[i].moveTarget = userFleets[i].starbaseCoord;
                 userFleets[i].resupplying = false;
@@ -12323,9 +13309,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
             if(userFleets[i].stopping) return;
 
-	            if (userFleets[i].moveTarget !== '') {
-	                const targetX = userFleets[i].moveTarget.split(',').length > 1 ? userFleets[i].moveTarget.split(',')[0].trim() : '';
-	                const targetY = userFleets[i].moveTarget.split(',').length > 1 ? userFleets[i].moveTarget.split(',')[1].trim() : '';
+			const savedMoveTarget = typeof fleetParsedData.moveTarget === 'string' ? fleetParsedData.moveTarget : '';
+			const activeMoveTarget = userFleets[i].moveTarget && userFleets[i].moveTarget !== '' ? userFleets[i].moveTarget : savedMoveTarget;
+	            if (activeMoveTarget !== '') {
+				userFleets[i].moveTarget = activeMoveTarget;
+	                const targetX = activeMoveTarget.split(',').length > 1 ? activeMoveTarget.split(',')[0].trim() : '';
+	                const targetY = activeMoveTarget.split(',').length > 1 ? activeMoveTarget.split(',')[1].trim() : '';
 	                const moveDist = calculateMovementDistance(fleetCoords, [targetX,targetY]);
 			let isStarbaseAndWarpSubwarp = userFleets[i].moveType == 'warpsubwarp' && ((fleetCoords[0] == starbaseX && fleetCoords[1] == starbaseY) || (fleetCoords[0] == destX && fleetCoords[1] == destY));
 	                await handleMovement(i, moveDist, targetX, targetY, isStarbaseAndWarpSubwarp);
@@ -12336,6 +13325,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 							sourceCoord: userFleets[i].starbaseCoord,
 							destCoord: userFleets[i].destCoord,
 							moveType: userFleets[i].moveType,
+							routeIndex: null,
 							destinationManifest: targetCargoManifest
 						},
 						{
@@ -12343,6 +13333,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 							sourceCoord: userFleets[i].destCoord,
 							destCoord: userFleets[i].starbaseCoord,
 							moveType: userFleets[i].moveType,
+							routeIndex: null,
 							destinationManifest: starbaseCargoManifest
 						}
 					]);
@@ -12355,6 +13346,290 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	            }
 	        }
 	    }
+
+	function getTransportPlusLegs(fleetParsedData, starbaseCoord, target1Coord) {
+		const transportPlusTargets = getTransportPlusTargets(fleetParsedData, target1Coord);
+		if(transportPlusTargets.length < 1) return [];
+		const transportPlusRouteContexts = getTransportPlusRouteContexts(starbaseCoord, transportPlusTargets);
+		const transportPlusRoutes = getTransportPlusRoutes(fleetParsedData, transportPlusTargets.length + 1, transportPlusRouteContexts);
+		const transportPlusLegs = [];
+
+		for(let routeIndex=0; routeIndex<transportPlusRoutes.length; routeIndex++) {
+			const sourceCoord = routeIndex === 0 ? starbaseCoord : transportPlusTargets[routeIndex - 1];
+			const destCoord = routeIndex < transportPlusTargets.length ? transportPlusTargets[routeIndex] : starbaseCoord;
+			const previousRouteIndex = routeIndex === 0 ? transportPlusRoutes.length - 1 : routeIndex - 1;
+			transportPlusLegs.push({
+				routeIndex: routeIndex,
+				sourceCoord: sourceCoord,
+				destCoord: destCoord,
+				currentManifest: cloneTransportManifest(transportPlusRoutes[previousRouteIndex].manifest),
+				destinationManifest: cloneTransportManifest(transportPlusRoutes[routeIndex].manifest),
+				moveType: transportPlusRoutes[routeIndex].moveType,
+				roundTrip: routeIndex === 0
+			});
+		}
+
+		return transportPlusLegs;
+	}
+
+	async function persistTransportPlusRouteManifestTotals(i, routeIndex, manifest) {
+		if(routeIndex === null || routeIndex === undefined) return;
+		const fleetPK = userFleets[i].publicKey.toString();
+		const fleetSavedData = await GM.getValue(fleetPK, '{}');
+		const fleetParsedData = JSON.parse(fleetSavedData);
+		if(!Array.isArray(fleetParsedData.transportPlusRoutes) || !fleetParsedData.transportPlusRoutes[routeIndex]) return;
+		const routeManifest = Array.isArray(fleetParsedData.transportPlusRoutes[routeIndex].manifest) ? fleetParsedData.transportPlusRoutes[routeIndex].manifest : [];
+		for(let entryIndex=0; entryIndex<manifest.length; entryIndex++) {
+			const sourceEntry = manifest[entryIndex] || {};
+			const targetEntry = routeManifest[entryIndex] || {};
+			targetEntry.cargoTotal = !!sourceEntry.cargoTotal;
+			targetEntry.cargoDispatched = Math.max(0, Math.floor(Number(sourceEntry.cargoDispatched || 0)));
+			targetEntry.cargoTotalKey = sourceEntry.cargoTotalKey || getTransportTotalKey(sourceEntry.res, sourceEntry.amt);
+			targetEntry.crewTotal = !!sourceEntry.crewTotal;
+			targetEntry.crewDispatched = Math.max(0, Math.floor(Number(sourceEntry.crewDispatched || 0)));
+			targetEntry.crewTotalKey = sourceEntry.crewTotalKey || getTransportCrewTotalKey(sourceEntry.crew);
+			routeManifest[entryIndex] = targetEntry;
+		}
+		fleetParsedData.transportPlusRoutes[routeIndex].manifest = routeManifest;
+		await saveFleetConfig(fleetPK, fleetParsedData, 'transport-routes-save');
+	}
+
+	async function handleTransportStop(i, sourceCoord, destCoord, currentManifest, destinationManifest, moveType, roundTrip, routeIndex = null) {
+		const sourceCoords = ConvertCoords(sourceCoord);
+		const destCoords = ConvertCoords(destCoord);
+		userFleets[i].moveType = moveType;
+		userFleets[i].resupplying = true;
+
+		let sourceCargoManifest = cloneTransportManifest(currentManifest);
+		const destinationTotalManifest = cloneTransportManifest(destinationManifest);
+		let destinationCargoManifest = applyTransportTotalRemaining(destinationTotalManifest);
+		const hasSourceManifest = hasTransportManifest(sourceCargoManifest);
+		const hasDestinationManifest = hasTransportManifest(destinationCargoManifest);
+
+		let checkCargoResult = await checkCargo(sourceCargoManifest, destinationCargoManifest, userFleets[i]);
+		sourceCargoManifest = checkCargoResult.currentManifest;
+		destinationCargoManifest = checkCargoResult.destinationManifest;
+
+		let needToUnloadCrew = 0;
+		if((sourceCargoManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && (userFleets[i].crewCount - userFleets[i].requiredCrew > 0)) {
+			needToUnloadCrew = userFleets[i].crewCount - userFleets[i].requiredCrew;
+		}
+		let needToLoadCrew = 0;
+		if((destinationCargoManifest[0].crew > 0) && (userFleets[i].passengerCapacity > 0) && ((userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount - needToUnloadCrew) > 0)) {
+			needToLoadCrew = Math.min(userFleets[i].requiredCrew + userFleets[i].passengerCapacity - userFleets[i].crewCount, destinationCargoManifest[0].crew);
+		}
+		logTransportCrewDecision(userFleets[i], `${sourceCoord} -> ${destCoord}`, destinationTotalManifest, destinationCargoManifest, sourceCargoManifest, needToLoadCrew, needToUnloadCrew);
+		if(sourceCargoManifest[0].crew > 0 || destinationCargoManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
+
+		const fuelData = await getFleetFuelData(userFleets[i], sourceCoords, destCoords, roundTrip);
+		const fuelEntry = destinationCargoManifest.find(e => e.res === sageGameAcct.account.mints.fuel.toString()) || {amt: 0};
+		const totalFuel = fuelData.fuelNeeded + fuelEntry.amt;
+		let fuelToAdd = Math.min(fuelData.capacity, totalFuel) - fuelData.amount;
+		if(fuelToAdd > 0 && globalSettings.transportFuel100 && roundTrip && fuelToAdd < fuelData.capacity - fuelData.amount) fuelToAdd = fuelData.capacity - fuelData.amount;
+
+		cLog(3,`${FleetTimeStamp(userFleets[i].label)} Fuel needed`, fuelData.fuelNeeded, '/ fuel found', fuelData.amount, '/ fuel to add', fuelToAdd, '/ needToLoad', checkCargoResult.needToLoad, '/ needToUnload', checkCargoResult.needToUnload, '/ needToLoadCrew', needToLoadCrew, '/ needToUnloadCrew', needToUnloadCrew);
+
+		if (checkCargoResult.needToLoad || checkCargoResult.needToUnload || fuelToAdd > 0 || needToLoadCrew > 0 || needToUnloadCrew > 0) {
+			let transportLoadUnloadSingleTx=globalSettings.transportLoadUnloadSingleTx;
+			let transactions = [];
+			let unloadedAmountInTransaction = 0;
+			let loadedCrew = 0;
+			let loadedCargo = {};
+
+			let resp = await execDock(userFleets[i], sourceCoord, transportLoadUnloadSingleTx);
+			if(transportLoadUnloadSingleTx && resp) {
+				transactions.push(resp);
+			}
+
+			if(needToUnloadCrew) {
+				resp = await handleCrewUnloading(userFleets[i], sourceCoord, needToUnloadCrew, transportLoadUnloadSingleTx);
+				if(transportLoadUnloadSingleTx && resp) {
+					transactions.push(resp);
+				}
+			}
+			if(needToLoadCrew) {
+				let crewResp = await handleCrewLoading(userFleets[i], sourceCoord, needToLoadCrew, transportLoadUnloadSingleTx);
+				if (crewResp && crewResp.name == 'NotEnoughCrew') {
+					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Transporting - WARNING: Not enough crew`);
+					updateFleetState(userFleets[i], 'WARNING: Not enough crew');
+				} else if(transportLoadUnloadSingleTx && crewResp) {
+					transactions.push(crewResp);
+					loadedCrew = needToLoadCrew;
+				} else if(crewResp) {
+					loadedCrew = needToLoadCrew;
+				}
+			}
+
+			let fuelUnloadDeficit = 0;
+			if (hasSourceManifest || checkCargoResult.needToUnload) {
+				const unloadResult = await handleTransportUnloading(userFleets[i], sourceCoord, sourceCargoManifest, transportLoadUnloadSingleTx);
+				fuelUnloadDeficit = unloadResult.fuelUnloadDeficit;
+				if(scheduleTransportUnloadRetry(userFleets[i], unloadResult, sourceCoord)) {
+					userFleets[i].resupplying = false;
+					return false;
+				}
+				clearTransportUnloadRetry(userFleets[i]);
+				if(transportLoadUnloadSingleTx) {
+					transactions = transactions.concat(unloadResult.transactions);
+					unloadedAmountInTransaction = unloadResult.unloadedAmount;
+					const splitResult = await flushTransportBundleForCargoOverlap(userFleets[i], transactions, unloadResult, destinationCargoManifest, checkCargoResult.needToLoad || fuelToAdd > 0);
+					transactions = splitResult.transactions;
+					if(splitResult.flushed) {
+						unloadedAmountInTransaction = 0;
+					}
+					if(splitResult.error) {
+						userFleets[i].resupplying = false;
+						return false;
+					}
+				}
+			} else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Unloading skipped - No resources specified`);
+
+			let refuelResp = await handleTransportRefueling(userFleets[i], sourceCoord, sourceCoords, destCoords, roundTrip, roundTrip ? 0 : fuelUnloadDeficit, destinationCargoManifest, transportLoadUnloadSingleTx);
+			if (refuelResp.status === 0) {
+				userFleets[i].state = refuelResp.detail;
+				return false;
+			} else if(transportLoadUnloadSingleTx && refuelResp && refuelResp.transactions) {
+				transactions = transactions.concat(refuelResp.transactions);
+				if(refuelResp.transactions.length > 0) {
+					const splitResult = await flushTransportBundle(userFleets[i], transactions, 'after fuel refuel before cargo load/undock', 'Loading');
+					transactions = splitResult.transactions;
+					if(splitResult.flushed) {
+						unloadedAmountInTransaction = 0;
+						refuelResp.alreadyLoaded = 0;
+					}
+					if(splitResult.error) {
+						userFleets[i].resupplying = false;
+						return false;
+					}
+				}
+			}
+
+			let fuelIndex = destinationCargoManifest.findIndex(e => e.res === sageGameAcct.account.mints.fuel.toString());
+			if (fuelIndex > -1) {
+				destinationCargoManifest[fuelIndex].amt = destinationCargoManifest[fuelIndex].amt - refuelResp.amount;
+				if(transportLoadUnloadSingleTx && refuelResp.alreadyLoaded) destinationCargoManifest[fuelIndex].alreadyLoadedInTransaction = refuelResp.alreadyLoaded;
+			}
+
+			if(hasDestinationManifest) {
+				const loadedCargoResult = await handleTransportLoading(i, sourceCoord, destinationCargoManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
+				cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargoResult.success);
+				if(!loadedCargoResult.success) {
+					cLog(1,`${FleetTimeStamp(userFleets[i].label)} ERROR: Unexpected error on cargo load.`);
+					userFleets[i].resupplying = false;
+					return false;
+				} else if(transportLoadUnloadSingleTx) {
+					transactions = transactions.concat(loadedCargoResult.transactions);
+					if(loadedCargoResult.transactions.length > 0) {
+						const splitResult = await flushTransportBundle(userFleets[i], transactions, 'after cargo load before undock', 'Loading');
+						transactions = splitResult.transactions;
+						if(splitResult.error) {
+							userFleets[i].resupplying = false;
+							return false;
+						}
+					}
+				}
+				loadedCargo = loadedCargoResult.loadedCargo || {};
+			} else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Loading skipped - No resources specified`);
+
+			let undockResult = await execUndock(userFleets[i], sourceCoord, transportLoadUnloadSingleTx);
+			if(transportLoadUnloadSingleTx) {
+				updateFleetState(userFleets[i], 'Exec tx bundle');
+				transactions.push(undockResult);
+				undockResult = await txSliceAndSend(transactions, userFleets[i], 'LOAD/UNLOAD', 100, 5);
+				updateFleetState(userFleets[i], 'Idle');
+			}
+			let fleetState = await solanaReadConnection.getAccountInfoAndContext(userFleets[i].publicKey, {minContextSlot: undockResult.slot});
+			applyTransportLoadedTotals(destinationTotalManifest, loadedCargo, loadedCrew);
+			await persistTransportPlusRouteManifestTotals(i, routeIndex, destinationTotalManifest);
+		}
+
+		await persistFleetTransportRouteState(i, moveType, destCoord, routeIndex);
+		userFleets[i].resupplying = false;
+		cLog(3,`${FleetTimeStamp(userFleets[i].label)} userFleets[i]: `, userFleets[i]);
+		return true;
+	}
+
+	async function handleSupplyChain(i, fleetState, fleetCoords) {
+		const fleetParsedData = JSON.parse(await GM.getValue(userFleets[i].publicKey.toString(), '{}'));
+		const transportPlusLegs = getTransportPlusLegs(fleetParsedData, userFleets[i].starbaseCoord, userFleets[i].destCoord);
+		const activeTransportPlusRouteIndex = getTransportPlusRouteIndex(fleetParsedData, transportPlusLegs.length);
+		if(transportPlusLegs.length < 2 || transportPlusLegs.some(route => !route.sourceCoord || !route.destCoord)) {
+			cLog(1,`${FleetTimeStamp(userFleets[i].label)} Supply Chain - ERROR: Missing route coordinates`);
+			updateFleetState(userFleets[i], 'ERROR: Missing Supply Chain route');
+			return;
+		}
+
+		let activeLeg = null;
+		if (fleetState === 'Idle') {
+			if(activeTransportPlusRouteIndex !== null) {
+				const indexedLeg = transportPlusLegs[activeTransportPlusRouteIndex];
+				if(indexedLeg && CoordsEqual(fleetCoords, ConvertCoords(indexedLeg.destCoord))) {
+					activeLeg = transportPlusLegs[(activeTransportPlusRouteIndex + 1) % transportPlusLegs.length];
+				} else if(indexedLeg && CoordsEqual(fleetCoords, ConvertCoords(indexedLeg.sourceCoord))) {
+					activeLeg = indexedLeg;
+				}
+			}
+			if(!activeLeg) activeLeg = transportPlusLegs.find(route => CoordsEqual(fleetCoords, ConvertCoords(route.sourceCoord)));
+			if(activeLeg) {
+				const handled = await handleTransportStop(i, activeLeg.sourceCoord, activeLeg.destCoord, activeLeg.currentManifest, activeLeg.destinationManifest, activeLeg.moveType, activeLeg.roundTrip, activeLeg.routeIndex);
+				if(handled === false) return;
+			}
+		}
+
+		if(userFleets[i].stopping) return;
+
+			const activeMoveTarget = userFleets[i].moveTarget && userFleets[i].moveTarget !== '' ? userFleets[i].moveTarget : (fleetParsedData.moveTarget || '');
+			if (activeMoveTarget !== '') {
+				const activeMoveTargetCoords = ConvertCoords(activeMoveTarget);
+				if(!activeLeg && activeTransportPlusRouteIndex !== null) {
+					const indexedLeg = transportPlusLegs[activeTransportPlusRouteIndex];
+					if(indexedLeg && CoordsEqual(ConvertCoords(indexedLeg.destCoord), activeMoveTargetCoords)) activeLeg = indexedLeg;
+				}
+				if(!activeLeg) activeLeg = transportPlusLegs.find(route => CoordsEqual(ConvertCoords(route.destCoord), activeMoveTargetCoords));
+				if(activeLeg) {
+					userFleets[i].moveType = activeLeg.moveType;
+					userFleets[i].moveTarget = activeMoveTarget;
+					userFleets[i].transportPlusRouteIndex = activeLeg.routeIndex;
+				}
+				const targetX = activeMoveTarget.split(',').length > 1 ? activeMoveTarget.split(',')[0].trim() : '';
+				const targetY = activeMoveTarget.split(',').length > 1 ? activeMoveTarget.split(',')[1].trim() : '';
+				const moveDist = calculateMovementDistance(fleetCoords, [targetX,targetY]);
+				let isStarbaseAndWarpSubwarp = false;
+				if(activeLeg && userFleets[i].moveType == 'warpsubwarp') {
+					const activeSourceCoords = ConvertCoords(activeLeg.sourceCoord);
+					const activeDestCoords = ConvertCoords(activeLeg.destCoord);
+					isStarbaseAndWarpSubwarp =
+						(fleetCoords[0] == activeSourceCoords[0] && fleetCoords[1] == activeSourceCoords[1]) ||
+						(fleetCoords[0] == activeDestCoords[0] && fleetCoords[1] == activeDestCoords[1]);
+				}
+				await handleMovement(i, moveDist, targetX, targetY, isStarbaseAndWarpSubwarp);
+			} else {
+				let recovery = await inferTransportRecoveryLeg(userFleets[i], transportPlusLegs.map(leg => ({
+					label: `${leg.sourceCoord} -> ${leg.destCoord}`,
+					sourceCoord: leg.sourceCoord,
+					destCoord: leg.destCoord,
+					moveType: leg.moveType,
+					routeIndex: leg.routeIndex,
+					destinationManifest: leg.destinationManifest
+				})), activeTransportPlusRouteIndex);
+				if(!recovery.recovered && activeTransportPlusRouteIndex !== null && recovery.reason === 'no_cargo_match') {
+					const indexedLeg = transportPlusLegs[activeTransportPlusRouteIndex];
+					if(indexedLeg) {
+						recovery = {
+							recovered: true,
+							reason: 'preferred_route_index_no_cargo_match',
+							leg: indexedLeg
+						};
+					}
+				}
+				if(recovery.recovered) {
+					await recoverTransportMovement(i, fleetCoords, recovery, 'Supply Chain');
+				} else {
+					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Supply Chain - ERROR: Fleet must start at Starbase or a configured target (${recovery.reason})`);
+					updateFleetState(userFleets[i], 'ERROR: Fleet must start at Starbase or a configured target');
+				}
+			}
+		}
 
 	async function getFleetFuelData(fleet, currentPos, targetPos, roundTrip = true) {
 		const moveDist = calculateMovementDistance(currentPos, targetPos);
@@ -12581,6 +13856,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		let transactions = [];
 		let unloadedAmount = 0;
 		let unloadedResources = [];
+		let error = false;
 
 		//Unloading resources from manifest
 		let fuelUnloadDeficit = 0;
@@ -12621,6 +13897,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				if(isAmmo) ammoUnloadDeficit = Math.max(0, entry.plannedAmount - amountToUnload);
 				unloadedAmount += amountToUnload * cargoItems.find(r => r.token == entry.res).size;
 				unloadedResources.push(entry.res);
+				if(fleet.state.includes('ERROR')) {
+					error = true;
+					break;
+				}
 			} else {
 				cLog(1,`${FleetTimeStamp(fleet.label)} Unload ${entry.res} skipped - none found in ship's cargo hold`);
 				if(isFuel) fuelUnloadDeficit = entry.plannedAmount;
@@ -12632,7 +13912,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 		//Ammo bank unloading
 		const ammoEntry = globalSettings.transportUseAmmoBank ? unloadEntriesByMint.get(ammoMint) : undefined;
-		if (ammoEntry) {
+		if (!error && ammoEntry) {
 			let fleetCurrentAmmoBank = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.ammoBank, {programId: tokenProgramPK});
 			let currentAmmo = fleetCurrentAmmoBank.value.find(item => item.account.data.parsed.info.mint === ammoMint);
 			let currentAmmoCnt = currentAmmo ? currentAmmo.account.data.parsed.info.tokenAmount.uiAmount : 0;
@@ -12645,30 +13925,47 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					transactions.push(resp);
 				}
 				unloadedResources.push(ammoMint);
+				if(fleet.state.includes('ERROR')) {
+					error = true;
+				}
 			}
 		}
 
-		return { fuelUnloadDeficit, transactions, unloadedAmount, unloadedResources: Array.from(new Set(unloadedResources)) };
+		return { fuelUnloadDeficit, transactions, unloadedAmount, unloadedResources: Array.from(new Set(unloadedResources)), error };
 	}
 
 	async function handleTransportLoading(i, starbaseCoords, transportManifest, returnTx, alreadyUnloadedInTransaction) {
 		cLog(1,`${FleetTimeStamp(userFleets[i].label)} 📦 Loading Transport`);
 		updateFleetState(userFleets[i], 'Loading');
 
+		//Calculate remaining free cargo space
+		cLog(2,`${FleetTimeStamp(userFleets[i].label)} Calculating cargoSpace ...`);
+		const fleetCurrentCargo = await solanaReadConnection.getParsedTokenAccountsByOwner(userFleets[i].cargoHold, {programId: tokenProgramPK});
+
 		//Use ammo banks if possible
-		const ammoEntry = globalSettings.transportUseAmmoBank ? transportManifest.find(e => e.res === sageGameAcct.account.mints.ammo.toString()) : undefined;
+		const ammoMint = sageGameAcct.account.mints.ammo.toString();
+		const ammoEntry = globalSettings.transportUseAmmoBank ? transportManifest.find(e => e.res === ammoMint) : undefined;
+		const ammoEntryIndex = ammoEntry ? transportManifest.findIndex(e => e === ammoEntry) : -1;
 		let resp = null;
 		let transactions = [];
-		let ammoLoadingIntoAmmoBank = ammoEntry ? (resp = await execLoadFleetAmmo(userFleets[i], starbaseCoords, ammoEntry.amt, returnTx)).amountLoaded : 0;
+		let loadedCargo = {};
+		let ammoLoadingIntoAmmoBank = 0;
+		let ammoAlreadyInAmmoBank = 0;
+		if(ammoEntry) {
+			const ammoAlreadyInCargo = getParsedTokenAmount(fleetCurrentCargo, ammoMint);
+			const ammoBankTarget = Math.max(0, ammoEntry.amt - ammoAlreadyInCargo);
+			resp = await execLoadFleetAmmo(userFleets[i], starbaseCoords, ammoBankTarget, returnTx);
+			ammoLoadingIntoAmmoBank = resp.amountLoaded;
+			ammoAlreadyInAmmoBank = resp.currentAmount || 0;
+		}
+		const ammoInAmmoBankForManifest = ammoEntry ? Math.min(ammoEntry.amt, ammoAlreadyInAmmoBank + ammoLoadingIntoAmmoBank) : 0;
+		if(ammoEntryIndex > -1 && ammoLoadingIntoAmmoBank > 0) loadedCargo[ammoEntryIndex] = (loadedCargo[ammoEntryIndex] || 0) + ammoLoadingIntoAmmoBank;
 		if(returnTx && resp && resp.transaction) {
 			transactions.push(resp.transaction);
 			//when using a combined load tx, we need to take into account the amount loaded into the fuel tank, because the starbase still reports the original amount (otherwise we may get an ix error instead a "NotEnoughResource" error)
 			ammoEntry.alreadyLoadedInTransaction = ammoLoadingIntoAmmoBank;
 		}
 
-        //Calculate remaining free cargo space
-        cLog(2,`${FleetTimeStamp(userFleets[i].label)} Calculating cargoSpace ...`);
-        const fleetCurrentCargo = await solanaReadConnection.getParsedTokenAccountsByOwner(userFleets[i].cargoHold, {programId: tokenProgramPK});
         const cargoCnt = fleetCurrentCargo.value.reduce((n, {account}) => n + account.data.parsed.info.tokenAmount.uiAmount * cargoItems.find(r => r.token == account.data.parsed.info.mint).size, 0);
         let cargoSpace = userFleets[i].cargoCapacity - cargoCnt;
         if(alreadyUnloadedInTransaction) cargoSpace += alreadyUnloadedInTransaction;
@@ -12677,7 +13974,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
         cLog(2,`${FleetTimeStamp(userFleets[i].label)} cargoSpace remaining: ${cargoSpace}`);
 
 		let notEnoughInfo = '';
-		for (const entry of transportManifest) {
+		for (let entryIndex=0; entryIndex<transportManifest.length; entryIndex++) {
+			const entry = transportManifest[entryIndex];
 			if (entry.res && entry.amt > 0) {
 				if(cargoSpace < 1) {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Cargo full - remaining loading process skipped`);
@@ -12698,9 +13996,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				const currentResAmt = currentRes ? currentRes.account.data.parsed.info.tokenAmount.uiAmount : 0;
 
 				//Deduct ammo already loaded into ammobank if applicable
-				const isAmmo = entry.res === sageGameAcct.account.mints.ammo.toString();
+				const isAmmo = entry.res === ammoMint;
 				//For ammo SLYA didn't check the ammo in the cargo room, added
-				const resMax = Math.floor(Math.min(cargoSpace / cargoItems.find(r => r.token == entry.res).size, isAmmo ? entry.amt - ammoLoadingIntoAmmoBank - currentResAmt : entry.amt - currentResAmt));
+				const missingCargoAmount = isAmmo ? entry.amt - ammoInAmmoBankForManifest - currentResAmt : entry.amt - currentResAmt;
+				const resMax = Math.floor(Math.min(cargoSpace / cargoItems.find(r => r.token == entry.res).size, Math.max(0, missingCargoAmount)));
 				expectedCnt += resMax;
 				if (resMax > 0) {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Attempting to load ${resMax} ${entry.res} from ${starbaseCoords}`);
@@ -12718,6 +14017,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					);
                     cLog(1,`${FleetTimeStamp(userFleets[i].label)} Loaded ${resp.amount} ${entry.res}: `, resp);
                     cargoSpace -= resp && resp.amount ? cargoItems.find(r => r.token == entry.res).size * resp.amount : 0;
+					if(resp && resp.amount) loadedCargo[entryIndex] = (loadedCargo[entryIndex] || 0) + resp.amount;
 
 					if (resp && resp.name == 'NotEnoughResource') {
 						const resShort = cargoItems.find(r => r.token == entry.res).name;
@@ -12742,7 +14042,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	            cLog(2,`${FleetTimeStamp(userFleets[i].label)} ERROR: No cargo loaded`);
 	            if(globalSettings.emailNoCargoLoaded) await sendEMail(userFleets[i].label + ' no cargo loaded', notEnoughInfo);
 	        }
-		return { success: !userFleets[i].state.includes('ERROR'), transactions: transactions};
+		return { success: !userFleets[i].state.includes('ERROR'), transactions: transactions, loadedCargo: loadedCargo};
 	}
 
 	function startupScanBlockCheck(i, fleetCoords) {
@@ -12867,8 +14167,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	async function operateFleet(i) {
         if (globalErrorTracker.errorCount > 9) toggleAssistant('ERROR');
 
+		const transportUnloadRetry = getTransportUnloadRetry(userFleets[i]);
+		if(transportUnloadRetry) {
+			if(!transportUnloadRetry.retryAt || Date.now() < transportUnloadRetry.retryAt) return;
+		}
 		//Don't run fleets in an error state
-		if (userFleets[i].state.includes('ERROR')) return;
+		else if (userFleets[i].state.includes('ERROR')) return;
 
 		userFleets[i].lastOp = Date.now();
 
@@ -12913,6 +14217,18 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				let fleetMining = fleetState == 'MineAsteroid' ? extra : null;
 				userFleets[i].startingCoords = fleetCoords;
 
+				if(transportUnloadRetry) {
+					const retryCoords = transportUnloadRetry.coord ? ConvertCoords(transportUnloadRetry.coord) : [];
+					if(fleetState != 'Idle' || !CoordsEqual(fleetCoords, retryCoords)) {
+						const retryError = userFleets[i].transportUnloadRetryError || 'ERROR: Transport unload retry state mismatch';
+						clearTransportUnloadRetry(userFleets[i]);
+						updateFleetState(userFleets[i], `${retryError} | retry blocked: fleet moved/state changed`, true);
+						return;
+					}
+					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Retrying transport unload after cooldown`);
+					updateFleetState(userFleets[i], 'Retrying transport unload', true);
+				}
+
 				//Correct rare fleet state mismatch bug
 				if(moving && fleetState == 'Idle') {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Fleet State Mismatch - Updating from ${userFleets[i].state} to ${fleetState}`);
@@ -12920,7 +14236,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				}
 
 				if ((userFleets[i].iterCnt < 2) && fleetState == 'StarbaseLoadingBay') {
-					if(fleetParsedData.assignment == 'Scan' || fleetParsedData.assignment == 'Mine' || fleetParsedData.assignment == 'Transport')
+					if(fleetParsedData.assignment == 'Scan' || fleetParsedData.assignment == 'Mine' || fleetParsedData.assignment == 'Transport' || fleetParsedData.assignment == 'Supply Chain')
 						await execStartupUndock(i, fleetParsedData.assignment);
 				}
 				else if (fleetState == 'MoveWarp' || fleetState == 'MoveSubwarp') {
@@ -12974,6 +14290,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				}
 				else if (fleetParsedData.assignment == 'Transport') {
 					await handleTransport(i, userFleets[i].state, fleetCoords);
+				}
+				else if (fleetParsedData.assignment == 'Supply Chain') {
+					await handleSupplyChain(i, userFleets[i].state, fleetCoords);
 				}
 		} catch (err) {
 			cLog(1,`${FleetTimeStamp(userFleets[i].label)} ERROR`, err);
@@ -14125,6 +15444,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				let fleetStarbase = fleetParsedData && fleetParsedData.starbase ? fleetParsedData.starbase : '';
 				let fleetMoveType = fleetParsedData && fleetParsedData.moveType ? fleetParsedData.moveType : 'warp';
 				let fleetMoveTarget = fleetParsedData && fleetParsedData.moveTarget ? fleetParsedData.moveTarget : '';
+				let fleetTransportPlusRouteIndex = getTransportPlusRouteIndex(fleetParsedData);
 
 				let fleetScanEnd = fleetParsedData && fleetParsedData.scanEnd ? fleetParsedData.scanEnd : 0;
 				//double check for a wrongly set time and correct it if needed:
@@ -14208,6 +15528,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					planetExitFuelAmount: fleet.account.stats.movementStats.planetExitFuelAmount,
 					destCoord: fleetDest,
 					starbaseCoord: fleetStarbase,
+					transportPlusRouteIndex: fleetTransportPlusRouteIndex,
 					scanBlock: fleetScanBlock,
 					scanBlockIdx: fleetScanBlockIdx,
 					scanEnd: fleetScanEnd,
@@ -14287,7 +15608,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			observer && observer.disconnect();
 			let assistCSS = document.createElement('style');
 			const statusPanelOpacity = globalSettings.statusPanelOpacity / 100;
-			let assistCSSString = `.assist-modal {display: none; position: fixed; z-index: 2; padding-top: 100px; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4); text-align:center; } .assist-modal-content {position: relative; display: inline-block; text-align:left; background-color: rgb(41, 41, 48); margin: auto; padding: 0; border: 1px solid #888; width: 667px; min-width: 450px; max-width: 95%; height: auto; min-height: 50px; max-height: 95%; overflow-y: auto; box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2),0 6px 20px 0 rgba(0,0,0,0.19); -webkit-animation-name: animatetop; -webkit-animation-duration: 0.4s; animation-name: animatetop; animation-duration: 0.4s;} .assist-modal-save { font-size:100%; font-weight:bold; vertical-align:top; margin-left:0.5em; } #assist-modal-error {color: red; margin-left: 5px; margin-right: 5px; font-size: 16px; display:block; } .assist-modal-header-right {color: rgb(255, 190, 77); margin-left: auto !important; font-size: 20px;} .assist-btn {background-color: rgb(41, 41, 48); color: rgb(255, 190, 77); margin-left: 2px; margin-right: 2px;} .assist-btn:hover {background-color: rgba(255, 190, 77, 0.2);} .assist-modal-close { font-size:130%; line-height:80%; vertical-align:middle; } .assist-modal-close:hover, .assist-modal-close:focus {font-weight: bold; text-decoration: none; cursor: pointer;} .assist-modal-btn {color: rgb(255, 190, 77); padding: 5px 5px; margin-right: 5px; text-decoration: none; background-color: rgb(41, 41, 48); border: none; cursor: pointer;} .assist-modal-save:hover { background-color: rgba(255, 190, 77, 0.2); } .assist-modal-header {display: flex; position:sticky; z-index:1000; top:0; left:0; align-items: center; padding: 2px 16px; background-color: #544735; border-bottom: 2px solid rgb(255, 190, 77); color: rgb(255, 190, 77);} .assist-modal-body {padding: 2px 16px; font-size: 12px;} .assist-modal-body > table, .assist-modal-body table.main table {width: 100%;border-collapse: collapse;} .assist-modal-body th, .assist-modal-body td {padding:0 7px 0 0; line-height:130%;} #assistStatus {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 82px; left: 10px; z-index: 1;} #assistStarbaseStatus {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 80px; right: 20px; z-index: 1;} #assistCheck {background-color: rgba(0,0,0,0.75); backdrop-filter: blur(10px); position: absolute; margin: auto; left: 0; right: 0; top: 100px; width: 650px; min-width: 450px; max-width: 75%; z-index: 1;} .dropdown { position: absolute; display: none; margin-top: 25px; margin-left: 152px; background-color: rgb(41, 41, 48); min-width: 120px; box-shadow: 0 8px 16px 0 rgba(0, 0, 0, 0.2); z-index: 2; } .dropdown.show { display: block; } .assist-btn-alt { color: rgb(255, 190, 77); padding: 12px 16px; text-decoration: none; display: block; background-color: rgb(41, 41, 48); border: none; cursor: pointer; } .assist-btn-alt:hover { background-color: rgba(255, 190, 77, 0.2); } #checkresults { padding: 5px; margin-top: 20px; border: 1px solid grey; border-radius: 8px;} .dropdown button {width: 100%; text-align: left;} #assistModal table {border-collapse: collapse;} .assist-scan-row, .assist-scan2-row, .assist-mine-row, .assist-transport-row {background-color: rgba(255, 190, 77, 0.1); border-left: 1px solid white; border-right: 1px solid white; border-bottom: 1px solid white} .show-top-border {background-color: rgba(255, 190, 77, 0.1); border-left: 1px solid white; border-right: 1px solid white; border-top: 1px solid white;} #fleetTable { margin-top: 8px } #assistModal .assist-modal-content { width:auto } .transport-to-target select, .transport-to-starbase select { max-width: 11.5em; } #assistModal .assist-modal-body option { background-color:white } #assistModal .assist-modal-body > table { width: auto } #fleetTable tbody:nth-child(1) td { position:sticky; top:62px; background-color: #292930; padding: 5px 0 2px 0; } `;
+			let assistCSSString = `.assist-modal {display: none; position: fixed; z-index: 2; padding-top: 100px; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4); text-align:center; } .assist-modal-content {position: relative; display: inline-block; text-align:left; background-color: rgb(41, 41, 48); margin: auto; padding: 0; border: 1px solid #888; width: 667px; min-width: 450px; max-width: 95%; height: auto; min-height: 50px; max-height: 95%; overflow-y: auto; box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2),0 6px 20px 0 rgba(0,0,0,0.19); -webkit-animation-name: animatetop; -webkit-animation-duration: 0.4s; animation-name: animatetop; animation-duration: 0.4s;} .assist-modal-save { font-size:100%; font-weight:bold; vertical-align:top; margin-left:0.5em; } #assist-modal-error {color: red; margin-left: 5px; margin-right: 5px; font-size: 16px; display:block; } .assist-modal-header-right {color: rgb(255, 190, 77); margin-left: auto !important; font-size: 20px;} .assist-btn {background-color: rgb(41, 41, 48); color: rgb(255, 190, 77); margin-left: 2px; margin-right: 2px;} .assist-btn:hover {background-color: rgba(255, 190, 77, 0.2);} .assist-modal-close { font-size:130%; line-height:80%; vertical-align:middle; } .assist-modal-close:hover, .assist-modal-close:focus {font-weight: bold; text-decoration: none; cursor: pointer;} .assist-modal-btn {color: rgb(255, 190, 77); padding: 5px 5px; margin-right: 5px; text-decoration: none; background-color: rgb(41, 41, 48); border: none; cursor: pointer;} .assist-modal-save:hover { background-color: rgba(255, 190, 77, 0.2); } .assist-modal-header {display: flex; position:sticky; z-index:1000; top:0; left:0; align-items: center; padding: 2px 16px; background-color: #544735; border-bottom: 2px solid rgb(255, 190, 77); color: rgb(255, 190, 77);} .assist-modal-body {padding: 2px 16px; font-size: 12px;} .assist-modal-body > table, .assist-modal-body table.main table {width: 100%;border-collapse: collapse;} .assist-modal-body th, .assist-modal-body td {padding:0 7px 0 0; line-height:130%;} #assistStatus {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 82px; left: 10px; z-index: 1;} #assistStarbaseStatus {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 80px; right: 20px; z-index: 1;} #assistCheck {background-color: rgba(0,0,0,0.75); backdrop-filter: blur(10px); position: absolute; margin: auto; left: 0; right: 0; top: 100px; width: 650px; min-width: 450px; max-width: 75%; z-index: 1;} .dropdown { position: absolute; display: none; margin-top: 25px; margin-left: 152px; background-color: rgb(41, 41, 48); min-width: 120px; box-shadow: 0 8px 16px 0 rgba(0, 0, 0, 0.2); z-index: 2; } .dropdown.show { display: block; } .assist-btn-alt { color: rgb(255, 190, 77); padding: 12px 16px; text-decoration: none; display: block; background-color: rgb(41, 41, 48); border: none; cursor: pointer; } .assist-btn-alt:hover { background-color: rgba(255, 190, 77, 0.2); } #checkresults { padding: 5px; margin-top: 20px; border: 1px solid grey; border-radius: 8px;} .dropdown button {width: 100%; text-align: left;} #assistModal table {border-collapse: collapse;} .assist-scan-row, .assist-scan2-row, .assist-mine-row, .assist-transport-row, .assist-transport-plus-row {background-color: rgba(255, 190, 77, 0.1); border-left: 1px solid white; border-right: 1px solid white; border-bottom: 1px solid white} .show-top-border {background-color: rgba(255, 190, 77, 0.1); border-left: 1px solid white; border-right: 1px solid white; border-top: 1px solid white;} #fleetTable { margin-top: 8px } #assistModal .assist-modal-content { width:clamp(1120px, 74vw, 1420px); max-width:calc(100vw - 40px); } .transport-to-target select, .transport-to-starbase select, .transport-plus-route-manifest select { max-width: 11.5em; } .transport-plus-locations { display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap; } .transport-plus-targets { display:flex; flex-wrap:wrap; gap:6px 12px; margin-bottom:8px; } .transport-plus-target { display:flex; align-items:center; gap:6px; } .transport-plus-routes { display:flex; flex-direction:column; gap:8px; } .assist-transport-plus-route { padding-top:6px; border-top:1px solid rgba(255, 255, 255, 0.15); } .assist-transport-plus-route:first-child { padding-top:0; border-top:none; } .transport-plus-route-header { display:flex; align-items:center; gap:8px; margin-bottom:4px; flex-wrap:wrap; } .transport-plus-route-manifest { display:flex; flex-wrap:wrap; gap:6px 10px; } .transport-plus-route-manifest > div { display:flex; align-items:center; gap:4px; } .transport-resource-entry span { margin-right:4px; } #assistModal .assist-modal-body option { background-color:white } #assistModal .assist-modal-body > table { width: 100% } #fleetTable tbody:nth-child(1) td { position:sticky; top:62px; background-color: #292930; padding: 5px 0 2px 0; } `;
+			assistCSSString += ` #assistModal .assist-modal-header, #settingsModal .assist-modal-header { cursor: move; } #assistModal .transport-to-target, #assistModal .transport-to-starbase { width:100%; align-items:center; } #assistModal .transport-to-target .transport-resource-entry, #assistModal .transport-to-starbase .transport-resource-entry { display:flex; align-items:center; gap:4px; flex:0 0 auto; min-width:0; margin-right:18px; } #assistModal .transport-to-target .transport-resource-entry:last-child, #assistModal .transport-to-starbase .transport-resource-entry:last-child { margin-right:0; } #assistModal .transport-to-target .transport-resource-entry > div, #assistModal .transport-to-starbase .transport-resource-entry > div { display:inline-flex !important; align-items:center; gap:4px; flex:0 0 auto; } #assistModal .transport-to-target .transport-resource-select, #assistModal .transport-to-starbase .transport-resource-select { width:clamp(84px, calc(6.6vw + 10px), 106px) !important; min-width:84px; max-width:106px; flex:0 1 clamp(84px, calc(6.6vw + 10px), 106px); } #assistModal .transport-to-target .transport-resource-amount, #assistModal .transport-to-starbase .transport-resource-amount { width:64px !important; min-width:64px; max-width:64px; flex:0 0 64px; } `;
 			assistCSSString += ` #assistStats {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 80px; right: 20px; z-index: 1; } #assistStats table { border-collapse: collapse; border-spacing:1px; } #assistStats td, #assistStats th { padding:0 7px 0 0; }`; // statsadd
 			assistCSSString += ` #assistLpAutomation {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 70px; left: 40px; z-index: 1; width: calc((100vw - 80px) * 0.75); max-width: calc(100vw - 80px); max-height: calc(100vh - 60px); overflow: auto; } #assistLpAutomation table { border-collapse: collapse; border-spacing:1px; } #assistLpAutomation td, #assistLpAutomation th { padding:0 7px 0 0; } #assistLpAutomation .lp-auto-section { margin: 0 0 10px 0; } #assistLpAutomation .lp-auto-section-gap { height: 8px; } #assistLpAutomation .lp-auto-summary-table { table-layout: fixed; width: auto; } #assistLpAutomation .lp-auto-summary-table td:nth-child(1):not([colspan]), #assistLpAutomation .lp-auto-summary-table td:nth-child(3):not([colspan]), #assistLpAutomation .lp-auto-summary-table td:nth-child(5):not([colspan]) { min-width: 165px; padding-left: 18px; } #assistLpAutomation .lp-auto-summary-table tr:first-child td { padding-left: 0 !important; } #assistLpAutomation .lp-auto-summary-table td:nth-child(2), #assistLpAutomation .lp-auto-summary-table td:nth-child(4), #assistLpAutomation .lp-auto-summary-table td:nth-child(6) { min-width: 90px; } #assistLpAutomation .lp-auto-influx table, #assistLpAutomation .lp-auto-components table { width: 100%; table-layout: fixed; } #assistLpAutomation .lp-auto-influx td, #assistLpAutomation .lp-auto-influx th, #assistLpAutomation .lp-auto-components td, #assistLpAutomation .lp-auto-components th { overflow: hidden; text-overflow: ellipsis; } #assistLpAutomation .lp-auto-influx tr:first-child td:first-child, #assistLpAutomation .lp-auto-components tr:first-child td:first-child { padding-left: 0 !important; } #assistLpAutomation .lp-auto-influx td:first-child, #assistLpAutomation .lp-auto-influx th:first-child, #assistLpAutomation .lp-auto-components td:first-child, #assistLpAutomation .lp-auto-components th:first-child { width: 16%; overflow: visible; text-overflow: clip; white-space: nowrap; } #assistLpAutomation .lp-auto-influx td:nth-child(n+2), #assistLpAutomation .lp-auto-influx th:nth-child(n+2), #assistLpAutomation .lp-auto-components td:nth-child(n+2), #assistLpAutomation .lp-auto-components th:nth-child(n+2) { width: 12%; overflow: visible; text-overflow: clip; } #assistLpAutomation .lp-auto-influx tr:first-child td, #assistLpAutomation .lp-auto-components tr:first-child td { white-space: normal; line-height: 1.15; } #assistLpAutomation .lp-auto-influx tr:not(:first-child) td, #assistLpAutomation .lp-auto-components tr:not(:first-child) td { white-space: nowrap; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table { table-layout: fixed; width: 100%; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:first-child, #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:first-child { width: 160px !important; min-width: 160px !important; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(2), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(2) { width: 100px !important; min-width: 100px !important; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(3), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(3), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(4), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(4), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(5), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(5), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(6), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(6), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(7), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(7), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(8), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(8) { width: auto !important; min-width: 0 !important; }`;
 			assistCSSString += ` #autoFeeData { display:none; } #automaticFee:checked ~ #autoFeeData { display:block; }`;
@@ -14672,6 +15994,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			assistStatsClose.addEventListener('click', function(e) {assistStatToggle('#assistStats');}); //statsadd
 			let assistLpAutomationClose = document.querySelector('#assistLpAutomation .assist-modal-close');
 			assistLpAutomationClose.addEventListener('click', function(e) {assistStatToggle('#assistLpAutomation');});
+			makeAssistModalContentDraggable('#assistModal');
+			makeAssistModalContentDraggable('#settingsModal');
 			makeAssistWindowDraggable('#assistLpAutomation');
 			let assistStatsReset = document.querySelector('#assistStats #assist-stats-reset'); //statsadd
 			assistStatsReset.addEventListener('click', function(e) { transactionStats={ "start": (Math.round(Date.now() / 1000)), "groups":{} }; solanaReadCount = 0; solanaWriteCount = 0; document.querySelector('#assistStatsContent').innerHTML=''; }); //statsadd
