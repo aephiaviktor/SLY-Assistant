@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-109
+// @aephia-version 0.7.35-110
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-109'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-110'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -101,9 +101,15 @@
 	const UPGRADE_AUTOMATION_SCHEDULER_PENDING_PLAN_KEY = 'upgradeAutomationSchedulerPendingPlan';
 	const UPGRADE_AUTOMATION_SCHEDULER_WRITE_RECEIPT_KEY = 'upgradeAutomationSchedulerWriteReceipt';
 	const SLYA_STATE_BACKUP_SCHEMA_VERSION = 1;
+	const SLYA_STATE_BACKUP_HEARTBEAT_MS = 5 * 60 * 1000;
+	const SLYA_LEVELDB_BACKUP_HEARTBEAT_MS = 10 * 60 * 1000;
 	let slyaStateBackupTimer = null;
 	let slyaStateBackupInFlight = false;
 	let slyaStateBackupCache = null;
+	let slyaStateBackupHeartbeatTimer = null;
+	let slyaLastConfigSaveAtMs = 0;
+	let slyaLastStateBackupAtMs = 0;
+	let slyaLastLeveldbBackupAtMs = 0;
 	let slyaPrevSecretKeyLen = 0;
 	let slyaPrevSaveProfile = true;
 	let slyaSettingsResetSuspected = false;
@@ -118,6 +124,7 @@
 	window.schedulerLastPlanSchedule = null;
 	const scanningPatterns = ['square', 'ring', 'spiral', 'up', 'down', 'left', 'right', 'sly', 'auto(1)', 'auto(1+)', 'auto(1,2hv)', 'auto(1,2hv+)', 'auto(1,2hv++)'];
 	await loadGlobalSettings();
+	startSlyaStateBackupHeartbeat();
 
 	let errorLog = [];
 	let errorLogIndex = 0;
@@ -515,33 +522,94 @@
 			if (data) extraState[key] = data;
 		}
 
+		const activeCrafting = Object.values(craftConfigs).filter(craft => craft && craft.craftingId);
+		const metadata = {
+			generatedAtMs: Date.now(),
+			reason: String(reason || 'unknown'),
+			gmKeyCount: keySet.size,
+			settingsKeyCount: Object.keys(settings || {}).length,
+			fleetConfigCount: Object.keys(fleetConfigs || {}).length,
+			craftConfigCount: Object.keys(craftConfigs || {}).length,
+			activeCraftingCount: activeCrafting.length,
+			extraStateCount: Object.keys(extraState || {}).length,
+			lastConfigSaveAt: slyaLastConfigSaveAtMs ? new Date(slyaLastConfigSaveAtMs).toISOString() : null,
+			lastStateBackupAt: slyaLastStateBackupAtMs ? new Date(slyaLastStateBackupAtMs).toISOString() : null,
+			lastLeveldbBackupAt: slyaLastLeveldbBackupAtMs ? new Date(slyaLastLeveldbBackupAtMs).toISOString() : null
+		};
+
 		return {
 			schemaVersion: SLYA_STATE_BACKUP_SCHEMA_VERSION,
 			reason: String(reason || 'unknown'),
 			aephiaVersion: AEPHIA_SLYA_VERSION,
 			writtenAt: new Date().toISOString(),
+			metadata,
 			settings,
 			fleetConfigs,
 			craftConfigs,
 			extraState,
-			activeCrafting: Object.values(craftConfigs).filter(craft => craft && craft.craftingId)
+			activeCrafting
 		};
 	}
 
 	async function writeSlyaStateBackup(reason) {
-		if (slyaStateBackupInFlight) return;
+		if (slyaStateBackupInFlight) {
+			try { await appendUpgradeAutomationLog('[SLYA-STATE-BAK] skipped write reason=' + String(reason || 'unknown') + ' alreadyInFlight=true'); } catch (e) {}
+			return;
+		}
 		if (typeof window === 'undefined' || !window.electronAPI?.writeSlyaStateBackup) return;
 		slyaStateBackupInFlight = true;
 		try {
 			const payload = await buildSlyaStateBackupPayload(reason);
 			const result = await window.electronAPI.writeSlyaStateBackup(payload);
 			if (!result?.ok) cLog(1, '[SLYA-STATE-BAK] write failed', result);
-			else slyaStateBackupCache = payload;
+			else {
+				slyaLastStateBackupAtMs = Date.now();
+				slyaStateBackupCache = payload;
+				const meta = payload.metadata || {};
+				const line = '[SLYA-STATE-BAK] write ok reason=' + String(reason || 'unknown')
+					+ ' bytes=' + Number(result.bytes || 0)
+					+ ' settingsKeys=' + Number(meta.settingsKeyCount || 0)
+					+ ' fleets=' + Number(meta.fleetConfigCount || 0)
+					+ ' crafts=' + Number(meta.craftConfigCount || 0)
+					+ ' activeCrafts=' + Number(meta.activeCraftingCount || 0);
+				try { cLog(2, line); } catch (e) {}
+				try { await appendUpgradeAutomationLog(line); } catch (e) {}
+			}
 		} catch (error) {
 			cLog(1, '[SLYA-STATE-BAK] write error', error);
 		} finally {
 			slyaStateBackupInFlight = false;
 		}
+	}
+
+	async function runSlyaPeriodicBackup(reason = 'periodic-5min') {
+		await writeSlyaStateBackup(reason);
+		const now = Date.now();
+		if (typeof window === 'undefined' || !window.electronAPI?.snapshotLeveldbToBackup) return;
+		if (slyaLastLeveldbBackupAtMs && now - slyaLastLeveldbBackupAtMs < SLYA_LEVELDB_BACKUP_HEARTBEAT_MS) return;
+		try {
+			const result = await window.electronAPI.snapshotLeveldbToBackup();
+			if (result?.ok) slyaLastLeveldbBackupAtMs = Date.now();
+			const line = '[SLYA-STATE-BAK] leveldb periodic snapshot reason=' + String(reason || 'unknown')
+				+ ' ok=' + !!result?.ok
+				+ ' skipped=' + !!result?.skipped
+				+ (result?.error ? ' error=' + String(result.error) : '');
+			try { cLog(result?.ok ? 2 : 1, line); } catch (e) {}
+			try { await appendUpgradeAutomationLog(line); } catch (e) {}
+		} catch (error) {
+			try { await appendUpgradeAutomationLog('[SLYA-STATE-BAK] leveldb periodic snapshot error=' + String(error?.message || error)); } catch (e) {}
+		}
+	}
+
+	function startSlyaStateBackupHeartbeat() {
+		if (slyaStateBackupHeartbeatTimer || typeof window === 'undefined' || !window.electronAPI?.writeSlyaStateBackup) return;
+		const tick = () => {
+			runSlyaPeriodicBackup('periodic-5min').catch(error => {
+				try { appendUpgradeAutomationLog('[SLYA-STATE-BAK] periodic backup error=' + String(error?.message || error)).catch(() => {}); } catch (e) {}
+			});
+			slyaStateBackupHeartbeatTimer = setTimeout(tick, SLYA_STATE_BACKUP_HEARTBEAT_MS);
+		};
+		slyaStateBackupHeartbeatTimer = setTimeout(tick, 60 * 1000);
 	}
 
 	function scheduleSlyaStateBackup(reason, delayMs = 1500) {
@@ -559,6 +627,14 @@
 		try {
 			const result = await window.electronAPI.readSlyaStateBackup();
 			const backup = result?.best || null;
+			const currentAgeMs = result?.current?.writtenAt ? Date.now() - Date.parse(result.current.writtenAt) : null;
+			const previousAgeMs = result?.previous?.writtenAt ? Date.now() - Date.parse(result.previous.writtenAt) : null;
+			try {
+				await appendUpgradeAutomationLog('[SLYA-STATE-BAK] read latest ok=' + !!backup
+					+ ' currentAgeMin=' + (Number.isFinite(currentAgeMs) ? Math.round(currentAgeMs / 60000) : 'na')
+					+ ' previousAgeMin=' + (Number.isFinite(previousAgeMs) ? Math.round(previousAgeMs / 60000) : 'na')
+					+ ' selected=' + (backup === result?.current ? 'current' : backup === result?.previous ? 'previous' : 'none'));
+			} catch (e) {}
 			if (backup && Number(backup.schemaVersion || 0) === SLYA_STATE_BACKUP_SCHEMA_VERSION) {
 				slyaStateBackupCache = backup;
 				return backup;
@@ -595,8 +671,10 @@
 		}
 		for (const [key, value] of Object.entries(backup.extraState || {})) await GM.setValue(key, JSON.stringify(value));
 		globalSettings = cloneForSlyaStateBackup(backup.settings);
-		cLog(1, `[SLYA-STATE-BAK] restored missing current state from latest external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'} parseError=${parseError ? String(parseError) : 'none'}`);
-		try { await appendUpgradeAutomationLog(`[SLYA-STATE-BAK] restored missing current state from latest external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'} parseError=${parseError ? String(parseError) : 'none'}`); } catch (e) {}
+		const backupAgeMs = backup.writtenAt ? Date.now() - Date.parse(backup.writtenAt) : null;
+		const restoreLine = `[SLYA-STATE-BAK] restored missing current state from latest external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'} backupAgeMin=${Number.isFinite(backupAgeMs) ? Math.round(backupAgeMs / 60000) : 'na'} settingsKeys=${Object.keys(backup.settings || {}).length} fleets=${Object.keys(backup.fleetConfigs || {}).length} crafts=${Object.keys(backup.craftConfigs || {}).length} activeCrafts=${(backup.activeCrafting || []).length} parseError=${parseError ? String(parseError) : 'none'}`;
+		cLog(1, restoreLine);
+		try { await appendUpgradeAutomationLog(restoreLine); } catch (e) {}
 		return true;
 	}
 
@@ -4705,6 +4783,7 @@
 		}
 		const gmSetStart = slyaPerfNowMs();
 		await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
+		slyaLastConfigSaveAtMs = Date.now();
 		timingMarks.push('gm-set-settings=' + Math.round((slyaPerfNowMs() - gmSetStart) * 10) / 10 + 'ms');
 		const backupScheduleStart = slyaPerfNowMs();
 		try {
@@ -4747,6 +4826,7 @@
 		}
 		const gmSetStart = slyaPerfNowMs();
 		await GM.setValue(fleetPK, dataStr);
+		slyaLastConfigSaveAtMs = Date.now();
 		timingMarks.push('gm-set=' + Math.round((slyaPerfNowMs() - gmSetStart) * 10) / 10 + 'ms');
 		try {
 			if (!skipLeveldbSnapshot && typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
@@ -4789,6 +4869,7 @@
 		}
 		const gmSetStart = slyaPerfNowMs();
 		await GM.setValue(key, dataStr);
+		slyaLastConfigSaveAtMs = Date.now();
 		timingMarks.push('gm-set=' + Math.round((slyaPerfNowMs() - gmSetStart) * 10) / 10 + 'ms');
 		try {
 			if (!skipLeveldbSnapshot && typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
@@ -4813,7 +4894,7 @@
 			globalSettings = {};
 			settingsParseError = String(e?.message || e || 'parse_error');
 		}
-		await restoreSlyaStateBackupIfCurrentSettingsMissing('load-global-settings', rawSettingsData, settingsParseError);
+		const restoredFromBackup = await restoreSlyaStateBackupIfCurrentSettingsMissing('load-global-settings', rawSettingsData, settingsParseError);
 		await reconcileUpgradeAutomationCraftConfigsAfterReload('load-global-settings');
 		try {
 			const loadedKeyCount = Object.keys(globalSettings || {}).length;
@@ -4830,6 +4911,9 @@
 				&& loadedKeyLen === 0
 			);
 			const startupLine = '[SETTINGS][LOAD] keys=' + loadedKeyCount
+				+ ' rawLen=' + String(rawSettingsData || '').length
+				+ ' parseError=' + (settingsParseError ? settingsParseError : 'none')
+				+ ' restoredFromBackup=' + !!restoredFromBackup
 				+ ' mySecretKeyLen=' + loadedKeyLen
 				+ ' saveProfile=' + !!globalSettings?.saveProfile
 				+ ' savedProfileLen=' + (Array.isArray(globalSettings?.savedProfile) ? globalSettings.savedProfile.length : 0)

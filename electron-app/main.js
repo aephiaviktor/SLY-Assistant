@@ -245,6 +245,7 @@ const LEVELDB_PREV_BAK_DIR = path.join(APP_ROOT, 'data', 'Local Storage', 'level
 const SLYA_STATE_BACKUP_DIR = path.join(APP_ROOT, 'data', 'slya-state-backups')
 const SLYA_STATE_BACKUP_CURRENT = path.join(SLYA_STATE_BACKUP_DIR, 'slya-state-current.json')
 const SLYA_STATE_BACKUP_PREV = path.join(SLYA_STATE_BACKUP_DIR, 'slya-state-prev.json')
+const SLYA_STATE_BACKUP_META = path.join(SLYA_STATE_BACKUP_DIR, 'slya-state-meta.json')
 
 function leveldbTimestamp()
 {
@@ -296,8 +297,19 @@ function writeSlyaStateBackup(payload)
 		}
 		atomicWriteJson(SLYA_STATE_BACKUP_CURRENT, backup)
 		const bytes = fs.statSync(SLYA_STATE_BACKUP_CURRENT).size
-		logToUpgradeLog(`[ELECTRON][SLYA-STATE-BAK] snapshot ok reason=${String(payload.reason || 'unknown')} bytes=${bytes} path=${SLYA_STATE_BACKUP_CURRENT}`)
-		return { ok: true, path: SLYA_STATE_BACKUP_CURRENT, bytes }
+		const metadata = {
+			...(payload.metadata || {}),
+			reason: String(payload.reason || payload.metadata?.reason || 'unknown'),
+			aephiaVersion: payload.aephiaVersion || null,
+			writtenAt: backup.writtenAt || null,
+			bytes,
+			path: SLYA_STATE_BACKUP_CURRENT,
+			previousPath: fs.existsSync(SLYA_STATE_BACKUP_PREV) ? SLYA_STATE_BACKUP_PREV : null,
+			wrapper: backup.wrapper
+		}
+		atomicWriteJson(SLYA_STATE_BACKUP_META, metadata)
+		logToUpgradeLog(`[ELECTRON][SLYA-STATE-BAK] snapshot ok reason=${metadata.reason} bytes=${bytes} settingsKeys=${Number(metadata.settingsKeyCount || 0)} fleets=${Number(metadata.fleetConfigCount || 0)} crafts=${Number(metadata.craftConfigCount || 0)} activeCrafts=${Number(metadata.activeCraftingCount || 0)} path=${SLYA_STATE_BACKUP_CURRENT}`)
+		return { ok: true, path: SLYA_STATE_BACKUP_CURRENT, metaPath: SLYA_STATE_BACKUP_META, bytes, metadata }
 	} catch (error) {
 		logToUpgradeLog(`[ELECTRON][SLYA-STATE-BAK] snapshot error=${String(error?.message || error)}`)
 		return { ok: false, error: String(error?.message || error) }
@@ -308,15 +320,21 @@ function readSlyaStateBackup()
 {
 	const current = readJsonFileIfExists(SLYA_STATE_BACKUP_CURRENT)
 	const previous = readJsonFileIfExists(SLYA_STATE_BACKUP_PREV)
+	const metadata = readJsonFileIfExists(SLYA_STATE_BACKUP_META)
 	const best = current && !current.error ? current : previous && !previous.error ? previous : null
+	const currentAgeMs = current && !current.error && current.writtenAt ? Date.now() - Date.parse(current.writtenAt) : null
+	const previousAgeMs = previous && !previous.error && previous.writtenAt ? Date.now() - Date.parse(previous.writtenAt) : null
+	logToUpgradeLog(`[ELECTRON][SLYA-STATE-BAK] read currentOk=${!!(current && !current.error)} currentAgeMin=${Number.isFinite(currentAgeMs) ? Math.round(currentAgeMs / 60000) : 'na'} previousOk=${!!(previous && !previous.error)} previousAgeMin=${Number.isFinite(previousAgeMs) ? Math.round(previousAgeMs / 60000) : 'na'} selected=${best === current ? 'current' : best === previous ? 'previous' : 'none'}`)
 	return {
 		ok: !!best,
 		current,
 		previous,
+		metadata,
 		best,
 		paths: {
 			current: SLYA_STATE_BACKUP_CURRENT,
-			previous: SLYA_STATE_BACKUP_PREV
+			previous: SLYA_STATE_BACKUP_PREV,
+			metadata: SLYA_STATE_BACKUP_META
 		}
 	}
 }
