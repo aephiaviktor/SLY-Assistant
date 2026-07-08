@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-105
+// @aephia-version 0.7.35-106
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-105'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-106'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -448,16 +448,11 @@
 		}
 	}
 
-	function getSlyaBackupSettingsStrength(settings) {
-		if (!settings || typeof settings !== 'object') return 0;
-		let score = Math.min(80, Object.keys(settings).length);
-		if (String(settings.mySecretKey || '').trim()) score += 25;
-		if (String(settings.slyInstanceName || '').trim()) score += 25;
-		if (String(settings.heliusRpcURL || '').trim()) score += 10;
-		if (Number(settings.craftingJobs || 0) > 0) score += 15;
-		if (settings.upgradeAutomationEnabled) score += 20;
-		if (Array.isArray(settings.savedProfile) && settings.savedProfile.length) score += 10;
-		return score;
+	function isCurrentSlyaSettingsMissing(settings, rawSettingsData, parseError) {
+		if (parseError) return true;
+		if (!rawSettingsData || String(rawSettingsData).trim() === '' || String(rawSettingsData).trim() === '{}') return true;
+		if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return true;
+		return Object.keys(settings).length === 0;
 	}
 
 	function isSlyaFleetConfigCandidate(key, data) {
@@ -574,13 +569,10 @@
 		return null;
 	}
 
-	async function restoreSlyaStateBackupIfCurrentSettingsWeak(reason) {
+	async function restoreSlyaStateBackupIfCurrentSettingsMissing(reason, rawSettingsData = '', parseError = '') {
+		if (!isCurrentSlyaSettingsMissing(globalSettings, rawSettingsData, parseError)) return false;
 		const backup = await readLatestSlyaStateBackup();
 		if (!backup || !backup.settings) return false;
-
-		const currentStrength = getSlyaBackupSettingsStrength(globalSettings);
-		const backupStrength = getSlyaBackupSettingsStrength(backup.settings);
-		if (currentStrength >= 40 || backupStrength <= currentStrength + 25) return false;
 
 		await GM.setValue(settingsGmKey, JSON.stringify(backup.settings));
 		for (const [key, value] of Object.entries(backup.fleetConfigs || {})) await GM.setValue(key, JSON.stringify(value));
@@ -603,8 +595,8 @@
 		}
 		for (const [key, value] of Object.entries(backup.extraState || {})) await GM.setValue(key, JSON.stringify(value));
 		globalSettings = cloneForSlyaStateBackup(backup.settings);
-		cLog(1, `[SLYA-STATE-BAK] restored weak current state from external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'}`);
-		try { await appendUpgradeAutomationLog(`[SLYA-STATE-BAK] restored weak current state from external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'}`); } catch (e) {}
+		cLog(1, `[SLYA-STATE-BAK] restored missing current state from latest external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'} parseError=${parseError ? String(parseError) : 'none'}`);
+		try { await appendUpgradeAutomationLog(`[SLYA-STATE-BAK] restored missing current state from latest external backup reason=${String(reason || 'unknown')} backupVersion=${backup.aephiaVersion || 'unknown'} parseError=${parseError ? String(parseError) : 'none'}`); } catch (e) {}
 		return true;
 	}
 
@@ -4814,8 +4806,14 @@
 
 	async function loadGlobalSettings() {
 		const rawSettingsData = await GM.getValue(settingsGmKey, '{}');
-		globalSettings = JSON.parse(rawSettingsData);
-		await restoreSlyaStateBackupIfCurrentSettingsWeak('load-global-settings');
+		let settingsParseError = '';
+		try {
+			globalSettings = JSON.parse(rawSettingsData || '{}');
+		} catch (e) {
+			globalSettings = {};
+			settingsParseError = String(e?.message || e || 'parse_error');
+		}
+		await restoreSlyaStateBackupIfCurrentSettingsMissing('load-global-settings', rawSettingsData, settingsParseError);
 		await reconcileUpgradeAutomationCraftConfigsAfterReload('load-global-settings');
 		try {
 			const loadedKeyCount = Object.keys(globalSettings || {}).length;
@@ -10933,6 +10931,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		timingMarks.push('craft-save-count=' + craftSaveCount);
 		timingMarks.push('craft-save-total=' + Math.round(craftSaveTotalMs * 10) / 10 + 'ms');
 		timingMarks.push('craft-save-max=' + Math.round(craftSaveMaxMs * 10) / 10 + 'ms');
+		const stateBackupStart = slyaPerfNowMs();
+		await writeSlyaStateBackup('config-modal-save');
+		timingMarks.push('state-backup=' + Math.round((slyaPerfNowMs() - stateBackupStart) * 10) / 10 + 'ms');
 		try {
 			if (typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
 				const backupQueuedAt = slyaPerfNowMs();

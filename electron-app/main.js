@@ -245,8 +245,6 @@ const LEVELDB_PREV_BAK_DIR = path.join(APP_ROOT, 'data', 'Local Storage', 'level
 const SLYA_STATE_BACKUP_DIR = path.join(APP_ROOT, 'data', 'slya-state-backups')
 const SLYA_STATE_BACKUP_CURRENT = path.join(SLYA_STATE_BACKUP_DIR, 'slya-state-current.json')
 const SLYA_STATE_BACKUP_PREV = path.join(SLYA_STATE_BACKUP_DIR, 'slya-state-prev.json')
-const LEVELDB_MIN_SAFE_SCORE = 65
-const LEVELDB_RESTORE_SCORE_MARGIN = 25
 
 function leveldbTimestamp()
 {
@@ -397,8 +395,7 @@ function getLeveldbSettingsHealth(targetDir)
 		fleetConfigCount: 0,
 		craftConfigCount: 0,
 		hasParsedSettings: false,
-		hasUsableSettings: false,
-		score: 0
+		hasUsableSettings: false
 	}
 	try {
 		if (!fs.existsSync(targetDir)) return result
@@ -428,8 +425,7 @@ function getLeveldbSettingsHealth(targetDir)
 			result.craftingJobs = craftingJobsMatch ? Number(craftingJobsMatch[1]) : 0
 			result.upgradeAutomationEnabled = /"upgradeAutomationEnabled"\s*:\s*true/.test(combinedText)
 			result.hasUsableSettings = !!(result.hasAnySettings && result.hasInstanceName)
-			result.score = scoreLeveldbSettingsHealth(result)
-			result.hasConfiguredSettings = result.hasAnySettings && result.score >= LEVELDB_MIN_SAFE_SCORE
+			result.hasConfiguredSettings = result.hasUsableSettings
 			return result
 		}
 		const settings = settingsObjects[settingsObjects.length - 1]
@@ -446,8 +442,7 @@ function getLeveldbSettingsHealth(targetDir)
 		result.craftingJobs = Number(settings.craftingJobs || 0)
 		result.upgradeAutomationEnabled = !!settings.upgradeAutomationEnabled
 		result.hasUsableSettings = true
-		result.score = scoreLeveldbSettingsHealth(result)
-		result.hasConfiguredSettings = result.score >= LEVELDB_MIN_SAFE_SCORE
+		result.hasConfiguredSettings = result.hasUsableSettings
 		return result
 	} catch (e) {
 		result.error = String(e?.message || e)
@@ -455,27 +450,9 @@ function getLeveldbSettingsHealth(targetDir)
 	}
 }
 
-function scoreLeveldbSettingsHealth(health)
-{
-	if (!health) return 0
-	let score = 0
-	score += Math.min(80, Number(health.keyCount || 0))
-	if (health.hasSecret) score += 25
-	if (health.hasInstanceName) score += 25
-	if (health.hasRpc) score += 15
-	if (health.hasInflux) score += 15
-	if (health.saveProfile) score += 5
-	score += Math.min(20, Number(health.savedProfileLength || 0) * 5)
-	if (Number(health.craftingJobs || 0) > 4) score += 15
-	if (health.upgradeAutomationEnabled) score += 20
-	score += Math.min(80, Number(health.fleetConfigCount || 0) * 2)
-	score += Math.min(80, Number(health.craftConfigCount || 0) * 2)
-	return score
-}
-
 function formatSettingsHealth(health)
 {
-	return `configured=${!!health.hasConfiguredSettings} usable=${!!health.hasUsableSettings} any=${!!health.hasAnySettings} parsed=${!!health.hasParsedSettings} score=${Number(health.score || 0)} keys=${Number(health.keyCount || 0)} secret=${!!health.hasSecret} instance=${!!health.hasInstanceName} rpc=${!!health.hasRpc} influx=${!!health.hasInflux} saveProfile=${!!health.saveProfile} savedProfileLen=${Number(health.savedProfileLength || 0)} craftingJobs=${Number(health.craftingJobs || 0)} lpEnabled=${!!health.upgradeAutomationEnabled} fleetConfigs=${Number(health.fleetConfigCount || 0)} craftConfigs=${Number(health.craftConfigCount || 0)}`
+	return `configured=${!!health.hasConfiguredSettings} usable=${!!health.hasUsableSettings} any=${!!health.hasAnySettings} parsed=${!!health.hasParsedSettings} keys=${Number(health.keyCount || 0)} secret=${!!health.hasSecret} instance=${!!health.hasInstanceName} rpc=${!!health.hasRpc} influx=${!!health.hasInflux} saveProfile=${!!health.saveProfile} savedProfileLen=${Number(health.savedProfileLength || 0)} craftingJobs=${Number(health.craftingJobs || 0)} lpEnabled=${!!health.upgradeAutomationEnabled} fleetConfigs=${Number(health.fleetConfigCount || 0)} craftConfigs=${Number(health.craftConfigCount || 0)}`
 }
 
 function copyLeveldbSnapshot(targetDir, label, sourceDir = LEVELDB_DIR)
@@ -515,7 +492,7 @@ function getBackupCandidates()
 	})
 }
 
-function findBestConfiguredBackup()
+function findLatestUsableBackup()
 {
 	return getBackupCandidates()
 		.filter(candidate => candidate.audit.exists && candidate.audit.totalSize >= 4096 && candidate.health.hasUsableSettings)
@@ -607,7 +584,7 @@ function snapshotLeveldbToBackup()
 function restoreLeveldbFromBackup(sourceDir = null, sourceLabel = 'backup')
 {
 	try {
-		let source = sourceDir ? { label: sourceLabel, dir: sourceDir, audit: auditLeveldb(sourceDir), health: getLeveldbSettingsHealth(sourceDir) } : findBestConfiguredBackup()
+		let source = sourceDir ? { label: sourceLabel, dir: sourceDir, audit: auditLeveldb(sourceDir), health: getLeveldbSettingsHealth(sourceDir) } : findLatestUsableBackup()
 		if (!source) return { ok: false, error: 'no configured backup leveldb to restore from' }
 		if (!source.audit.exists || source.audit.totalSize === 0) return { ok: false, error: 'no backup leveldb to restore from' }
 		if (!source.health.hasUsableSettings) return { ok: false, error: `backup is not usable enough to restore: ${formatSettingsHealth(source.health)}` }
@@ -635,17 +612,17 @@ function maybeAutoRestoreLeveldb()
 	try {
 		const live = auditLeveldb(LEVELDB_DIR)
 		const liveHealth = getLeveldbSettingsHealth(LEVELDB_DIR)
-		const bestBackup = findBestConfiguredBackup()
-		const bak = bestBackup?.audit || auditLeveldb(LEVELDB_BAK_DIR)
-		const bakHealth = bestBackup?.health || getLeveldbSettingsHealth(LEVELDB_BAK_DIR)
+		const latestBackup = findLatestUsableBackup()
+		const bak = latestBackup?.audit || auditLeveldb(LEVELDB_BAK_DIR)
+		const bakHealth = latestBackup?.health || getLeveldbSettingsHealth(LEVELDB_BAK_DIR)
 		const liveNeedsRestore = liveNeedsRestoreFromBackup(live, liveHealth)
-		const bakHasContent = !!bestBackup
+		const bakHasContent = !!latestBackup
 		if (liveNeedsRestore && bakHasContent) {
-			const result = restoreLeveldbFromBackup(bestBackup.dir, bestBackup.label)
-			logToUpgradeLog(`[ELECTRON][LEVELDB-AUTO-RESTORE] triggered liveSize=${live.totalSize} backup=${bestBackup.label} bakSize=${bak.totalSize} liveHealth=[${formatSettingsHealth(liveHealth)}] bakHealth=[${formatSettingsHealth(bakHealth)}] result=${result.ok ? 'ok' : 'fail:' + result.error}`)
+			const result = restoreLeveldbFromBackup(latestBackup.dir, latestBackup.label)
+			logToUpgradeLog(`[ELECTRON][LEVELDB-AUTO-RESTORE] triggered liveSize=${live.totalSize} backup=${latestBackup.label} bakSize=${bak.totalSize} liveHealth=[${formatSettingsHealth(liveHealth)}] bakHealth=[${formatSettingsHealth(bakHealth)}] result=${result.ok ? 'ok' : 'fail:' + result.error}`)
 			return result
 		} else {
-			logToUpgradeLog(`[ELECTRON][LEVELDB-AUTO-RESTORE] skipped liveSize=${live.totalSize} bestBackup=${bestBackup?.label || 'none'} bakSize=${bak.totalSize} liveNeedsRestore=${liveNeedsRestore} liveMtime=${Number(live.lastModified || 0)} bakMtime=${Number(bak.lastModified || 0)} liveHealth=[${formatSettingsHealth(liveHealth)}] bakHasContent=${bakHasContent} bakHealth=[${formatSettingsHealth(bakHealth)}]`)
+			logToUpgradeLog(`[ELECTRON][LEVELDB-AUTO-RESTORE] skipped liveSize=${live.totalSize} latestBackup=${latestBackup?.label || 'none'} bakSize=${bak.totalSize} liveNeedsRestore=${liveNeedsRestore} liveMtime=${Number(live.lastModified || 0)} bakMtime=${Number(bak.lastModified || 0)} liveHealth=[${formatSettingsHealth(liveHealth)}] bakHasContent=${bakHasContent} bakHealth=[${formatSettingsHealth(bakHealth)}]`)
 			return { ok: false, skipped: true, live, bak, liveHealth, bakHealth }
 		}
 	} catch (e) {
@@ -782,7 +759,7 @@ else
 	const liveHealth = getLeveldbSettingsHealth(LEVELDB_DIR);
 	const bakHealth = getLeveldbSettingsHealth(LEVELDB_BAK_DIR);
 	const prevHealth = getLeveldbSettingsHealth(LEVELDB_PREV_BAK_DIR);
-	return { live, bak, prev, liveHealth, bakHealth, prevHealth, bestBackup: findBestConfiguredBackup()?.label || null };
+	return { live, bak, prev, liveHealth, bakHealth, prevHealth, latestBackup: findLatestUsableBackup()?.label || null };
   })
   
   
