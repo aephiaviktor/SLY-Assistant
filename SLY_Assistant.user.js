@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-110
+// @aephia-version 0.7.35-111
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -31,7 +31,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-110'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-111'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4729,7 +4729,6 @@
 			if (copy.mySecretKey) copy.mySecretKey = '[REDACTED len=' + (copy.mySecretKey || '').length + ']';
 			if (copy.aephiaApiKey) copy.aephiaApiKey = '[REDACTED len=' + (copy.aephiaApiKey || '').length + ']';
 			if (copy.influxAuth) copy.influxAuth = '[REDACTED len=' + (copy.influxAuth || '').length + ']';
-			if (copy.lpTargetHistoryInfluxAuth) copy.lpTargetHistoryInfluxAuth = '[REDACTED len=' + (copy.lpTargetHistoryInfluxAuth || '').length + ']';
 			if (copy.customKey) copy.customKey = '[REDACTED len=' + (copy.customKey || '').length + ']';
 			if (copy.secretKey) copy.secretKey = '[REDACTED len=' + (copy.secretKey || '').length + ']';
 			return copy;
@@ -4965,10 +4964,6 @@
 			influxURL: parseStringDefault(globalSettings.influxURL,''),
 			influxAuth: parseStringDefault(globalSettings.influxAuth,''),
 			influxDB: parseStringDefault(globalSettings.influxDB,''),
-			lpTargetHistoryInfluxURL: parseStringDefault(globalSettings.lpTargetHistoryInfluxURL,''),
-			lpTargetHistoryInfluxAuth: parseStringDefault(globalSettings.lpTargetHistoryInfluxAuth,''),
-			lpTargetHistoryInfluxDB: parseStringDefault(globalSettings.lpTargetHistoryInfluxDB,''),
-
 			scanMapURL: parseStringDefaultForced(globalSettings.scanMapURL,'https://slya.de/sdu.json'),
 
 			emailFleetIxErrors: parseBoolDefault(globalSettings.emailFleetIxErrors, true),
@@ -11313,10 +11308,6 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			influxURL: parseStringDefault(document.querySelector('#influxURL').value,''),
 			influxAuth: parseStringDefault(document.querySelector('#influxAuth').value,''),
 			influxDB: parseStringDefault(document.querySelector('#influxDB').value,''),
-			lpTargetHistoryInfluxURL: document.querySelector('#lpTargetHistoryInfluxURL') ? parseStringDefault(document.querySelector('#lpTargetHistoryInfluxURL').value,'') : parseStringDefault(globalSettings.lpTargetHistoryInfluxURL,''),
-			lpTargetHistoryInfluxAuth: document.querySelector('#lpTargetHistoryInfluxAuth') ? parseStringDefault(document.querySelector('#lpTargetHistoryInfluxAuth').value,'') : parseStringDefault(globalSettings.lpTargetHistoryInfluxAuth,''),
-			lpTargetHistoryInfluxDB: document.querySelector('#lpTargetHistoryInfluxDB') ? parseStringDefault(document.querySelector('#lpTargetHistoryInfluxDB').value,'') : parseStringDefault(globalSettings.lpTargetHistoryInfluxDB,''),
-
 			scanMapURL: parseStringDefaultForced(document.querySelector('#scanMapURL').value,'https://slya.de/sdu.json'),
 
 			emailFleetIxErrors: document.querySelector('#emailFleetIxErrors') ? document.querySelector('#emailFleetIxErrors').checked : !!globalSettings.emailFleetIxErrors,
@@ -11398,7 +11389,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 	let sensitiveFieldsVisible = false;
 	function applySensitiveFieldMasking() {
-		const selectors = ['#mySecretKey', '#aephiaApiKey', '#heliusRpcURL', '#influxAuth', '#lpTargetHistoryInfluxAuth'];
+		const selectors = ['#mySecretKey', '#aephiaApiKey', '#heliusRpcURL', '#influxAuth'];
 		for (const selector of selectors) {
 			const el = document.querySelector(selector);
 			if (!el) continue;
@@ -11443,10 +11434,6 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		document.querySelector('#influxURL').value = globalSettings.influxURL;
 		document.querySelector('#influxAuth').value = globalSettings.influxAuth;
 		document.querySelector('#influxDB').value = globalSettings.influxDB;
-		if (document.querySelector('#lpTargetHistoryInfluxURL')) document.querySelector('#lpTargetHistoryInfluxURL').value = globalSettings.lpTargetHistoryInfluxURL || '';
-		if (document.querySelector('#lpTargetHistoryInfluxAuth')) document.querySelector('#lpTargetHistoryInfluxAuth').value = globalSettings.lpTargetHistoryInfluxAuth || '';
-		if (document.querySelector('#lpTargetHistoryInfluxDB')) document.querySelector('#lpTargetHistoryInfluxDB').value = globalSettings.lpTargetHistoryInfluxDB || '';
-
 		document.querySelector('#scanMapURL').value = globalSettings.scanMapURL;
 
 		if (document.querySelector('#emailFleetIxErrors')) document.querySelector('#emailFleetIxErrors').checked = globalSettings.emailFleetIxErrors;
@@ -11488,7 +11475,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				applySensitiveFieldMasking();
 			});
 		}
-		for (const selector of ['#mySecretKey', '#aephiaApiKey', '#heliusRpcURL', '#influxAuth', '#lpTargetHistoryInfluxAuth']) {
+		for (const selector of ['#mySecretKey', '#aephiaApiKey', '#heliusRpcURL', '#influxAuth']) {
 			const el = document.querySelector(selector);
 			if (el && !el.dataset.maskBound) {
 				el.dataset.maskBound = '1';
@@ -15815,9 +15802,6 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			settingsModalContentString += '<div><div style="display:flex; align-items:center; gap:8px;"><span>Influx URL</span><input id="influxURL" type="text" style="flex:1; min-width:0;"></input></div></div>';
 			settingsModalContentString += '<div><div style="display:flex; align-items:center; gap:8px;"><span>Influx auth token</span><input id="influxAuth" type="text" style="flex:1; min-width:0;"></input></div><small>Send statistical data to an Influx DB 3 server (or compatible databases). InfluxDB offers a free cloud service (with a max time range of 6 days). If you use a local installation, go for the free Enterprise at-home version and set --query-file-limit to at least 10000 (this allows a max time range of ~2 months). If installed locally, the URL is e.g.: <i>http://127.0.0.1:8181/api/v3/write_lp?db=slya&precision=auto&no_sync=true</i><br>The auth token MUST be provided, otherwise the request will fail.</small></div>';
 			settingsModalContentString += '<div><div style="display:flex; align-items:center; gap:8px;"><span>Influx database/bucket</span><input id="influxDB" type="text" style="width:104px;"></input></div><small>Used for Influx-backed reads in the Statistics panel. Set this to the bucket name that contains the <i>upgrade</i>, <i>crafting</i>, and <i>starbase</i> data.</small></div>';
-			settingsModalContentString += '<div><div style="display:flex; align-items:center; gap:8px;"><span>LP Target History Influx URL</span><input id="lpTargetHistoryInfluxURL" type="text" style="flex:1; min-width:0;"></input></div></div>';
-			settingsModalContentString += '<div><div style="display:flex; align-items:center; gap:8px;"><span>LP Target History Influx auth token</span><input id="lpTargetHistoryInfluxAuth" type="text" style="flex:1; min-width:0;"></input></div><small>Dedicated Influx connection for LP target history reads. Keep this separate from the main Influx config if the data lives in a different bucket or requires a different token.</small></div>';
-			settingsModalContentString += '<div><div style="display:flex; align-items:center; gap:8px;"><span>LP Target History Influx database/bucket</span><input id="lpTargetHistoryInfluxDB" type="text" style="width:104px;"></input></div><small>Bucket containing the LP target history time series used for LP Target Now Hourly/API follow-up work.</small></div>';
 			settingsModalContentString += '</li>';
 			settingsModalContentString += '</menu></div>';
 			//settingsModalContent.innerHTML = '<div class="assist-modal-header"> <img src="' + iconStr + '" /> <span style="padding-left: 15px;">SLY Assistant v' + GM_info.script.version + '</span> <div class="assist-modal-header-right"> <button class=" assist-modal-btn assist-modal-save">Save</button> <span class="assist-modal-close">&#x2715;</span> </div></div><div class="assist-modal-body"> <span id="settings-modal-error"></span> <div id="settings-modal-header">Global Settings</div> <div>Priority Fee <input id="priorityFee" type="number" min="0" max="100000000" placeholder="1" ></input> <span>Added to each transaction. Set to 0 (zero) to disable (the wallet will then decide the fee!). 1 Lamport = 0.000000001 SOL. Normal transactions will use the full priority fee, smaller transactions will use 10%. Exception: craft transactions are super heavy and will use 250% of the fee.</span> </div> <div>Auto-Fee? <input id="automaticFee" type="checkbox"></input> <span>Enable the auto fee algorithm, works best if at least 1 tx is executed per minute.</span><fieldset id="autoFeeData">FeeMin: <input id="automaticFeeMin" type="number" min="0" max="100000" placeholder="1" size="6"></input> TimeMin: <input id="automaticFeeTimeMin" type="number" min="1" max="120" placeholder="6" size="3"></input><br/>FeeMax: <input id="automaticFeeMax" type="number" min="0" max="100000" placeholder="12000" size="6"></input> TimeMax: <input id="automaticFeeTimeMax" type="number" min="5" max="120" placeholder="40" size="3"></input><br/>Max fee change/tx: <input id="automaticFeeStep" type="number" min="1" max="1000" placeholder="80" size="6"></input><br/><span>Fee starts with the configured priority fee from above. The current fee is then somewhere between FeeMin and FeeMax. This is 1:1 carried over to TimeMin and TimeMax and results in a threshold time. If a new tx is below this time, the fee gets decreased. If a new tx is above this time, the fee gets increased. Both times the amount is limited to "Max fee change/tx". The more the time deviates from the current threshold time, the greater the change.</span></fieldset></div> <div>Save profile selection? <input id="saveProfile" type="checkbox"></input> <span>Should the profile selection be saved (uncheck to select a different profile each time)?</span> </div> <div>Tx Poll Delay <input id="confirmationCheckingDelay" type="number" min="200" max="10000" placeholder="200"></input> <span>How many milliseconds to wait before re-reading the chain for confirmation</span> </div> <div>Console Logging <input id="debugLogLevel" type="number" min="0" max="9" placeholder="3"></input> <span>How much console logging you want to see (higher number = more, 0 = none)</span> </div> <div>Crafting Jobs <input id="craftingJobs" type="number" min="0" max="100" placeholder="4"></input> <span>How many crafting jobs should be enabled?</span> </div> <div>Subwarp for short distances? <input id="subwarpShortDist" type="checkbox"></input> <span>Should fleets subwarp when travel distance is 1 diagonal square or less?</span> </div> <div>Use Ammo Banks for Transport? <input id="transportUseAmmoBank" type="checkbox"></input> <span>Should transports also use their ammo banks to help move ammo?</span> </div> <div>Stop Transports On Error <input id="transportStopOnError" type="checkbox"></input> <span>Should transport fleet stop completely if there is an error (example: not enough resource/fuel/etc.)?</span> </div> <div>Fuel to 100% for transports <input id="transportFuel100" type="checkbox"></input> <span>If a refuel is needed at the source, should transport fleets fill fuel to 100%?</span> </div> <div>Transports keep 1 resource <input id="transportKeep1" type="checkbox"></input> <span>If unloading a resource, should transport fleets keep 1 resource to save a CreatePDA transaction when loading it again?</span> </div> <div>Miners keep 1 resource <input id="minerKeep1" type="checkbox"></input> <span>Same as previous option but for miners. Also load 1 food more, so the food token account is not closed, too.</span> </div> <div>Starbases keep 1 resource <input id="starbaseKeep1" type="checkbox"></input> <span>Same as previous option but for starbases.</span> </div> <div>Moving Scan Pattern <select id="scanBlockPattern"> <option value="square">square</option> <option value="ring">ring</option> <option value="spiral">spiral</option> <option value="up">up</option> <option value="down">down</option> <option value="left">left</option> <option value="right">right</option> <option value="sly">sly</option> </select> <span>Only applies to fleets set to Move While Scanning</span> </div> <div>Scan Block Length <input id="scanBlockLength" type="number" min="2" max="50" placeholder="5"></input> <span>How far fleets should go for the up, down, left and right scanning patterns</span> </div> <div>Scan Block Resets After Resupply? <input id="scanBlockResetAfterResupply" type="checkbox"></input> <span>Start from the beginning of the pattern after resupplying at starbase?</span> </div> <div>Scan Resupply On Low Fuel? <input id="scanResupplyOnLowFuel" type="checkbox"></input> <span>Do scanning fleets set to Move While Scanning return to base to resupply when fuel is too low to move?</span> </div> <div>Scan Sector Regeneration Delay <input id="scanSectorRegenTime" type="number" min="0" placeholder="90"></input> <span>Number of seconds to wait after finding SDU</span> </div> <div>Scan Pause Time <input id="scanPauseTime" type="number" min="240" max="6000" placeholder="600"></input> <span>Number of seconds to wait when sectors probabilities are too low</span> </div> <div>Scan Strike Count <input id="scanStrikeCount" type="number" min="1" max="10" placeholder="3"></input> <span>Number of low % scans before moving on or pausing</span> </div> <div>Status Panel Opacity <input id="statusPanelOpacity" type="range" min="1" max="100" value="75"></input> <span>(requires page refresh)</span> </div> <div>---</div> <div>Advanced Settings</div> <div>Auto Start Script <input id="autoStartScript" type="checkbox"></input> <span>Should Lab Assistant automatically start after initialization is complete?</span> </div> <div>Reload On Stuck Fleets <input id="reloadPageOnFailedFleets" type="number" min="0" max="999" placeholder="0"></input> <span>Automatically refresh the page if this many fleets get stuck (0 = never)</span> </div><div>Exclude fleets:<br><textarea id="excludeFleets" cols="40" rows="6"></textarea><br><span>(one fleet name per line, case sensivity, reload required)</span> </div></div>';
