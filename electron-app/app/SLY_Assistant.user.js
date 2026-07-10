@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-111
+// @aephia-version 0.7.35-112
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -17,6 +17,7 @@
 // @grant        GM_listValues
 // @grant        GM_xmlhttpRequest
 // @connect      api.aephia.com
+// @connect      get-ship-data.aephia.workers.dev
 // @connect      store-sage-lp.aephia.workers.dev
 // ==/UserScript==
 
@@ -31,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-111'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-112'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -292,6 +293,7 @@
 
 	const UPGRADE_AUTOMATION_STATS_API = 'https://api.ryden.systems/api_stats_points.php';
 	const UPGRADE_AUTOMATION_AEPHIA_SUMMARY_API = 'https://store-sage-lp.aephia.workers.dev/summary';
+	const UPGRADE_AUTOMATION_AEPHIA_RESOURCE_API = 'https://get-ship-data.aephia.workers.dev/gm/resource';
 	const UPGRADE_AUTOMATION_POINTS_CATEGORY = LPCategory.toString();
 	const UPGRADE_AUTOMATION_FACTION_CONFIG = {
 		MUD: { lpInstance: 1, phantomCrewCoords: '0,-24' },
@@ -3451,46 +3453,47 @@
 		return Number.isFinite(price) && price > 0 ? price : null;
 	}
 
-	async function fetchUpgradeAutomationGmPrices(componentNames = []) {
+	async function fetchUpgradeAutomationAephiaResourcePrices(componentNames = []) {
 		const names = [...new Set((componentNames || []).map(getUpgradeAutomationPerformanceComponentName).filter(Boolean))];
 		const nowMs = Date.now();
 		const cachedPrices = upgradeAutomationGmPriceCache?.prices || {};
 		if (nowMs - Number(upgradeAutomationGmPriceCache?.fetchedAt || 0) < 5 * 60 * 1000 && names.every(name => Object.prototype.hasOwnProperty.call(cachedPrices, name))) {
 			return cachedPrices;
 		}
-		const mintToComponent = {};
-		for (const name of names) {
-			const mint = getUpgradeAutomationComponentMint(name);
-			if (mint) mintToComponent[mint] = name;
-		}
 		const prices = Object.fromEntries(names.map(name => [name, null]));
-		const mints = new Set(Object.keys(mintToComponent));
-		if (!mints.size) {
+		if (!names.length) {
 			upgradeAutomationGmPriceCache = { fetchedAt: nowMs, prices };
 			return prices;
 		}
-		const marketProgramId = new solanaWeb3.PublicKey(UPGRADE_AUTOMATION_GM_PROGRAM_ID);
-		const marketIDL = await BrowserAnchor.anchor.Program.fetchIdl(marketProgramId, anchorProvider);
-		const marketProgram = new BrowserAnchor.anchor.Program(marketIDL, marketProgramId, anchorProvider);
-		const atlasMint = new solanaWeb3.PublicKey(UPGRADE_AUTOMATION_ATLAS_MINT);
-		await Promise.all([...mints].map(async mint => {
-			const component = mintToComponent[mint];
-			const orderAccounts = await marketProgram.account.orderAccount.all([
-				{ dataSize: 201 },
-				{ memcmp: { offset: 40, bytes: atlasMint.toBase58() } },
-				{ memcmp: { offset: 72, bytes: mint } }
-			]);
-			for (const order of orderAccounts || []) {
-				const account = order?.account || {};
-				const side = Object.keys(account.orderSide || {})[0];
-				if (side !== 'buy') continue;
-				const remainingQty = typeof account.orderRemainingQty?.toNumber === 'function' ? account.orderRemainingQty.toNumber() : Number(account.orderRemainingQty || 0);
-				if (!Number.isFinite(remainingQty) || remainingQty <= 0) continue;
-				const price = parseUpgradeAutomationGmPrice(account.price);
-				if (!price) continue;
-				prices[component] = prices[component] == null ? price : Math.max(prices[component], price);
+		let responseText = '';
+		if (typeof GM_xmlhttpRequest === 'function') {
+			const response = await new Promise((resolve, reject) => {
+				GM_xmlhttpRequest({
+					method: 'GET',
+					url: UPGRADE_AUTOMATION_AEPHIA_RESOURCE_API,
+					timeout: 15000,
+					onload: resolve,
+					onerror: () => reject(new Error('resource_price_network_error')),
+					ontimeout: () => reject(new Error('resource_price_timeout'))
+				});
+			});
+			if (Number(response.status || 0) < 200 || Number(response.status || 0) >= 300) throw new Error('resource_price_http_' + Number(response.status || 0));
+			responseText = String(response.responseText || '');
+		} else {
+			const response = await fetch(UPGRADE_AUTOMATION_AEPHIA_RESOURCE_API);
+			if (!response.ok) throw new Error('resource_price_http_' + response.status);
+			responseText = await response.text();
+		}
+		const rows = JSON.parse(responseText);
+		const wantedNames = new Set(names);
+		for (const row of Array.isArray(rows) ? rows : []) {
+			const component = getUpgradeAutomationPerformanceComponentName(row?.name || '');
+			if (!wantedNames.has(component)) continue;
+			const price = Number(row?.pricingATL?.priceATL ?? row?.priceATL ?? 0);
+			if (Number.isFinite(price) && price > 0) {
+				prices[component] = price;
 			}
-		}));
+		}
 		upgradeAutomationGmPriceCache = { fetchedAt: nowMs, prices };
 		return prices;
 	}
@@ -3504,7 +3507,7 @@
 			let gmPrices = {};
 			let gmPriceError = '';
 			try {
-				gmPrices = await fetchUpgradeAutomationGmPrices(performanceComponents);
+				gmPrices = await fetchUpgradeAutomationAephiaResourcePrices(performanceComponents);
 			} catch (priceErr) {
 				gmPriceError = String(priceErr?.message || priceErr || 'gm_price_failed');
 			}
