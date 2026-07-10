@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-114
+// @aephia-version 0.7.35-115
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-114'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-115'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2541,10 +2541,15 @@
 				usedCrew += 1;
 			}
 		}
+		const neutralAssignedCrew = rows.reduce((sum, row) => sum + Math.max(0, Math.floor(Number(row.crew || 0))), 0);
+		const neutralUnusedCrew = Math.max(0, totalCrew - neutralAssignedCrew);
 		for (const row of rows) {
 			const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[row.name] || (row.name === 'Survey Data Unit' ? UPGRADE_AUTOMATION_COMPONENT_LP['SDU'] : 0) || 0);
 			row.lpPerUnit = lpPerUnit;
 			row.lpPerSecond = row.secondsPerUnit > 0 ? (lpPerUnit / row.secondsPerUnit) : 0;
+			row.neutralTotalCrew = totalCrew;
+			row.neutralAssignedCrew = neutralAssignedCrew;
+			row.neutralUnusedCrew = neutralUnusedCrew;
 			if (row.crew > 0 && row.secondsPerUnit > 0) {
 				row.neutralUpgradingHour = Math.floor((row.crew * 3600) / row.secondsPerUnit);
 				row.neutralUpgradingDay = Math.floor(row.installedToday + (row.crew * secondsInRemainingHours) / row.secondsPerUnit);
@@ -2700,6 +2705,7 @@
 		let specialPriorityTargetCrew = 0;
 		let specialPriorityActualCrew = 0;
 		let specialPriorityTransfers = 0;
+		let targetAddedIdleCrew = 0;
 		const specialPriorityRows = rows.filter(row => row.specialRiskControlled && !row.specialRiskBlocked && row.phantomUpgradeEligible);
 		if (direction === 'aggressive' && specialPriorityRows.length) {
 			const totalPlannedCrew = rows.reduce((sum, row) => sum + Math.max(0, Math.floor(Number(row.finalCrew || 0))), 0);
@@ -2751,6 +2757,41 @@
 				specialPriorityTransfers++;
 			}
 			specialPriorityActualCrew = specialCrewTotal();
+		}
+		const neutralUnusedCrew = Math.max(0, Math.floor(Number(rows.reduce((max, row) => Math.max(max, Number(row.neutralUnusedCrew || 0)), 0))));
+		for (let added = 0; added < neutralUnusedCrew; added++) {
+			const currentLp = currentTotal();
+			const distanceNow = Math.abs(targetFinalLp - currentLp);
+			const candidates = [];
+			for (const dst of rows) {
+				if (!dst || !dst.phantomUpgradeEligible || dst.targetPhaseBlocked) continue;
+				const dstCurrentLp = (Number(dst.neutralUpgradingHour || 0) * remainingNeutralHours + Number(dst.finalUpgradingHour || 0) * remainingTargetHours) * Number(dst.lpPerUnit || 0);
+				const dstSim = simulateRow(dst, Number(dst.finalCrew || 0) + 1);
+				if (!dstSim.legal) continue;
+				const totalAfter = currentLp - dstCurrentLp + Number(dstSim.projectedTotalComponentLp || 0);
+				const distanceAfter = Math.abs(targetFinalLp - totalAfter);
+				if (distanceAfter >= distanceNow) continue;
+				candidates.push({ dst, dstSim, totalAfter, distanceAfter, lpDelta: totalAfter - currentLp });
+			}
+			if (!candidates.length) break;
+			candidates.sort((a, b) => {
+				if (a.distanceAfter !== b.distanceAfter) return a.distanceAfter - b.distanceAfter;
+				const aDestCurrentBuffer = Number.isFinite(Number(a.dst.finalBufferDays)) ? Number(a.dst.finalBufferDays) : Number.POSITIVE_INFINITY;
+				const bDestCurrentBuffer = Number.isFinite(Number(b.dst.finalBufferDays)) ? Number(b.dst.finalBufferDays) : Number.POSITIVE_INFINITY;
+				if (aDestCurrentBuffer !== bDestCurrentBuffer) return bDestCurrentBuffer - aDestCurrentBuffer;
+				const aDestLps = Number(a.dstSim.effectiveLpPerSecond || 0);
+				const bDestLps = Number(b.dstSim.effectiveLpPerSecond || 0);
+				if (aDestLps !== bDestLps) return direction === 'aggressive' ? (bDestLps - aDestLps) : (aDestLps - bDestLps);
+				const aGain = Math.abs(Number(a.lpDelta || 0));
+				const bGain = Math.abs(Number(b.lpDelta || 0));
+				if (aGain !== bGain) return bGain - aGain;
+				return String(a.dst.displayName || a.dst.name || '').localeCompare(String(b.dst.displayName || b.dst.name || ''));
+			});
+			const best = candidates[0];
+			best.dst.finalCrew = Math.max(0, Number(best.dst.finalCrew || 0) + 1);
+			syncProjectedFields(best.dst);
+			actualDestNames.add(String(best.dst.displayName || best.dst.name || ''));
+			targetAddedIdleCrew += 1;
 		}
 		const guardLimit = Math.max(1000, rows.length * Math.max(1, rows.reduce((sum, row) => sum + Math.max(0, Number(row.finalCrew || 0)), 0)) * 6);
 		for (let guard = 0; guard < guardLimit; guard++) {
@@ -2852,6 +2893,7 @@
 			specialPriorityTargetCrew,
 			specialPriorityActualCrew,
 			specialPriorityTransfers,
+			targetAddedIdleCrew,
 		};
 	}
 	async function fetchUpgradeAutomationExecutionSummary() {
@@ -3132,6 +3174,7 @@
 			specialPriorityTargetCrew: finalPlan.specialPriorityTargetCrew,
 			specialPriorityActualCrew: finalPlan.specialPriorityActualCrew,
 			specialPriorityTransfers: finalPlan.specialPriorityTransfers,
+			targetAddedIdleCrew: finalPlan.targetAddedIdleCrew,
 			neutralComponentPlan: finalPlan.rows,
 			yesterdayProfitAtlas: profitStats.yesterdayProfitAtlas,
 			avg7dProfitAtlas: profitStats.avg7dProfitAtlas,
@@ -4322,6 +4365,7 @@
 			`,fstab_sdu_priority_target_crew=${Math.max(0, Math.floor(Number(executionSummary?.specialPriorityTargetCrew || 0)))}i` +
 			`,fstab_sdu_priority_actual_crew=${Math.max(0, Math.floor(Number(executionSummary?.specialPriorityActualCrew || 0)))}i` +
 			`,fstab_sdu_priority_transfers=${Math.max(0, Math.floor(Number(executionSummary?.specialPriorityTransfers || 0)))}i` +
+			`,target_added_idle_crew=${Math.max(0, Math.floor(Number(executionSummary?.targetAddedIdleCrew || 0)))}i` +
 			`,lp_automation_on=${!!globalSettings.upgradeAutomationEnabled ? 1 : 0}i` +
 			`,faction_name=${influxFieldString(lpAutoFactionTag)}` +
 			`,snapshot_for_hour=${influxFieldString(snapshotForHour)}`
