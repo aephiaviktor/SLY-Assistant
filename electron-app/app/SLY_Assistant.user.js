@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-113
+// @aephia-version 0.7.35-114
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-113'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-114'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -9334,9 +9334,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		);
 	}
 
-	function getTransportSavedDispatched(savedEntry, enabledKey, dispatchedKey, keyKey, currentKey) {
+	function getTransportSavedDispatched(savedEntry, enabledKey, dispatchedKey, keyKey, currentKey, legacyKey = '') {
 		if(!savedEntry || !savedEntry[enabledKey]) return 0;
-		if(savedEntry[keyKey] && savedEntry[keyKey] !== currentKey) return 0;
+		if(savedEntry[keyKey] && savedEntry[keyKey] !== currentKey && (!legacyKey || savedEntry[keyKey] !== legacyKey)) return 0;
 		return Math.max(0, Math.floor(Number(savedEntry[dispatchedKey] || 0)));
 	}
 
@@ -9406,6 +9406,98 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		});
 	}
 
+	function getTransportPlusSharedTotalCommandKey(sourceCoord, destCoord, entry, entryIndex, type) {
+		const sourceKey = getTransportCoordKey(sourceCoord);
+		const destKey = getTransportCoordKey(destCoord);
+		if(type === 'crew') return sourceKey + '>' + destKey + '|crew';
+		return sourceKey + '>' + destKey + '|cargo:' + String(entry?.res || '') + ':slot' + entryIndex;
+	}
+
+	function applyTransportPlusSharedTotals(routes, routeContexts = []) {
+		const commands = {};
+		for(let routeIndex=0; routeIndex<routes.length; routeIndex++) {
+			const route = routes[routeIndex] || {};
+			const totalContext = routeContexts[routeIndex] || {};
+			const manifest = Array.isArray(route.manifest) ? route.manifest : [];
+			for(let entryIndex=0; entryIndex<manifest.length; entryIndex++) {
+				const entry = manifest[entryIndex] || {};
+				if(entry.cargoTotal && entry.res && Math.max(0, Math.floor(Number(entry.amt || 0))) > 0) {
+					const commandKey = getTransportPlusSharedTotalCommandKey(totalContext.sourceCoord, totalContext.destCoord, entry, entryIndex, 'cargo');
+					if(!commands[commandKey]) {
+						commands[commandKey] = {
+							type: 'cargo',
+							entryIndex,
+							sourceKey: getTransportCoordKey(totalContext.sourceCoord),
+							destKey: getTransportCoordKey(totalContext.destCoord),
+							res: entry.res,
+							amt: Math.max(0, Math.floor(Number(entry.amt || 0))),
+							dispatched: Math.max(0, Math.floor(Number(entry.cargoDispatched || 0))),
+							totalKey: entry.cargoTotalKey
+						};
+					} else if(commands[commandKey].amt === Math.max(0, Math.floor(Number(entry.amt || 0)))) {
+						commands[commandKey].dispatched = Math.max(commands[commandKey].dispatched, Math.max(0, Math.floor(Number(entry.cargoDispatched || 0))));
+					} else {
+						cLog(1, `[Supply Chain] WARNING: Duplicate total cargo route ${commandKey} has conflicting amounts (${commands[commandKey].amt} vs ${Math.max(0, Math.floor(Number(entry.amt || 0)))}). Using first configured total.`);
+					}
+				}
+				if(entryIndex === 0 && entry.crewTotal && Math.max(0, Math.floor(Number(entry.crew || 0))) > 0) {
+					const commandKey = getTransportPlusSharedTotalCommandKey(totalContext.sourceCoord, totalContext.destCoord, entry, entryIndex, 'crew');
+					if(!commands[commandKey]) {
+						commands[commandKey] = {
+							type: 'crew',
+							entryIndex,
+							sourceKey: getTransportCoordKey(totalContext.sourceCoord),
+							destKey: getTransportCoordKey(totalContext.destCoord),
+							crew: Math.max(0, Math.floor(Number(entry.crew || 0))),
+							dispatched: Math.max(0, Math.floor(Number(entry.crewDispatched || 0))),
+							totalKey: entry.crewTotalKey
+						};
+					} else if(commands[commandKey].crew === Math.max(0, Math.floor(Number(entry.crew || 0)))) {
+						commands[commandKey].dispatched = Math.max(commands[commandKey].dispatched, Math.max(0, Math.floor(Number(entry.crewDispatched || 0))));
+					} else {
+						cLog(1, `[Supply Chain] WARNING: Duplicate total crew route ${commandKey} has conflicting amounts (${commands[commandKey].crew} vs ${Math.max(0, Math.floor(Number(entry.crew || 0)))}). Using first configured total.`);
+					}
+				}
+			}
+		}
+
+		return routes.map((route, routeIndex) => {
+			const totalContext = routeContexts[routeIndex] || {};
+			const manifest = (route.manifest || []).map((entry, entryIndex) => {
+				const nextEntry = {...entry};
+				const cargoCommandKey = getTransportPlusSharedTotalCommandKey(totalContext.sourceCoord, totalContext.destCoord, nextEntry, entryIndex, 'cargo');
+				let cargoCommand = commands[cargoCommandKey];
+				if(!cargoCommand && !nextEntry.res) {
+					const sourceKey = getTransportCoordKey(totalContext.sourceCoord);
+					const destKey = getTransportCoordKey(totalContext.destCoord);
+					cargoCommand = Object.values(commands).find(command =>
+						command.type === 'cargo' &&
+						command.entryIndex === entryIndex &&
+						command.sourceKey === sourceKey &&
+						command.destKey === destKey
+					);
+				}
+				if(cargoCommand && (nextEntry.cargoTotal || !nextEntry.res || nextEntry.res === cargoCommand.res)) {
+					nextEntry.res = cargoCommand.res;
+					nextEntry.amt = cargoCommand.amt;
+					nextEntry.cargoTotal = true;
+					nextEntry.cargoDispatched = Math.min(cargoCommand.amt, cargoCommand.dispatched);
+					nextEntry.cargoTotalKey = cargoCommand.totalKey;
+				}
+				const crewCommandKey = getTransportPlusSharedTotalCommandKey(totalContext.sourceCoord, totalContext.destCoord, nextEntry, entryIndex, 'crew');
+				const crewCommand = commands[crewCommandKey];
+				if(entryIndex === 0 && crewCommand) {
+					nextEntry.crew = crewCommand.crew;
+					nextEntry.crewTotal = true;
+					nextEntry.crewDispatched = Math.min(crewCommand.crew, crewCommand.dispatched);
+					nextEntry.crewTotalKey = crewCommand.totalKey;
+				}
+				return nextEntry;
+			});
+			return {...route, manifest};
+		});
+	}
+
 	function getTransportPlusTargetCount(fleetParsedData, target1Coord = '') {
 		const savedCount = parseInt(fleetParsedData && fleetParsedData.transportPlusTargetCount);
 		if(savedCount > 0) return savedCount;
@@ -9461,17 +9553,19 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				const res = savedEntry.res || '';
 				const amt = savedEntry.amt || 0;
 				const crew = savedEntry.crew || 0;
-				const cargoTotalKey = getTransportTotalKey(res, amt, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
-				const crewTotalKey = getTransportCrewTotalKey(crew, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+				const cargoTotalKey = getTransportTotalKey(res, amt, totalContext.sourceCoord, totalContext.destCoord);
+				const legacyCargoTotalKey = getTransportTotalKey(res, amt, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
+				const crewTotalKey = getTransportCrewTotalKey(crew, totalContext.sourceCoord, totalContext.destCoord);
+				const legacyCrewTotalKey = getTransportCrewTotalKey(crew, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
 				manifest.push({
 					res: res,
 					amt: amt,
 					crew: crew,
 					cargoTotal: !!savedEntry.cargoTotal,
-					cargoDispatched: getTransportSavedDispatched(savedEntry, 'cargoTotal', 'cargoDispatched', 'cargoTotalKey', cargoTotalKey),
+					cargoDispatched: getTransportSavedDispatched(savedEntry, 'cargoTotal', 'cargoDispatched', 'cargoTotalKey', cargoTotalKey, legacyCargoTotalKey),
 					cargoTotalKey: cargoTotalKey,
 					crewTotal: !!savedEntry.crewTotal,
-					crewDispatched: getTransportSavedDispatched(savedEntry, 'crewTotal', 'crewDispatched', 'crewTotalKey', crewTotalKey),
+					crewDispatched: getTransportSavedDispatched(savedEntry, 'crewTotal', 'crewDispatched', 'crewTotalKey', crewTotalKey, legacyCrewTotalKey),
 					crewTotalKey: crewTotalKey
 				});
 			}
@@ -9481,7 +9575,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				manifest: manifest
 			});
 		}
-		return routes;
+		return applyTransportPlusSharedTotals(routes, routeContexts);
 	}
 
 	function getTransportPlusRouteIndex(fleetParsedData, routeCount = null) {
@@ -13539,9 +13633,16 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		for(let entryIndex=0; entryIndex<manifest.length; entryIndex++) {
 			const sourceEntry = manifest[entryIndex] || {};
 			const targetEntry = routeManifest[entryIndex] || {};
+			if(sourceEntry.cargoTotal) {
+				targetEntry.res = sourceEntry.res || targetEntry.res || '';
+				targetEntry.amt = Math.max(0, Math.floor(Number(sourceEntry.amt || 0)));
+			}
 			targetEntry.cargoTotal = !!sourceEntry.cargoTotal;
 			targetEntry.cargoDispatched = Math.max(0, Math.floor(Number(sourceEntry.cargoDispatched || 0)));
 			targetEntry.cargoTotalKey = sourceEntry.cargoTotalKey || getTransportTotalKey(sourceEntry.res, sourceEntry.amt);
+			if(sourceEntry.crewTotal) {
+				targetEntry.crew = Math.max(0, Math.floor(Number(sourceEntry.crew || 0)));
+			}
 			targetEntry.crewTotal = !!sourceEntry.crewTotal;
 			targetEntry.crewDispatched = Math.max(0, Math.floor(Number(sourceEntry.crewDispatched || 0)));
 			targetEntry.crewTotalKey = sourceEntry.crewTotalKey || getTransportCrewTotalKey(sourceEntry.crew);
