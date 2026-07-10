@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-112
+// @aephia-version 0.7.35-113
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-112'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-113'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4661,7 +4661,9 @@
 			sector: job.sector || '',
 			inputResource: job.inputResource || '',
 			startedAt: maybeBnToNumber(job.startedAt, Date.now()),
-			feeAtlas: Number(job.feeAtlas || 0)
+			feeAtlas: Number(job.feeAtlas || 0),
+			txCostSolStart: Number(job.txCostSolStart || 0),
+			txFeeLamportsStart: Math.max(0, Math.round(Number(job.txFeeLamportsStart || 0)))
 		};
 
 		upgradeTelemetryCache.set(key, payload);
@@ -4712,6 +4714,12 @@
 			`,jobs=${maybeBnToNumber(job.jobs, 0)}` +
 			`,crew=${maybeBnToNumber(job.crew, 0)}` +
 			`,feeAtlas=${Number(job.feeAtlas || 0)}` +
+			`,txCostSol=${Number(job.txCostSolStart || 0) + getSlyaTxCostSol(userCraft?.slyaUpgradeCompleteTxResult)}` +
+			`,txFeeLamports=${Math.round(Number(job.txFeeLamportsStart || 0) + getSlyaTxFeeLamports(userCraft?.slyaUpgradeCompleteTxResult))}i` +
+			`,txCostSolStart=${Number(job.txCostSolStart || 0)}` +
+			`,txFeeLamportsStart=${Math.round(Number(job.txFeeLamportsStart || 0))}i` +
+			`,txCostSolComplete=${getSlyaTxCostSol(userCraft?.slyaUpgradeCompleteTxResult)}` +
+			`,txFeeLamportsComplete=${Math.round(getSlyaTxFeeLamports(userCraft?.slyaUpgradeCompleteTxResult))}i` +
 			`,startedAt=${maybeBnToNumber(job.startedAt, 0)}` +
 			`,completedAt=${completedAt}` +
 			`,state=${influxFieldString(userCraft?.state || '')}`;
@@ -7082,6 +7090,52 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return confirmationErr || txErr || null;
 	}
 
+	function annotateSlyaTxCost(txResult) {
+		if (!txResult || !txResult.meta) return txResult;
+		const lamports = Number(txResult.meta.fee || 0);
+		txResult.slyaTxFeeLamports = Number.isFinite(lamports) && lamports > 0 ? lamports : 0;
+		txResult.slyaTxCostSol = txResult.slyaTxFeeLamports / 1000000000;
+		return txResult;
+	}
+
+	function annotateSlyaTxCostAggregate(txResult, txResults = []) {
+		if (!txResult) return txResult;
+		const results = (txResults || []).filter(Boolean);
+		const totalLamports = results.reduce((sum, result) => {
+			annotateSlyaTxCost(result);
+			return sum + Number(result.slyaTxFeeLamports || 0);
+		}, 0);
+		if (results.length) {
+			txResult.slyaTxResults = results;
+			txResult.slyaTxSliceCount = results.length;
+			txResult.slyaTxFeeLamports = totalLamports;
+			txResult.slyaTxCostSol = totalLamports / 1000000000;
+		} else {
+			annotateSlyaTxCost(txResult);
+		}
+		return txResult;
+	}
+
+	function getSlyaTxFeeLamports(txResult) {
+		const value = Number(txResult?.slyaTxFeeLamports ?? txResult?.meta?.fee ?? 0);
+		return Number.isFinite(value) && value > 0 ? value : 0;
+	}
+
+	function getSlyaTxCostSol(txResult) {
+		const value = Number(txResult?.slyaTxCostSol ?? (getSlyaTxFeeLamports(txResult) / 1000000000));
+		return Number.isFinite(value) && value > 0 ? value : 0;
+	}
+
+	function buildSlyaTxCostInfluxFields(txResult, prefix = 'tx') {
+		const lamports = getSlyaTxFeeLamports(txResult);
+		const sol = lamports / 1000000000;
+		return `,${prefix}CostSol=${Number.isFinite(sol) ? sol : 0},${prefix}FeeLamports=${Math.round(lamports)}i`;
+	}
+
+	function appendInfluxFieldsToLines(lines, fields) {
+		return String(lines || '').split('\n').map(line => line ? line + fields : line).join('\n');
+	}
+
 	function getCustomInstructionErrorCode(instructionError, logMessages) {
 		let errorDetail = Array.isArray(instructionError) ? instructionError[1] : instructionError;
 		if (typeof errorDetail === 'number') return errorDetail;
@@ -7381,6 +7435,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				}
 
 				if(tryCount > 1) cLog(3, `${FleetTimeStamp(fleetName)} Got txResult in ${tryCount} tries`, txResult);
+				annotateSlyaTxCost(txResult);
 				cLog(4, `${FleetTimeStamp(fleetName)} txResult`, txResult);
 				cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> CONFIRM ✅ ${confirmationTimeStr}`);
 				confirmed = true;
@@ -8457,7 +8512,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		let minedRssName = cargoItems.find(r => r.token == resourceToken.toString())?.name;
 		let miningStarbaseContext = await getTelemetryStarbaseContextFromCoords(targetX, targetY);
 		let miningFactionTag = miningStarbaseContext.faction ? `,faction=${influxEscape(miningStarbaseContext.faction)}` : '';
-		await sendToInflux(`mining,fleet=${influxEscape(fleet.label)},starbase=${influxEscape(miningStarbaseContext.starbaseName || 'unknown')},sectorX=${targetX},sectorY=${targetY}${miningFactionTag},rss=${influxEscape(minedRssName)} burnedFuel=${fleet.planetExitFuelAmount},burnedFood=${burnedFood},burnedAmmo=${burnedAmmo},amount=${minedAmount}`);
+		await sendToInflux(`mining,fleet=${influxEscape(fleet.label)},starbase=${influxEscape(miningStarbaseContext.starbaseName || 'unknown')},sectorX=${targetX},sectorY=${targetY}${miningFactionTag},rss=${influxEscape(minedRssName)} burnedFuel=${fleet.planetExitFuelAmount},burnedFood=${burnedFood},burnedAmmo=${burnedAmmo},amount=${minedAmount}${buildSlyaTxCostInfluxFields(txResult)}`);
             }
 
         });
@@ -8692,6 +8747,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                 }
 
                 txResult.feeAtlas = feeAtlas;
+                txResult.txCostSolStart = getSlyaTxCostSol(txResult.result);
+                txResult.txFeeLamportsStart = getSlyaTxFeeLamports(txResult.result);
             }
 
             resolve(txResult);
@@ -8923,6 +8980,19 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
             //let txResult = await txSignAndSend(tx2, userCraft, 'COMPLETING CRAFT TX2');
             //let txResult = await txSignAndSend(transactions, userCraft, 'COMPLETING CRAFT', Math.min(globalSettings.craftingTxMultiplier, 500) );
             let txResult = await txSliceAndSend(transactions, userCraft, 'COMPLETING CRAFT', Math.min(globalSettings.craftingTxMultiplier, 500), 6);
+            const txFeeLamportsStart = Math.max(0, Math.round(Number(userCraft.txFeeLamportsStart || 0)));
+            const txCostSolStart = Number(userCraft.txCostSolStart || 0);
+            const txFeeLamportsComplete = getSlyaTxFeeLamports(txResult);
+            const txCostSolComplete = getSlyaTxCostSol(txResult);
+            influxStr = appendInfluxFieldsToLines(
+                influxStr,
+                `,txCostSol=${txCostSolStart + txCostSolComplete}` +
+                `,txFeeLamports=${Math.round(txFeeLamportsStart + txFeeLamportsComplete)}i` +
+                `,txCostSolStart=${txCostSolStart}` +
+                `,txFeeLamportsStart=${txFeeLamportsStart}i` +
+                `,txCostSolComplete=${txCostSolComplete}` +
+                `,txFeeLamportsComplete=${Math.round(txFeeLamportsComplete)}i`
+            );
 
             if(!userCraft.state.includes('ERROR')) {
 		await sendToInflux(influxStr);
@@ -9121,6 +9191,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
             let txResult = await txSignAndSend(transactions, userCraft, 'COMPLETING UPGRADE', Math.min(globalSettings.craftingTxMultiplier, 500), userRedemptionAcct);
 
             if (!userCraft.state.includes('ERROR') && txResult) {
+                userCraft.slyaUpgradeCompleteTxResult = txResult;
                 if (upgradeTelemetryJob) {
                     try {
                         if (!upgradeTelemetryJob.feeAtlas && userCraft.feeAtlas) {
@@ -11872,12 +11943,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					const movementStarbaseCoords = ConvertCoords(fleetParsedData.starbase || userFleets[i].starbaseCoord);
 					const movementStarbaseContext = await getTelemetryStarbaseContextFromCoords(movementStarbaseCoords[0], movementStarbaseCoords[1]);
 					const movementFactionTag = movementStarbaseContext.faction ? `,faction=${influxEscape(movementStarbaseContext.faction)}` : '';
-					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${assignment},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag} type="warp",burnedFuel=${moveDist*(userFleets[i].warpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}`);
+					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${assignment},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag} type="warp",burnedFuel=${moveDist*(userFleets[i].warpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(warpResult?.txResult || warpResult)}`);
 					if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].warpFuelConsumptionRate/100);
 					warpCooldownFinished = warpResult.warpCooldownFinished;
 				} else if (currentFuelCnt + currentCargoFuelCnt >= subwarpCost) {
 					moveTime = calculateSubwarpTime(userFleets[i], moveDist);
-					await execSubwarp(userFleets[i], moveX, moveY, moveTime);
+					const subwarpResult = await execSubwarp(userFleets[i], moveX, moveY, moveTime);
 					const fleetPK = userFleets[i].publicKey.toString();
 					const fleetSavedData = await GM.getValue(fleetPK, '{}');
 					const fleetParsedData = JSON.parse(fleetSavedData);
@@ -11885,7 +11956,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					const movementStarbaseCoords = ConvertCoords(fleetParsedData.starbase || userFleets[i].starbaseCoord);
 					const movementStarbaseContext = await getTelemetryStarbaseContextFromCoords(movementStarbaseCoords[0], movementStarbaseCoords[1]);
 					const movementFactionTag = movementStarbaseContext.faction ? `,faction=${influxEscape(movementStarbaseContext.faction)}` : '';
-					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${assignment},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag} type="subwarp",burnedFuel=${moveDist*(userFleets[i].subwarpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}`);
+					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${assignment},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag} type="subwarp",burnedFuel=${moveDist*(userFleets[i].subwarpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(subwarpResult)}`);
 					if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].subwarpFuelConsumptionRate/100);
 				} else {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Unable to move, lack of fuel`);
@@ -12130,7 +12201,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let burnedFood = changesFood.preBalance - changesFood.postBalance;
 			const sduStarbaseCoords = ConvertCoords(userFleets[i].starbaseCoord);
 			const sduStarbaseContext = await getTelemetryStarbaseContextFromCoords(sduStarbaseCoords[0], sduStarbaseCoords[1]);
-			await sendToInflux(`sdu,instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},starbase=${influxEscape(sduStarbaseContext.starbaseName || 'unknown')},fleet=${influxEscape(userFleets[i].label)},sectorX=${fleetCoords[0]},sectorY=${fleetCoords[1]} amount=${sduFound},burnedFood=${burnedFood},chance=${scanCondition},cargoRoomLeft=${userFleets[i].cargoCapacity - cargoCnt - sduFound}`);
+			await sendToInflux(`sdu,instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},starbase=${influxEscape(sduStarbaseContext.starbaseName || 'unknown')},fleet=${influxEscape(userFleets[i].label)},sectorX=${fleetCoords[0]},sectorY=${fleetCoords[1]} amount=${sduFound},burnedFood=${burnedFood},chance=${scanCondition},cargoRoomLeft=${userFleets[i].cargoCapacity - cargoCnt - sduFound}${buildSlyaTxCostInfluxFields(scanResult)}`);
 
 		}
 		else if (!moved && Date.now() < userFleets[i].scanEnd && userFleets[i].state == 'Idle') {
@@ -13923,13 +13994,16 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			allTxSlices.push(lastBlock);
 		}
 
+		const sentTxResults = [];
 		for (const transactionsSlice of allTxSlices) {
 			if(transactionsSlice.length == 1)
 				txResult = await txSignAndSend(transactionsSlice[0], fleet, opName, priorityFeeMultiplier );
 			else
 				txResult = await txSignAndSend(transactionsSlice, fleet, opName, priorityFeeMultiplier );
+			if(txResult) sentTxResults.push(txResult);
 			if(fleet.state.includes('ERROR')) break;
 		}
+		annotateSlyaTxCostAggregate(txResult, sentTxResults);
 		return txResult;
 	}
 
@@ -14716,6 +14790,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
         craftParsedData.craftingId = userCraft.craftingId;
         craftParsedData.craftingCoords = userCraft.craftingCoords;
         craftParsedData.feeAtlas = userCraft.feeAtlas;
+        craftParsedData.txCostSolStart = Number(userCraft.txCostSolStart || 0);
+        craftParsedData.txFeeLamportsStart = Math.max(0, Math.round(Number(userCraft.txFeeLamportsStart || 0)));
 	craftParsedData.errorCount = userCraft.errorCount;
         await saveCraftConfig(userCraft.label, craftParsedData, 'craft-update-state');
     }
@@ -14888,6 +14964,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	                            if (userCraft.craftingId && craftingProcess.craftingId == userCraft.craftingId) {
 	                                userCraft.craftingId = 0;
 					userCraft.errorCount = 0;
+					userCraft.txCostSolStart = 0;
+					userCraft.txFeeLamportsStart = 0;
 	                                updateFleetState(userCraft, 'Idle');
 	                                await updateCraft(userCraft);
 	                            }
@@ -14910,6 +14988,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	                            if (userCraft.craftingId && upgradeProcess.craftingId == userCraft.craftingId) {
 	                                userCraft.craftingId = 0;
 					userCraft.errorCount = 0;
+					userCraft.txCostSolStart = 0;
+					userCraft.txFeeLamportsStart = 0;
 	                                updateFleetState(userCraft, 'Idle');
 	                                await updateCraft(userCraft);
 	                                //await GM.setValue(userCraft.label, JSON.stringify(userCraft));
@@ -15017,6 +15097,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                             userCraft.craftingId = result.craftingId;
                             userCraft.craftingCoords = userCraft.coordinates;
                             userCraft.feeAtlas = result.feeAtlas;
+                            userCraft.txCostSolStart = Number(result.txCostSolStart || 0);
+                            userCraft.txFeeLamportsStart = Math.max(0, Math.round(Number(result.txFeeLamportsStart || 0)));
                             userCraft.errorCount = 0;
 
                             if (activityType == 'Upgrading' && result.craftingId) {
@@ -15042,7 +15124,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
                                         sector: sectorStr,
                                         inputResource: inputResource,
                                         startedAt: Date.now(),
-                                        feeAtlas: result.feeAtlas || 0
+                                        feeAtlas: result.feeAtlas || 0,
+                                        txCostSolStart: userCraft.txCostSolStart || 0,
+                                        txFeeLamportsStart: userCraft.txFeeLamportsStart || 0
                                     });
                                 } catch (error) {
                                     cLog(1, `${FleetTimeStamp(userCraft.label)} Failed to cache upgrade telemetry for craftingId=${result.craftingId}`, error);
