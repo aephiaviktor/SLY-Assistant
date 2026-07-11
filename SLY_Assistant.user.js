@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-116
+// @aephia-version 0.7.35-117
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-116'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-117'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -12081,7 +12081,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					const movementStarbaseCoords = ConvertCoords(fleetParsedData.starbase || userFleets[i].starbaseCoord);
 					const movementStarbaseContext = await getTelemetryStarbaseContextFromCoords(movementStarbaseCoords[0], movementStarbaseCoords[1]);
 					const movementFactionTag = movementStarbaseContext.faction ? `,faction=${influxEscape(movementStarbaseContext.faction)}` : '';
-					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${assignment},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag} type="warp",burnedFuel=${moveDist*(userFleets[i].warpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(warpResult?.txResult || warpResult)}`);
+					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${influxEscape(assignment || 'unknown')},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag} type="warp",burnedFuel=${moveDist*(userFleets[i].warpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(warpResult?.txResult || warpResult)}`);
 					if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].warpFuelConsumptionRate/100);
 					warpCooldownFinished = warpResult.warpCooldownFinished;
 				} else if (currentFuelCnt + currentCargoFuelCnt >= subwarpCost) {
@@ -12094,7 +12094,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					const movementStarbaseCoords = ConvertCoords(fleetParsedData.starbase || userFleets[i].starbaseCoord);
 					const movementStarbaseContext = await getTelemetryStarbaseContextFromCoords(movementStarbaseCoords[0], movementStarbaseCoords[1]);
 					const movementFactionTag = movementStarbaseContext.faction ? `,faction=${influxEscape(movementStarbaseContext.faction)}` : '';
-					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${assignment},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag} type="subwarp",burnedFuel=${moveDist*(userFleets[i].subwarpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(subwarpResult)}`);
+					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${influxEscape(assignment || 'unknown')},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag} type="subwarp",burnedFuel=${moveDist*(userFleets[i].subwarpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(subwarpResult)}`);
 					if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].subwarpFuelConsumptionRate/100);
 				} else {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Unable to move, lack of fuel`);
