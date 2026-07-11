@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-115
+// @aephia-version 0.7.35-116
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-115'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-116'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2502,9 +2502,7 @@
 				}, 0);
 				if (projectedSpecialCrew > Number(row.specialRiskMaxCrew)) return false;
 			}
-			const projectedBuffer = projectNeutralBufferDays(row, crew);
-			const tier = getUpgradeAutomationBufferTier(projectedBuffer, row.inventoryGlobal);
-			return tier !== 'D' && tier !== 'D_ZERO';
+			return true;
 		};
 		if (activeRows.length && totalCrew > 0) {
 			for (const row of activeRows) row.crew = 0;
@@ -2616,11 +2614,9 @@
 			const projected = projectUpgradeAutomationFinalRow(row, projectedCrew, remainingHours);
 			const projectedHourly = Number(projected.finalUpgradingHour || 0);
 			const availableInventory = Number(row.inventoryGlobal || 0);
-			const projectedBuffer = projected.finalBufferDays;
 			const inventoryFeasible = !Number.isFinite(projectedHourly) || projectedHourly <= availableInventory;
-			const bufferSafe = !Number.isFinite(Number(projectedBuffer)) || Number(projectedBuffer) > 5;
 			return {
-				legal: inventoryFeasible && bufferSafe,
+				legal: inventoryFeasible,
 				projectedCrew: Math.max(0, Math.floor(Number(projectedCrew || 0))),
 				projectedUpgradingHour: projected.finalUpgradingHour,
 				projectedUpgradingDay: projected.finalUpgradingDay,
@@ -5360,11 +5356,15 @@
 					const neutralCraft24h = Number(row.craft24h || 0);
 					const neutralUpgradingDay = Number(row.neutralUpgradingDay || 0);
 					const neutralBufferDisplay = !row.phantomUpgradeEligible || row.neutralBufferDays == null ? '' : (Number.isFinite(row.neutralBufferDays) ? Number(row.neutralBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
+					const neutralBufferWarning = row.phantomUpgradeEligible && row.neutralBufferDays != null && Number.isFinite(Number(row.neutralBufferDays)) && Number(row.neutralBufferDays) < 5;
+					const finalBufferWarning = row.phantomUpgradeEligible && row.finalBufferDays != null && Number.isFinite(Number(row.finalBufferDays)) && Number(row.finalBufferDays) < 5;
+					const neutralBufferStyle = neutralBufferWarning ? (neutralHighlightStyle ? neutralHighlightStyle.replace(/"$/, '; color:#ffb366"') : ' style="color:#ffb366"') : neutralHighlightStyle;
+					const finalBufferStyle = finalBufferWarning ? (finalHighlightStyle ? finalHighlightStyle.replace(/"$/, '; color:#ffb366"') : ' style="color:#ffb366"') : finalHighlightStyle;
 					const actualSideStyle = row.actualOptimizerSource ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.actualOptimizerDestination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
 					const riskLabel = row.specialRiskControlled ? (' (risk ' + Math.round(Number(row.specialRiskMultiplier || 0) * 100) + '%)') : '';
 					const neutralBlockedLabel = row.neutralPhaseBlocked && !row.specialRiskBlocked && highlightNeutral ? ' (neutral blocked)' : '';
 					const optimizerDisplayName = row.phantomBlocked ? '<span style="color:#ff8080">' + row.displayName + ' (blocked)</span>' : (row.specialRiskBlocked ? row.displayName + ' (risk blocked)' : row.displayName + neutralBlockedLabel + riskLabel);
-					content += '<tr><td' + actualSideStyle + '>' + optimizerDisplayName + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(upgradeAutomationExecutionSummary.neutralPhaseMode ? (row.neutralUpgradingPhase || 0) : (row.neutralUpgradingHour || 0)) || 0).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + neutralBufferDisplay + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalCrew || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalUpgradingHour || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + finalBufferDisplay + '</td></tr>';
+					content += '<tr><td' + actualSideStyle + '>' + optimizerDisplayName + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(upgradeAutomationExecutionSummary.neutralPhaseMode ? (row.neutralUpgradingPhase || 0) : (row.neutralUpgradingHour || 0)) || 0).toLocaleString() + '</td><td align="right"' + neutralBufferStyle + '>' + neutralBufferDisplay + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalCrew || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalUpgradingHour || 0)).toLocaleString() + '</td><td align="right"' + finalBufferStyle + '>' + finalBufferDisplay + '</td></tr>';
 				}
 			} else {
 				content += '<tr><td colspan="8">Component plan unavailable</td></tr>';
