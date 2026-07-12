@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-118
+// @aephia-version 0.7.35-119
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-118'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-119'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4802,7 +4802,7 @@
 		await clearFleetTelemetryCostCycle(fleet);
 	}
 
-	async function sendFleetMovementCargoTelemetry(fleet, fleetParsedData, fleetCurrentCargo, movementTags, movementFields) {
+	async function sendFleetMovementCargoTelemetry(fleet, fleetParsedData, fleetCurrentCargo, movementTags, movementType = '') {
 		if(!globalSettings.influxURL.length || !fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return;
 		const cargoTokens = Array.isArray(fleetCurrentCargo?.value) ? fleetCurrentCargo.value : [];
 		const lines = [];
@@ -4814,8 +4814,8 @@
 			if(!cargoItem) continue;
 			const cargoSize = getCargoTelemetrySizeByMint(mint);
 			lines.push(
-				`movement_cargo,${movementTags},rss=${influxEscape(cargoItem.name || 'unknown')}` +
-				` amount=${amount},cargoSize=${cargoSize},cargoVolume=${amount * cargoSize},cargoCapacity=${Number(fleet.cargoCapacity || 0)},assetMint=${influxFieldString(mint)},${movementFields}`
+				`movement_cargo,${movementTags},rss=${influxEscape(cargoItem.name || 'unknown')},assetMint=${influxEscape(mint)}` +
+				` amount=${amount},cargoSize=${cargoSize},cargoVolume=${amount * cargoSize},cargoCapacity=${Number(fleet.cargoCapacity || 0)},assetMint=${influxFieldString(mint)},movementType=${influxFieldString(movementType)}`
 			);
 		}
 		if(lines.length) await sendToInflux(lines.join('\n'));
@@ -12234,7 +12234,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 						const movementTags = `fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${influxEscape(assignment || 'unknown')},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag}${movementCycleTag}`;
 						const movementFields = `type="warp",burnedFuel=${burnedFuel},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(movementTxResult)}`;
 						await sendToInflux(`movement,${movementTags} ${movementFields}`);
-						await sendFleetMovementCargoTelemetry(userFleets[i], fleetParsedData, fleetCurrentCargo, movementTags, movementFields);
+						await sendFleetMovementCargoTelemetry(userFleets[i], fleetParsedData, fleetCurrentCargo, movementTags, 'warp');
 						if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].warpFuelConsumptionRate/100);
 						warpCooldownFinished = warpResult.warpCooldownFinished;
 					} else if (currentFuelCnt + currentCargoFuelCnt >= subwarpCost) {
@@ -12253,7 +12253,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 						const movementTags = `fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${influxEscape(assignment || 'unknown')},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag}${movementCycleTag}`;
 						const movementFields = `type="subwarp",burnedFuel=${burnedFuel},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(subwarpResult)}`;
 						await sendToInflux(`movement,${movementTags} ${movementFields}`);
-						await sendFleetMovementCargoTelemetry(userFleets[i], fleetParsedData, fleetCurrentCargo, movementTags, movementFields);
+						await sendFleetMovementCargoTelemetry(userFleets[i], fleetParsedData, fleetCurrentCargo, movementTags, 'subwarp');
 						if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].subwarpFuelConsumptionRate/100);
 					} else {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Unable to move, lack of fuel`);
