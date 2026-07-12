@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-117
+// @aephia-version 0.7.35-118
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-117'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-118'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4685,6 +4685,142 @@
 		return '"' + String(val ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\"') + '"';
 	}
 
+	function getCargoTelemetryItemByMint(mint) {
+		return cargoItems.find(r => r.token == mint) || null;
+	}
+
+	function getCargoTelemetryNameByMint(mint) {
+		return getCargoTelemetryItemByMint(mint)?.name || String(mint || 'unknown');
+	}
+
+	function getCargoTelemetrySizeByMint(mint) {
+		const cargoSize = Number(getCargoTelemetryItemByMint(mint)?.size || 1);
+		return Number.isFinite(cargoSize) && cargoSize > 0 ? cargoSize : 1;
+	}
+
+	function getFleetTelemetryCostCycleKey(fleet) {
+		return `transportCostCycle:${fleet.publicKey.toString()}`;
+	}
+
+	function getFleetTelemetryHomeCoord(fleet, fleetParsedData = {}) {
+		return String(fleetParsedData.starbase || fleet.starbaseCoord || '').trim();
+	}
+
+	function getFleetTelemetryHomeStarbaseName(fleet, fleetParsedData = {}) {
+		const homeCoord = getFleetTelemetryHomeCoord(fleet, fleetParsedData);
+		const [homeX, homeY] = ConvertCoords(homeCoord);
+		return validTargets.find(target => (target.x + ',' + target.y) == (homeX + ',' + homeY))?.name || 'unknown';
+	}
+
+	function buildFleetTelemetryCycleId(fleet, fleetParsedData = {}) {
+		const homeCoord = getFleetTelemetryHomeCoord(fleet, fleetParsedData).replace(/\s+/g, '');
+		return `${fleet.publicKey.toString()}:${homeCoord || 'unknown'}:${Date.now()}`;
+	}
+
+	async function getFleetTelemetryCostCycle(fleet, fleetParsedData = {}) {
+		const key = getFleetTelemetryCostCycleKey(fleet);
+		try {
+			const saved = JSON.parse(await GM.getValue(key, '{}'));
+			if(saved && saved.id) return saved;
+		} catch (e) {}
+		return {
+			id: buildFleetTelemetryCycleId(fleet, fleetParsedData),
+			fleet: fleet.label || '',
+			assignment: fleetParsedData.assignment || '',
+			homeCoord: getFleetTelemetryHomeCoord(fleet, fleetParsedData),
+			homeStarbase: getFleetTelemetryHomeStarbaseName(fleet, fleetParsedData),
+			startedAt: Date.now(),
+			movementCount: 0,
+			burnedFuel: 0,
+			txCostSol: 0,
+			txFeeLamports: 0,
+			deliveries: []
+		};
+	}
+
+	async function saveFleetTelemetryCostCycle(fleet, cycle) {
+		await GM.setValue(getFleetTelemetryCostCycleKey(fleet), JSON.stringify(cycle));
+		scheduleSlyaStateBackup('transport-cost-cycle-save');
+	}
+
+	async function clearFleetTelemetryCostCycle(fleet) {
+		await GM.deleteValue(getFleetTelemetryCostCycleKey(fleet));
+		scheduleSlyaStateBackup('transport-cost-cycle-clear');
+	}
+
+	async function addFleetTelemetryMovementCost(fleet, fleetParsedData, movementCost) {
+		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return null;
+		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
+		cycle.assignment = fleetParsedData.assignment || cycle.assignment || '';
+		cycle.homeCoord = cycle.homeCoord || getFleetTelemetryHomeCoord(fleet, fleetParsedData);
+		cycle.homeStarbase = cycle.homeStarbase || getFleetTelemetryHomeStarbaseName(fleet, fleetParsedData);
+		cycle.movementCount = Math.max(0, Number(cycle.movementCount || 0)) + 1;
+		cycle.burnedFuel = Number(cycle.burnedFuel || 0) + Math.max(0, Number(movementCost?.burnedFuel || 0));
+		cycle.txCostSol = Number(cycle.txCostSol || 0) + getSlyaTxCostSol(movementCost?.txResult);
+		cycle.txFeeLamports = Number(cycle.txFeeLamports || 0) + getSlyaTxFeeLamports(movementCost?.txResult);
+		await saveFleetTelemetryCostCycle(fleet, cycle);
+		return cycle;
+	}
+
+	async function addFleetTelemetryCargoDelivery(fleet, fleetParsedData, delivery) {
+		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return null;
+		if(!delivery || !(Number(delivery.amount || 0) > 0) || delivery.loadType !== 'cargo_out') return null;
+		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
+		const mint = String(delivery.mint || '');
+		const amount = Math.max(0, Number(delivery.amount || 0));
+		const cargoSize = getCargoTelemetrySizeByMint(mint);
+		cycle.deliveries = Array.isArray(cycle.deliveries) ? cycle.deliveries : [];
+		cycle.deliveries.push({
+			mint: mint,
+			rssName: delivery.rssName || getCargoTelemetryNameByMint(mint),
+			amount: amount,
+			cargoSize: cargoSize,
+			cargoVolume: amount * cargoSize,
+			starbase: delivery.starbase || 'unknown',
+			sectorX: delivery.sectorX,
+			sectorY: delivery.sectorY,
+			deliveredAt: Date.now()
+		});
+		await saveFleetTelemetryCostCycle(fleet, cycle);
+		return cycle;
+	}
+
+	async function maybeFinalizeFleetTelemetryCostCycle(fleet, fleetParsedData, starbaseName) {
+		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return;
+		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
+		const homeStarbase = cycle.homeStarbase || getFleetTelemetryHomeStarbaseName(fleet, fleetParsedData);
+		if(String(starbaseName || '') !== String(homeStarbase || '')) return;
+		const deliveries = Array.isArray(cycle.deliveries) ? cycle.deliveries.filter(item => Number(item?.cargoVolume || 0) > 0) : [];
+		const totalVolume = deliveries.reduce((sum, item) => sum + Number(item.cargoVolume || 0), 0);
+		if(deliveries.length < 1 || totalVolume <= 0) return;
+		const lines = deliveries.map((item, index) => {
+			const share = Number(item.cargoVolume || 0) / totalVolume;
+			return `cargo_cost_allocation,fleet=${influxEscape(fleet.label)},assignment=${influxEscape(fleetParsedData.assignment || 'unknown')},homeStarbase=${influxEscape(homeStarbase || 'unknown')},deliveryStarbase=${influxEscape(item.starbase || 'unknown')},rss=${influxEscape(item.rssName || 'unknown')},cycleId=${influxEscape(cycle.id || 'unknown')}` +
+				` amount=${Number(item.amount || 0)},cargoVolume=${Number(item.cargoVolume || 0)},assetMint=${influxFieldString(item.mint || '')},allocatedFuel=${Number(cycle.burnedFuel || 0) * share},allocatedTxCostSol=${Number(cycle.txCostSol || 0) * share},allocatedTxFeeLamports=${Math.round(Number(cycle.txFeeLamports || 0) * share)}i,cycleBurnedFuel=${Number(cycle.burnedFuel || 0)},cycleTxCostSol=${Number(cycle.txCostSol || 0)},cycleTxFeeLamports=${Math.round(Number(cycle.txFeeLamports || 0))}i,cycleMovementCount=${Math.round(Number(cycle.movementCount || 0))}i,cycleDeliveredVolume=${totalVolume},cycleDeliveryCount=${deliveries.length}i,deliveryIndex=${index}i`;
+		}).join('\n');
+		if(lines) await sendToInflux(lines);
+		await clearFleetTelemetryCostCycle(fleet);
+	}
+
+	async function sendFleetMovementCargoTelemetry(fleet, fleetParsedData, fleetCurrentCargo, movementTags, movementFields) {
+		if(!globalSettings.influxURL.length || !fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return;
+		const cargoTokens = Array.isArray(fleetCurrentCargo?.value) ? fleetCurrentCargo.value : [];
+		const lines = [];
+		for(const tokenAccount of cargoTokens) {
+			const mint = tokenAccount.account.data.parsed.info.mint;
+			const amount = Number(tokenAccount.account.data.parsed.info.tokenAmount.uiAmount || 0);
+			if(!mint || amount <= 0) continue;
+			const cargoItem = getCargoTelemetryItemByMint(mint);
+			if(!cargoItem) continue;
+			const cargoSize = getCargoTelemetrySizeByMint(mint);
+			lines.push(
+				`movement_cargo,${movementTags},rss=${influxEscape(cargoItem.name || 'unknown')}` +
+				` amount=${amount},cargoSize=${cargoSize},cargoVolume=${amount * cargoSize},cargoCapacity=${Number(fleet.cargoCapacity || 0)},assetMint=${influxFieldString(mint)},${movementFields}`
+			);
+		}
+		if(lines.length) await sendToInflux(lines.join('\n'));
+	}
+
 	async function saveUpgradeTelemetryJob(job) {
 		if (!job || !job.craftingId) return;
 
@@ -8137,15 +8273,25 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						const fleetPK = fleet.publicKey.toString();
 						const fleetSavedData = await GM.getValue(fleetPK, '{}');
 						const fleetParsedData = JSON.parse(fleetSavedData);
-						const assignment = fleetParsedData.assignment;
-						let loadType = 'cargo_out';
-						if(fleetCargoPod == fleet.fuelTank) loadType = 'fuel_out';
-						if(fleetCargoPod == fleet.ammoBank) loadType = 'ammo_out';
-						await sendToInflux(`fleetrss,fleet=${influxEscape(fleet.label)},starbase=${influxEscape(starbaseName)},sectorX=${starbaseX},sectorY=${starbaseY},rss=${influxEscape(rssName)},assignment=${assignment},type=${loadType} amount=${amount}`);
-					}
+							const assignment = fleetParsedData.assignment;
+							let loadType = 'cargo_out';
+							if(fleetCargoPod == fleet.fuelTank) loadType = 'fuel_out';
+							if(fleetCargoPod == fleet.ammoBank) loadType = 'ammo_out';
+							await sendToInflux(`fleetrss,fleet=${influxEscape(fleet.label)},starbase=${influxEscape(starbaseName)},sectorX=${starbaseX},sectorY=${starbaseY},rss=${influxEscape(rssName)},assignment=${influxEscape(assignment || 'unknown')},type=${loadType} amount=${amount}${buildSlyaTxCostInfluxFields(txResult)}`);
+							const deliveryCycle = await addFleetTelemetryCargoDelivery(fleet, fleetParsedData, {
+								loadType,
+								mint: tokenMint,
+								rssName,
+								amount,
+								starbase: starbaseName,
+								sectorX: starbaseX,
+								sectorY: starbaseY
+							});
+							if(deliveryCycle) await maybeFinalizeFleetTelemetryCostCycle(fleet, fleetParsedData, starbaseName);
+						}
 
-			});
-	}
+				});
+		}
 
 	async function createScannerPDAs(fleet) {
 		cLog(2,`${FleetTimeStamp(fleet.label)} Maintaining Scanner PDAs`);
@@ -8279,14 +8425,14 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				const fleetPK = fleet.publicKey.toString();
 				const fleetSavedData = await GM.getValue(fleetPK, '{}');
 				const fleetParsedData = JSON.parse(fleetSavedData);
-				const assignment = fleetParsedData.assignment;
-				let loadType = 'cargo_in';
-				if(cargoPodTo == fleet.fuelTank) loadType = 'fuel_in';
-				if(cargoPodTo == fleet.ammoBank) loadType = 'ammo_in';
-				await sendToInflux(`fleetrss,fleet=${influxEscape(fleet.label)},starbase=${influxEscape(starbaseName)},sectorX=${starbaseX},sectorY=${starbaseY},rss=${influxEscape(rssName)},assignment=${assignment},type=${loadType} amount=${amount}`);
-			}
+					const assignment = fleetParsedData.assignment;
+					let loadType = 'cargo_in';
+					if(cargoPodTo == fleet.fuelTank) loadType = 'fuel_in';
+					if(cargoPodTo == fleet.ammoBank) loadType = 'ammo_in';
+					await sendToInflux(`fleetrss,fleet=${influxEscape(fleet.label)},starbase=${influxEscape(starbaseName)},sectorX=${starbaseX},sectorY=${starbaseY},rss=${influxEscape(rssName)},assignment=${influxEscape(assignment || 'unknown')},type=${loadType} amount=${amount}${buildSlyaTxCostInfluxFields(txResult?.result || txResult)}`);
+				}
 
-		});
+			});
 	}
 
     async function execStartMining(fleet, mineItem, sageResource, planet) {
@@ -12078,25 +12224,38 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					moveTime = calculateWarpTime(userFleets[i], moveDist);
 					const warpResult = await execWarp(userFleets[i], moveX, moveY, moveTime);
 					if(warpResult && warpResult.warpCooldownRetry) return warpResult.warpCooldownFinished;
-					const movementStarbaseCoords = ConvertCoords(fleetParsedData.starbase || userFleets[i].starbaseCoord);
-					const movementStarbaseContext = await getTelemetryStarbaseContextFromCoords(movementStarbaseCoords[0], movementStarbaseCoords[1]);
-					const movementFactionTag = movementStarbaseContext.faction ? `,faction=${influxEscape(movementStarbaseContext.faction)}` : '';
-					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${influxEscape(assignment || 'unknown')},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag} type="warp",burnedFuel=${moveDist*(userFleets[i].warpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(warpResult?.txResult || warpResult)}`);
-					if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].warpFuelConsumptionRate/100);
-					warpCooldownFinished = warpResult.warpCooldownFinished;
-				} else if (currentFuelCnt + currentCargoFuelCnt >= subwarpCost) {
+						const movementStarbaseCoords = ConvertCoords(fleetParsedData.starbase || userFleets[i].starbaseCoord);
+						const movementStarbaseContext = await getTelemetryStarbaseContextFromCoords(movementStarbaseCoords[0], movementStarbaseCoords[1]);
+						const movementFactionTag = movementStarbaseContext.faction ? `,faction=${influxEscape(movementStarbaseContext.faction)}` : '';
+						const burnedFuel = moveDist*(userFleets[i].warpFuelConsumptionRate/100);
+						const movementTxResult = warpResult?.txResult || warpResult;
+						const costCycle = await addFleetTelemetryMovementCost(userFleets[i], fleetParsedData, { burnedFuel, txResult: movementTxResult });
+						const movementCycleTag = costCycle?.id ? `,cycleId=${influxEscape(costCycle.id)}` : '';
+						const movementTags = `fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${influxEscape(assignment || 'unknown')},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag}${movementCycleTag}`;
+						const movementFields = `type="warp",burnedFuel=${burnedFuel},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(movementTxResult)}`;
+						await sendToInflux(`movement,${movementTags} ${movementFields}`);
+						await sendFleetMovementCargoTelemetry(userFleets[i], fleetParsedData, fleetCurrentCargo, movementTags, movementFields);
+						if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].warpFuelConsumptionRate/100);
+						warpCooldownFinished = warpResult.warpCooldownFinished;
+					} else if (currentFuelCnt + currentCargoFuelCnt >= subwarpCost) {
 					moveTime = calculateSubwarpTime(userFleets[i], moveDist);
 					const subwarpResult = await execSubwarp(userFleets[i], moveX, moveY, moveTime);
 					const fleetPK = userFleets[i].publicKey.toString();
 					const fleetSavedData = await GM.getValue(fleetPK, '{}');
 					const fleetParsedData = JSON.parse(fleetSavedData);
 					const assignment = fleetParsedData.assignment;
-					const movementStarbaseCoords = ConvertCoords(fleetParsedData.starbase || userFleets[i].starbaseCoord);
-					const movementStarbaseContext = await getTelemetryStarbaseContextFromCoords(movementStarbaseCoords[0], movementStarbaseCoords[1]);
-					const movementFactionTag = movementStarbaseContext.faction ? `,faction=${influxEscape(movementStarbaseContext.faction)}` : '';
-					await sendToInflux(`movement,fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${influxEscape(assignment || 'unknown')},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag} type="subwarp",burnedFuel=${moveDist*(userFleets[i].subwarpFuelConsumptionRate/100)},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(subwarpResult)}`);
-					if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].subwarpFuelConsumptionRate/100);
-				} else {
+						const movementStarbaseCoords = ConvertCoords(fleetParsedData.starbase || userFleets[i].starbaseCoord);
+						const movementStarbaseContext = await getTelemetryStarbaseContextFromCoords(movementStarbaseCoords[0], movementStarbaseCoords[1]);
+						const movementFactionTag = movementStarbaseContext.faction ? `,faction=${influxEscape(movementStarbaseContext.faction)}` : '';
+						const burnedFuel = moveDist*(userFleets[i].subwarpFuelConsumptionRate/100);
+						const costCycle = await addFleetTelemetryMovementCost(userFleets[i], fleetParsedData, { burnedFuel, txResult: subwarpResult });
+						const movementCycleTag = costCycle?.id ? `,cycleId=${influxEscape(costCycle.id)}` : '';
+						const movementTags = `fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${influxEscape(assignment || 'unknown')},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag}${movementCycleTag}`;
+						const movementFields = `type="subwarp",burnedFuel=${burnedFuel},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(subwarpResult)}`;
+						await sendToInflux(`movement,${movementTags} ${movementFields}`);
+						await sendFleetMovementCargoTelemetry(userFleets[i], fleetParsedData, fleetCurrentCargo, movementTags, movementFields);
+						if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].subwarpFuelConsumptionRate/100);
+					} else {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Unable to move, lack of fuel`);
 					updateFleetState(userFleets[i], 'ERROR: Not enough fuel');
 					if(globalSettings.emailNotEnoughFFA) await sendEMail(userFleets[i].label + ' not enough fuel', '');
