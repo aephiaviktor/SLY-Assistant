@@ -1,6 +1,12 @@
-const { ipcMain, session, app, BrowserWindow } = require('electron')
+const { ipcMain, session, app, BrowserWindow, powerSaveBlocker } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
+
+// SLYA is a 24/7 automation process. Chromium otherwise throttles timers when
+// its window is covered, minimized, or inactive on Windows.
+app.commandLine.appendSwitch('disable-renderer-backgrounding')
+app.commandLine.appendSwitch('disable-background-timer-throttling')
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
 
 const APP_ROOT = __dirname
 
@@ -145,7 +151,8 @@ const createWindow = (version, aephiaVersion) => {
     icon: path.join(APP_ROOT, 'app/icons/128.png'),
     autoHideMenuBar: true,
     webPreferences: {
-      preload: path.join(APP_ROOT, 'preload.js')
+      preload: path.join(APP_ROOT, 'preload.js'),
+      backgroundThrottling: false
     }    
   })
   //win.webContents.openDevTools()  
@@ -658,6 +665,8 @@ function maybeAutoRestoreLeveldb()
 installCrashEventLogging()
 
 app.whenReady().then(async () => {
+const powerSaveBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+logToUpgradeLog(`[ELECTRON][POWER] prevent-app-suspension blocker=${powerSaveBlockerId} active=${powerSaveBlocker.isStarted(powerSaveBlockerId)}`)
 // Wrapper-level leveldb audit and auto-restore (before any SLYA save could overwrite evidence)
 try {
   const liveAudit = auditLeveldb(LEVELDB_DIR);
