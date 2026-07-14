@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-120
+// @aephia-version 0.7.35-121
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-120'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-121'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4814,7 +4814,7 @@
 			if(!cargoItem) continue;
 			const cargoSize = getCargoTelemetrySizeByMint(mint);
 			lines.push(
-				`movement_cargo,${movementTags},rss=${influxEscape(cargoItem.name || 'unknown')},assetMint=${influxEscape(mint)}` +
+				`movement_cargo,${movementTags},rss=${influxEscape(cargoItem.name || 'unknown')}` +
 				` amount=${amount},cargoSize=${cargoSize},cargoVolume=${amount * cargoSize},cargoCapacity=${Number(fleet.cargoCapacity || 0)},assetMint=${influxFieldString(mint)},movementType=${influxFieldString(movementType)}`
 			);
 		}
