@@ -183,11 +183,31 @@ function readInstalledSLYAMeta()
 	}
 }
 
+let resolvedAepCommit = { sha: '', checkedAt: 0 }
+
+async function resolveFreshSourceUrl(sourceUrl)
+{
+	if (!sourceUrl.startsWith(AEP_UPDATE_BASE_URL)) return sourceUrl
+	if (!resolvedAepCommit.sha || Date.now() - resolvedAepCommit.checkedAt > 30000) {
+		const refUrl = new URL('https://api.github.com/repos/aephiaviktor/SLY-Assistant/git/ref/heads/aep-release')
+		refUrl.searchParams.set('_slyaUpdateCheck', Date.now().toString())
+		const response = await fetch(refUrl, {
+			cache: 'no-store',
+			headers: { 'Cache-Control': 'no-cache', Accept: 'application/vnd.github+json' }
+		})
+		if (!response.ok) throw new Error(`Failed to resolve AEP update commit (${response.status})`)
+		const ref = await response.json()
+		const sha = String(ref?.object?.sha || '')
+		if (!sha) throw new Error('AEP update branch returned no commit SHA')
+		resolvedAepCommit = { sha, checkedAt: Date.now() }
+	}
+	return sourceUrl.replace('/refs/heads/aep-release', `/${resolvedAepCommit.sha}`)
+}
+
 async function fetchText(sourceUrl)
 {
-	const freshUrl = new URL(sourceUrl)
-	freshUrl.searchParams.set('_slyaUpdateCheck', Date.now().toString())
-	const response = await fetch(freshUrl, {
+	const resolvedUrl = await resolveFreshSourceUrl(sourceUrl)
+	const response = await fetch(resolvedUrl, {
 		cache: 'no-store',
 		headers: { 'Cache-Control': 'no-cache' }
 	})
