@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-126
+// @aephia-version 0.7.35-127
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-126'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-127'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -411,6 +411,7 @@
 	let upgradeAutomationInfluxDebugStatus = '';
 	const UPGRADE_AUTOMATION_TARGET_BUFFER_DAYS = 10;
 	const UPGRADE_AUTOMATION_LANDING_BUFFER_SECONDS = 30;
+	const UPGRADE_AUTOMATION_MIN_JOB_CREW = 10;
 
 	async function loadUpgradeAutomationEvents() {
 		const raw = await GM.getValue(UPGRADE_AUTOMATION_EVENTS_KEY, '[]');
@@ -2514,29 +2515,39 @@
 				const currentNeutralDeficitDay = currentNeutralUpgradingDay - Number(row.craft24h || 0);
 				return Number(row.inventoryGlobal || 0) > 0 && getUpgradeAutomationEffectiveDrain(currentNeutralDeficitDay, row.observedDrain) <= 0;
 			};
+			const neutralCrewStep = row => Number(row.crew || 0) === 0 ? UPGRADE_AUTOMATION_MIN_JOB_CREW : 1;
 			for (const row of activeRows) {
-				while (usedCrew < totalCrew && isCurrentInfinity(row) && isProjectedNeutralCrewAllowed(row, Number(row.crew || 0) + 1)) {
-					row.crew += 1;
-					usedCrew += 1;
+				while (usedCrew < totalCrew && isCurrentInfinity(row)) {
+					const crewStep = neutralCrewStep(row);
+					const projectedCrew = Number(row.crew || 0) + crewStep;
+					if (usedCrew + crewStep > totalCrew || !isProjectedNeutralCrewAllowed(row, projectedCrew)) break;
+					row.crew += crewStep;
+					usedCrew += crewStep;
 				}
 			}
 			while (usedCrew < totalCrew) {
-				const eligibleRows = activeRows.filter(row => isProjectedNeutralCrewAllowed(row, Number(row.crew || 0) + 1));
+				const eligibleRows = activeRows.filter(row => {
+					const crewStep = neutralCrewStep(row);
+					return usedCrew + crewStep <= totalCrew && isProjectedNeutralCrewAllowed(row, Number(row.crew || 0) + crewStep);
+				});
 				if (!eligibleRows.length) break;
 				const best = eligibleRows.sort((a, b) => {
-					const aProjected = projectNeutralBufferDays(a, Number(a.crew || 0) + 1);
-					const bProjected = projectNeutralBufferDays(b, Number(b.crew || 0) + 1);
+					const aProjectedCrew = Number(a.crew || 0) + neutralCrewStep(a);
+					const bProjectedCrew = Number(b.crew || 0) + neutralCrewStep(b);
+					const aProjected = projectNeutralBufferDays(a, aProjectedCrew);
+					const bProjected = projectNeutralBufferDays(b, bProjectedCrew);
 					const aScore = Number.isFinite(Number(aProjected)) ? Number(aProjected) : Number.POSITIVE_INFINITY;
 					const bScore = Number.isFinite(Number(bProjected)) ? Number(bProjected) : Number.POSITIVE_INFINITY;
 					if (aScore !== bScore) return bScore - aScore;
-					const aNeed = Math.abs(Number(a.avgCrewNeeded || 0) - (Number(a.crew || 0) + 1));
-					const bNeed = Math.abs(Number(b.avgCrewNeeded || 0) - (Number(b.crew || 0) + 1));
+					const aNeed = Math.abs(Number(a.avgCrewNeeded || 0) - aProjectedCrew);
+					const bNeed = Math.abs(Number(b.avgCrewNeeded || 0) - bProjectedCrew);
 					if (aNeed !== bNeed) return aNeed - bNeed;
 					return String(a.displayName).localeCompare(String(b.displayName));
 				})[0];
 				if (!best) break;
-				best.crew += 1;
-				usedCrew += 1;
+				const crewStep = neutralCrewStep(best);
+				best.crew += crewStep;
+				usedCrew += crewStep;
 			}
 		}
 		const neutralAssignedCrew = rows.reduce((sum, row) => sum + Math.max(0, Math.floor(Number(row.crew || 0))), 0);
@@ -2603,7 +2614,9 @@
 		const simulateRow = (row, projectedCrew) => {
 			if (!row?.phantomUpgradeEligible || row.targetPhaseBlocked) return { legal: false };
 			if (!Number.isFinite(projectedCrew) || projectedCrew < 0) return { legal: false };
-			if (Number.isFinite(Number(row.specialRiskMaxCrew)) && Math.max(0, Math.floor(Number(projectedCrew || 0))) > Number(row.specialRiskMaxCrew)) return { legal: false };
+			const normalizedProjectedCrew = Math.max(0, Math.floor(Number(projectedCrew || 0)));
+			if (normalizedProjectedCrew > 0 && normalizedProjectedCrew < UPGRADE_AUTOMATION_MIN_JOB_CREW) return { legal: false };
+			if (Number.isFinite(Number(row.specialRiskMaxCrew)) && normalizedProjectedCrew > Number(row.specialRiskMaxCrew)) return { legal: false };
 			if (row.specialRiskControlled && Number.isFinite(Number(row.specialRiskMaxCrew))) {
 				const projectedSpecialCrew = rows.reduce((sum, candidate) => {
 					if (!candidate.specialRiskControlled) return sum;
