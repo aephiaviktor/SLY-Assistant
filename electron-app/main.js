@@ -38,6 +38,8 @@ const APP_ID = APP_INSTANCE_NAME ? `slya.${APP_INSTANCE_NAME.toLowerCase().repla
 const ORIGINAL_UPDATE_URL = 'https://raw.githubusercontent.com/Swift42/SLY-Assistant/refs/heads/patch-collection-for-0.7.0/SLY_Assistant.user.js'
 const AEP_UPDATE_BASE_URL = 'https://raw.githubusercontent.com/aephiaviktor/SLY-Assistant/refs/heads/aep-release'
 const AEP_UPDATE_URL = `${AEP_UPDATE_BASE_URL}/SLY_Assistant.user.js`
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
+const UPDATE_CHECK_STATE_PATH = path.join(APP_ROOT, 'data', 'update-check-state.json')
 const AEP_WRAPPER_UPDATE_FILES = [
 	{ url: `${AEP_UPDATE_BASE_URL}/electron-app/main.js`, target: 'main.js', transform: preserveElectronMainIdentity },
 	{ url: `${AEP_UPDATE_BASE_URL}/electron-app/preload.js`, target: 'preload.js' },
@@ -199,6 +201,74 @@ async function fetchSLYA(sourceUrl)
 	const version = readUserscriptMeta(file, 'version')
 	const aephiaVersion = readUserscriptMeta(file, 'aephia-version')
 	return { file, version, aephiaVersion }
+}
+
+function compareVersionParts(left, right)
+{
+	const leftParts = String(left || '').match(/\d+/g)?.map(Number) || []
+	const rightParts = String(right || '').match(/\d+/g)?.map(Number) || []
+	for (let i = 0; i < Math.max(leftParts.length, rightParts.length); i++) {
+		const delta = (leftParts[i] || 0) - (rightParts[i] || 0)
+		if (delta !== 0) return Math.sign(delta)
+	}
+	return 0
+}
+
+function readUpdateCheckState()
+{
+	try {
+		return JSON.parse(fs.readFileSync(UPDATE_CHECK_STATE_PATH, 'utf8'))
+	} catch {
+		return {}
+	}
+}
+
+function writeUpdateCheckState(state)
+{
+	fs.mkdirSync(path.dirname(UPDATE_CHECK_STATE_PATH), { recursive: true })
+	fs.writeFileSync(UPDATE_CHECK_STATE_PATH, JSON.stringify(state), 'utf8')
+}
+
+function sendUpdateAvailability(win, latestVersion, currentVersion)
+{
+	if (!win || win.isDestroyed()) return
+	win.webContents.send('updateAvailability', {
+		available: compareVersionParts(latestVersion, currentVersion) > 0,
+		version: latestVersion
+	})
+}
+
+async function checkAepUpdateAvailability(win, currentVersion, force = false)
+{
+	const state = readUpdateCheckState()
+	const now = Date.now()
+	if (!force && now - Number(state.checkedAt || 0) < UPDATE_CHECK_INTERVAL_MS) {
+		if (state.latestVersion) sendUpdateAvailability(win, state.latestVersion, currentVersion)
+		return state.latestVersion || ''
+	}
+	const latest = await fetchSLYA(AEP_UPDATE_URL)
+	const latestVersion = latest.aephiaVersion !== 'unknown' ? latest.aephiaVersion : latest.version
+	writeUpdateCheckState({ checkedAt: now, latestVersion })
+	sendUpdateAvailability(win, latestVersion, currentVersion)
+	return latestVersion
+}
+
+function scheduleDailyAepUpdateCheck(win, currentVersion)
+{
+	const state = readUpdateCheckState()
+	const ageMs = Date.now() - Number(state.checkedAt || 0)
+	const firstDelayMs = Math.max(5000, UPDATE_CHECK_INTERVAL_MS - Math.max(0, ageMs))
+	setTimeout(async () => {
+		try { await checkAepUpdateAvailability(win, currentVersion) }
+		catch (error) { console.error('Daily AEP update check failed:', error) }
+		setInterval(async () => {
+			try { await checkAepUpdateAvailability(win, currentVersion) }
+			catch (error) { console.error('Daily AEP update check failed:', error) }
+		}, UPDATE_CHECK_INTERVAL_MS)
+	}, firstDelayMs)
+	if (state.latestVersion) {
+		win.webContents.once('did-finish-load', () => sendUpdateAvailability(win, state.latestVersion, currentVersion))
+	}
 }
 
 function preserveElectronMainIdentity(file)
@@ -728,6 +798,8 @@ else
 	win = createWindow(version, aephiaVersion)
 }
 
+scheduleDailyAepUpdateCheck(win, aephiaVersion !== 'unknown' ? aephiaVersion : version)
+
   ipcMain.on('openDevTools', function() { win.openDevTools() })
   ipcMain.on('openUpdate', async function() {
 	win.webContents.send('update', '<div style="position:absolute;left:50%;margin-left:-230px;top:30vh;width:460px;text-align:center;background-color:white;padding:10px;color:black">UPDATE<br>Checking for the latest versions…<br><small>Please wait</small><br></div>');
@@ -744,6 +816,8 @@ else
 	if (viktorResult.status === 'fulfilled') {
 		const viktorLatest = viktorResult.value
 		viktorVersion = viktorLatest.aephiaVersion !== 'unknown' ? viktorLatest.aephiaVersion : viktorLatest.version
+		writeUpdateCheckState({ checkedAt: Date.now(), latestVersion: viktorVersion })
+		sendUpdateAvailability(win, viktorVersion, aephiaVersion !== 'unknown' ? aephiaVersion : version)
 	} else viktorVersion = 'unavailable'
 	try {
 		const currentFile = fs.readFileSync(path.join(APP_ROOT, 'app', 'SLY_Assistant.user.js')).toString()

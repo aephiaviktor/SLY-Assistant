@@ -19,6 +19,14 @@ ipcRenderer.on('firstinitdone', (event, data) => {
 	waitmsg.innerHTML='Latest version loaded - restarting ...';
 });
 
+ipcRenderer.on('updateAvailability', (event, data) => {
+  const updateBtn = document.getElementById('updateBtn');
+  if (!updateBtn) return;
+  const available = !!data?.available;
+  updateBtn.style.color = available ? '#4caf50' : '';
+  updateBtn.title = available ? `AEP v${data.version} is available` : 'No AEP update available';
+});
+
 ipcRenderer.on('update', (event, data) => {
   const oldOverlay = document.getElementById('updateOverlay');
   if(oldOverlay) oldOverlay.remove();

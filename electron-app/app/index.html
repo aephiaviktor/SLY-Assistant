@@ -26,7 +26,7 @@ window.GM_info = { script: { version: version } };
 	<div style="position:absolute;top:50vh;left:0px;text-align:center;width:100%;z-index:-1;font-size:120%;" id="wait"><script>if(version) { document.write('Loading '+loadingVersionLabel); setTimeout('document.getElementById("wait").remove();', 8000); } else document.write('Loading the latest '+appInstanceName+' - AEP version from GitHub'); </script> ... please wait.</div>
 	<div style="position:absolute;right:5px;top:0;">
 		<button class="assist-btn" onclick="window.electronAPI.openDevTools()">Console</button>
-		<button class="assist-btn" onclick="window.electronAPI.openUpdate()">Update</button>
+		<button id="updateBtn" class="assist-btn" onclick="window.electronAPI.openUpdate()">Update</button>
 		<button class="assist-btn" onclick="window.location.reload()">Reload</button>
 	</div>	
 	
