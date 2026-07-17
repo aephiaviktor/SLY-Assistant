@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-122'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-123'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -5886,6 +5886,12 @@ function renderAssistStats() {
 					const persistedPlan = await loadUpgradeAutomationSchedulerPlan(globalSettings, now);
 					if (!persistedPlan) {
 						await logUpgradeAutomationSchedulerEvent('Fallback skipped - no persisted plan', { utc: now.toISOString() });
+					} else if (!isUpgradeAutomationSchedulerPlanWriteDue(persistedPlan, now)) {
+						await logUpgradeAutomationSchedulerEvent('Fallback skipped - plan not due', {
+							utc: now.toISOString(),
+							target: persistedPlan.targetFinishAtUtc || '',
+							writeAfterUtc: getUpgradeAutomationSchedulerWriteAfterUtc(persistedPlan)
+						});
 					} else {
 						const receipt = await loadUpgradeAutomationSchedulerReceipt(globalSettings, now);
 						const verification = await verifyUpgradeAutomationSchedulerPlanWritten(persistedPlan);
