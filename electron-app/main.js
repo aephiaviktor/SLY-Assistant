@@ -183,7 +183,12 @@ function readInstalledSLYAMeta()
 
 async function fetchText(sourceUrl)
 {
-	const response = await fetch(sourceUrl)
+	const freshUrl = new URL(sourceUrl)
+	freshUrl.searchParams.set('_slyaUpdateCheck', Date.now().toString())
+	const response = await fetch(freshUrl, {
+		cache: 'no-store',
+		headers: { 'Cache-Control': 'no-cache' }
+	})
 	if (!response.ok) throw new Error(`Failed to fetch update file (${response.status}) from ${sourceUrl}`)
 	return await response.text()
 }
@@ -725,14 +730,21 @@ else
 
   ipcMain.on('openDevTools', function() { win.openDevTools() })
   ipcMain.on('openUpdate', async function() {
+	win.webContents.send('update', '<div style="position:absolute;left:50%;margin-left:-230px;top:30vh;width:460px;text-align:center;background-color:white;padding:10px;color:black">UPDATE<br>Checking for the latest versions…<br><small>Please wait</small><br></div>');
 	let originalVersion = 'unknown'
 	let viktorVersion = 'unknown'
 	let currentVersion = version
 	let currentLabel = `SLYA v${version}`
-	let originalLatest = null
-	let viktorLatest = null
-	try { originalLatest = await fetchSLYA(ORIGINAL_UPDATE_URL); originalVersion = originalLatest.version } catch (error) { originalVersion = 'unavailable' }
-	try { viktorLatest = await fetchSLYA(AEP_UPDATE_URL); viktorVersion = viktorLatest.aephiaVersion !== 'unknown' ? viktorLatest.aephiaVersion : viktorLatest.version } catch (error) { viktorVersion = 'unavailable' }
+	const [originalResult, viktorResult] = await Promise.allSettled([
+		fetchSLYA(ORIGINAL_UPDATE_URL),
+		fetchSLYA(AEP_UPDATE_URL)
+	])
+	if (originalResult.status === 'fulfilled') originalVersion = originalResult.value.version
+	else originalVersion = 'unavailable'
+	if (viktorResult.status === 'fulfilled') {
+		const viktorLatest = viktorResult.value
+		viktorVersion = viktorLatest.aephiaVersion !== 'unknown' ? viktorLatest.aephiaVersion : viktorLatest.version
+	} else viktorVersion = 'unavailable'
 	try {
 		const currentFile = fs.readFileSync(path.join(APP_ROOT, 'app', 'SLY_Assistant.user.js')).toString()
 		const currentAephiaVersion = readUserscriptMeta(currentFile, 'aephia-version')
