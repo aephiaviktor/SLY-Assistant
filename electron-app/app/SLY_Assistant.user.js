@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-129
+// @aephia-version 0.7.35-130
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-129'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-130'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -7548,6 +7548,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						const signed = await window.electronAPI.signWithWalletSecret(Array.from(tx.message.serialize()));
 						if (!signed?.ok) throw new Error('Operating-system wallet signing failed: ' + String(signed?.error || 'unknown error'));
 						tx.addSignature(customKeypair.publicKey, new Uint8Array(signed.signature));
+						txSigned = [tx];
 					} else if(customKeypair) {
 						tx.sign([customKeypair]);
                         txSigned = [tx];
@@ -7564,6 +7565,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						const signed = await window.electronAPI.signWithWalletSecret(Array.from(tx.message.serialize()));
 						if (!signed?.ok) throw new Error('Operating-system wallet signing failed: ' + String(signed?.error || 'unknown error'));
 						tx.addSignature(customKeypair.publicKey, new Uint8Array(signed.signature));
+						txSigned = [tx];
 					} else if(customKeypair) {
 						tx.sign([customKeypair]);
                         txSigned = [tx];
@@ -11871,7 +11873,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		if (window.electronAPI?.getWalletSecretStatus) {
 			const secretStatus = await window.electronAPI.getWalletSecretStatus();
 			secretInput.value = '';
-			secretInput.placeholder = secretStatus?.configured ? 'Encrypted key configured — leave blank to keep' : 'Paste secret key to configure';
+			secretInput.placeholder = secretStatus?.configured ? 'Encrypted key configured - leave blank to keep' : 'Paste secret key to configure';
 			const statusEl = document.querySelector('#walletSecretStatus');
 			if (statusEl) statusEl.textContent = secretStatus?.configured ? 'Stored with operating-system encryption.' : 'No encrypted key configured.';
 		} else {

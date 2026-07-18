@@ -1,6 +1,7 @@
 <!doctype html>
 <html>
  <head>
+    <meta charset="UTF-8">
     <title>SLYA</title>
     <link rel="stylesheet" href="roboto.css">
     <style>
@@ -30,20 +31,22 @@ window.GM_info = { script: { version: version } };
 		<button class="assist-btn" onclick="window.location.reload()">Reload</button>
 	</div>	
 	
+<div id="wallet-key-warning" style="display:none;position:absolute;top:36vh;left:0px;text-align:center;width:100%;z-index:-1;font-size:90%;color:#ffb;"></div>
 <script>
-     
-if(version)
-{
-	let rawSettingsData = localStorage.getItem('globalSettings');
-	if(!rawSettingsData) rawSettingsData = '{}';
-	const globalSettings = JSON.parse(rawSettingsData);
-
-	if(!globalSettings.mySecretKey)
-	{
-		document.write('<div style="position:absolute;top:36vh;left:0px;text-align:center;width:100%;z-index:-1;font-size:90%;color:#ffb;">This SLYA standalone version needs your wallet key to sign transactions.<br>Click on "Tools->Settings->Advanced->My Secret Key" and follow the instructions.<br>After you have saved the key, use the top-right "Reload" button.</div>');
-	}
-}
-
+	(async () => {
+		if(!version || !window.electronAPI?.getWalletSecretStatus) return;
+		const warning = document.getElementById('wallet-key-warning');
+		try {
+			const status = await window.electronAPI.getWalletSecretStatus();
+			if(status?.configured && !status?.error) return;
+			if(status?.error) warning.textContent = 'The encrypted wallet key could not be loaded: ' + String(status.error);
+			else warning.innerHTML = 'This SLYA standalone version needs your wallet key to sign transactions.<br>Open Tools &gt; Settings &gt; Advanced &gt; My Secret Key and follow the instructions.<br>After saving the key, use the top-right Reload button.';
+			warning.style.display = 'block';
+		} catch(error) {
+			warning.textContent = 'Could not check the encrypted wallet key: ' + String(error?.message || error);
+			warning.style.display = 'block';
+		}
+	})();
 </script>
 <script src="GM.js" type="text/javascript"></script>
 <script src="index.iife.min.js" type="text/javascript"></script>
