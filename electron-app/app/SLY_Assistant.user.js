@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-141
+// @aephia-version 0.7.35-142
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-141'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-142'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2847,45 +2847,51 @@
 			actualDestNames.add(String(best.dst.displayName || best.dst.name || ''));
 			targetAddedIdleCrew += 1;
 		}
+		const getTargetTransferAmount = (src, dst) => {
+			const srcCrew = Math.max(0, Math.floor(Number(src?.finalCrew || 0)));
+			const dstCrew = Math.max(0, Math.floor(Number(dst?.finalCrew || 0)));
+			if (srcCrew <= 0) return 0;
+			// Starting a stopped job is atomic: 0 -> minimum crew. If that transfer
+			// would strand the donor at 1..9, stop the donor completely instead.
+			let transferAmount = dstCrew === 0 ? UPGRADE_AUTOMATION_MIN_JOB_CREW : 1;
+			if (transferAmount > srcCrew) return 0;
+			const remainingSourceCrew = srcCrew - transferAmount;
+			if (remainingSourceCrew > 0 && remainingSourceCrew < UPGRADE_AUTOMATION_MIN_JOB_CREW) transferAmount = srcCrew;
+			return transferAmount;
+		};
 		const guardLimit = Math.max(1000, rows.length * Math.max(1, rows.reduce((sum, row) => sum + Math.max(0, Number(row.finalCrew || 0)), 0)) * 6);
 		for (let guard = 0; guard < guardLimit; guard++) {
 			const currentLp = currentTotal();
 			const distanceNow = Math.abs(targetFinalLp - currentLp);
 			if (distanceNow <= 0) break;
-			const legalDonors = [];
-			for (const src of sourcePool) {
-				if (Number(src.finalCrew || 0) >= 1) {
-					const srcPreview = simulateRow(src, Math.max(0, Number(src.finalCrew || 0) - 1));
-					if (srcPreview.legal) {
-						actualSourceNames.add(String(src.displayName || src.name || ''));
-						legalDonors.push({
-							src,
-							srcSim: srcPreview,
-							currentBuffer: Number.isFinite(Number(src.finalBufferDays)) ? Number(src.finalBufferDays) : Number.POSITIVE_INFINITY
-						});
-					}
-				}
-			}
+			const legalDonors = sourcePool
+				.filter(src => Number(src.finalCrew || 0) >= 1)
+				.map(src => ({
+					src,
+					currentBuffer: Number.isFinite(Number(src.finalBufferDays)) ? Number(src.finalBufferDays) : Number.POSITIVE_INFINITY
+				}));
 			if (!legalDonors.length) break;
 			legalDonors.sort((a, b) => {
 				if (a.currentBuffer !== b.currentBuffer) return a.currentBuffer - b.currentBuffer;
-				const aLps = Number(a.srcSim.effectiveLpPerSecond || 0);
-				const bLps = Number(b.srcSim.effectiveLpPerSecond || 0);
+				const aLps = Number(a.src.lpPerSecond || 0);
+				const bLps = Number(b.src.lpPerSecond || 0);
 				if (aLps !== bLps) return direction === 'aggressive' ? (aLps - bLps) : (bLps - aLps);
 				return String(a.src.displayName || a.src.name || '').localeCompare(String(b.src.displayName || b.src.name || ''));
 			});
 			let best = null;
 			for (const donor of legalDonors) {
 				const src = donor.src;
-				const srcSim = donor.srcSim;
 				const srcCurrentLp = (Number(src.neutralUpgradingHour || 0) * remainingNeutralHours + Number(src.finalUpgradingHour || 0) * remainingTargetHours) * Number(src.lpPerUnit || 0);
 				const donorCandidates = [];
 				for (const dst of destPool) {
 					if (dst === src) continue;
-					const dstCurrentLp = (Number(dst.neutralUpgradingHour || 0) * remainingNeutralHours + Number(dst.finalUpgradingHour || 0) * remainingTargetHours) * Number(dst.lpPerUnit || 0);
-					const dstSim = simulateRow(dst, Number(dst.finalCrew || 0) + 1);
-					if (!dstSim.legal) continue;
+					const transferAmount = getTargetTransferAmount(src, dst);
+					if (transferAmount <= 0) continue;
+					const srcSim = simulateRow(src, Number(src.finalCrew || 0) - transferAmount);
+					const dstSim = simulateRow(dst, Number(dst.finalCrew || 0) + transferAmount);
+					if (!srcSim.legal || !dstSim.legal) continue;
 					if (!pairDirectionAllowed(srcSim, dstSim)) continue;
+					const dstCurrentLp = (Number(dst.neutralUpgradingHour || 0) * remainingNeutralHours + Number(dst.finalUpgradingHour || 0) * remainingTargetHours) * Number(dst.lpPerUnit || 0);
 					const totalAfter = currentLp - srcCurrentLp - dstCurrentLp + Number(srcSim.projectedTotalComponentLp || 0) + Number(dstSim.projectedTotalComponentLp || 0);
 					const distanceAfter = Math.abs(targetFinalLp - totalAfter);
 					if (distanceAfter >= distanceNow) continue;
@@ -2895,6 +2901,7 @@
 						dst,
 						srcSim,
 						dstSim,
+						transferAmount,
 						totalAfter,
 						distanceAfter,
 						lpDelta: totalAfter - currentLp
@@ -2922,8 +2929,10 @@
 				row.actualOptimizerSource = actualSourceNames.has(String(row.displayName || row.name || ''));
 				row.actualOptimizerDestination = actualDestNames.has(String(row.displayName || row.name || ''));
 			}
-			best.src.finalCrew = Math.max(0, Number(best.src.finalCrew || 0) - 1);
-			best.dst.finalCrew = Math.max(0, Number(best.dst.finalCrew || 0) + 1);
+			actualSourceNames.add(String(best.src.displayName || best.src.name || ''));
+			actualDestNames.add(String(best.dst.displayName || best.dst.name || ''));
+			best.src.finalCrew = Math.max(0, Number(best.src.finalCrew || 0) - Number(best.transferAmount || 0));
+			best.dst.finalCrew = Math.max(0, Number(best.dst.finalCrew || 0) + Number(best.transferAmount || 0));
 			syncProjectedFields(best.src);
 			syncProjectedFields(best.dst);
 		}
