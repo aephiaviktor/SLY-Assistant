@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-138
+// @aephia-version 0.7.35-139
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-138'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-139'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2500,8 +2500,9 @@
 		};
 	}
 
-	function computeUpgradeAutomationNeutralPlan(crewTotal, installedTodayByComponent = {}, now = new Date(), specialRiskControl = null) {
+	function computeUpgradeAutomationNeutralPlan(crewTotal, installedTodayByComponent = {}, now = new Date(), specialRiskControl = null, options = {}) {
 		const totalCrew = Math.max(0, Math.floor(Number(crewTotal || 0)));
+		const blockSpecialNeutral = options.blockSpecialNeutral !== false;
 		const minCrewThreshold = totalCrew * 0.01;
 		const planning = getUpgradeAutomationPlanningHorizon(now);
 		const remainingHours = planning.planningHours;
@@ -2531,7 +2532,7 @@
 			const specialRiskMultiplier = specialRiskControlled ? Math.max(0, Number(riskControl.multiplier || 0)) : 1;
 			const specialMaxCrew = specialRiskControlled ? Math.min(totalCrew, Math.max(0, Math.floor(totalCrew * specialRiskMultiplier))) : Number.POSITIVE_INFINITY;
 			const specialRiskBlocked = specialRiskControlled && specialMaxCrew <= 0;
-			const neutralPhaseBlocked = isUpgradeAutomationNeutralSpecialBlockedComponent(canonicalName);
+			const neutralPhaseBlocked = blockSpecialNeutral && isUpgradeAutomationNeutralSpecialBlockedComponent(canonicalName);
 			rows.push({
 				key: canonicalName,
 				name: canonicalName,
@@ -2683,7 +2684,12 @@
 		const currentUtcHour = now.getUTCHours();
 		const remainingNeutralHours = Math.max(0, Math.min(remainingHours, aggrStartHour - currentUtcHour));
 		const remainingTargetHours = remainingHours - remainingNeutralHours;
-		const targetFinalLp = Math.max(0, rows.reduce((sum, row) => sum + (Number(row.neutralUpgradingHour || 0) * remainingNeutralHours + Number(row.neutralUpgradingHour || 0) * Number(aggressiveness || 0) * remainingTargetHours) * Number(row.lpPerUnit || 0), 0));
+		// A full dynamic-risk block intentionally keeps the executable (special-free)
+		// allocation for target phase. Otherwise use the unrestricted baseline.
+		const useExecutableTargetBaseline = rows.some(row => row.targetPhaseBlocked);
+		const targetBaselineCrewFor = row => useExecutableTargetBaseline ? Number(row.crew || 0) : Number(row.targetBaselineCrew ?? row.crew ?? 0);
+		const targetBaselineHourlyFor = row => useExecutableTargetBaseline ? Number(row.neutralUpgradingHour || 0) : Number(row.targetBaselineUpgradingHour ?? row.neutralUpgradingHour ?? 0);
+		const targetFinalLp = Math.max(0, rows.reduce((sum, row) => sum + (Number(row.neutralUpgradingHour || 0) * remainingNeutralHours + targetBaselineHourlyFor(row) * Number(aggressiveness || 0) * remainingTargetHours) * Number(row.lpPerUnit || 0), 0));
 		const direction = aggressiveness > 1 ? 'aggressive' : (aggressiveness < 1 ? 'suppressive' : 'neutral');
 		const syncProjectedFields = row => {
 			const projected = projectUpgradeAutomationFinalRow(row, row.finalCrew, remainingHours);
@@ -2694,7 +2700,7 @@
 		};
 		const bufferSortable = value => Number.isFinite(Number(value)) ? Number(value) : Number.POSITIVE_INFINITY;
 		for (const row of rows) {
-			row.finalCrew = Math.max(0, Math.floor(Number(row.crew || 0)));
+			row.finalCrew = Math.max(0, Math.floor(targetBaselineCrewFor(row)));
 			syncProjectedFields(row);
 		}
 		const currentTotal = () => rows.reduce((sum, row) => sum + (Number(row.neutralUpgradingHour || 0) * remainingNeutralHours + Number(row.finalUpgradingHour || 0) * remainingTargetHours) * Number(row.lpPerUnit || 0), 0);
@@ -3152,7 +3158,26 @@
 		const effectiveCrewTotal = (!globalSettings?.upgradeAutomationPhantomCrewUnlimited && globalSettings?.upgradeAutomationMaxPhantomCrew != null && Number(globalSettings.upgradeAutomationMaxPhantomCrew) > 0)
 			? Math.min(crewTotal, Number(globalSettings.upgradeAutomationMaxPhantomCrew))
 			: crewTotal;
+		// Preserve an unrestricted all-component neutral allocation as the target-phase
+		// baseline. The executable neutral plan still blocks FSTAB/SDU and redistributes
+		// their crew, but target optimization must not start those components from zero.
+		const targetBaselineRows = computeUpgradeAutomationNeutralPlan(
+			effectiveCrewTotal,
+			installedTodayByComponent,
+			now,
+			{ enabled: false, multiplier: 1, reason: 'target_baseline' },
+			{ blockSpecialNeutral: false }
+		);
+		const targetBaselineByName = new Map(targetBaselineRows.map(row => [row.name, row]));
 		const neutralComponentPlan = computeUpgradeAutomationNeutralPlan(effectiveCrewTotal, installedTodayByComponent, now, specialRiskControl);
+		for (const row of neutralComponentPlan) {
+			const baseline = targetBaselineByName.get(row.name);
+			row.targetBaselineCrew = Math.max(0, Math.floor(Number(baseline?.crew || 0)));
+			row.targetBaselineUpgradingHour = Math.max(0, Math.floor(Number(baseline?.neutralUpgradingHour || 0)));
+			row.targetBaselineUpgradingDay = Math.max(0, Math.floor(Number(baseline?.neutralUpgradingDay || 0)));
+			row.targetBaselineLpTarget = Math.max(0, Math.floor(Number(baseline?.neutralLpTarget || 0)));
+			row.targetBaselineBufferDays = baseline?.neutralBufferDays ?? null;
+		}
 		const finalPlan = computeUpgradeAutomationFinalPlan(neutralComponentPlan, ag.aggr, now);
 		const requestedNeutralPhaseMode = !!globalSettings?.upgradeAutomationNeutralBlockSingleTx;
 		const neutralPhaseSnapshotKey = getUpgradeAutomationNeutralPhaseSnapshotKey(globalSettings, now);
