@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-128
+// @aephia-version 0.7.35-129
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-128'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-129'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -13301,6 +13301,31 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			return { score, matches };
 		}
 
+		function hasLoadedTransportCargoForManifest(manifest, cargoAmounts) {
+			const keepAmount = globalSettings.transportKeep1 ? 1 : 0;
+			return (manifest || []).some(entry => {
+				if(!entry || !entry.res || !(Number(entry.amt || 0) > 0)) return false;
+				return Number(cargoAmounts[entry.res] || 0) > keepAmount;
+			});
+		}
+
+		async function resumeLoadedTransportDeparture(i, fleetState, fleetCoords, sourceCoord, destCoord, destinationManifest, moveType, routeIndex = null, logPrefix = 'Transporting', persistedMoveTarget = '') {
+			if(fleetState !== 'Idle' || !CoordsEqual(fleetCoords, ConvertCoords(sourceCoord))) return false;
+			const savedTarget = String(userFleets[i].moveTarget || persistedMoveTarget || '').trim();
+			if(savedTarget) return false;
+			const cargoAmounts = await getTransportRecoveryCargoAmounts(userFleets[i]);
+			if(!hasLoadedTransportCargoForManifest(destinationManifest, cargoAmounts)) return false;
+
+			const recovery = {
+				recovered: true,
+				reason: 'loaded_cargo_at_source_after_restart',
+				leg: { sourceCoord, destCoord, destinationManifest, moveType, routeIndex }
+			};
+			cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${logPrefix} - cargo for ${destCoord} is already onboard; skipping reload`);
+			await recoverTransportMovement(i, fleetCoords, recovery, logPrefix);
+			return true;
+		}
+
 		async function inferTransportRecoveryLeg(fleet, candidates, preferredRouteIndex = null) {
 			const cargoAmounts = await getTransportRecoveryCargoAmounts(fleet);
 			const scoredCandidates = (candidates || []).map(candidate => {
@@ -13497,6 +13522,14 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
         ];
         const hasTargetManifest = hasTransportManifest(targetCargoManifest);
         const hasStarbaseManifest = hasTransportManifest(starbaseCargoManifest);
+
+		// After an app reload/update, moveTarget is not guaranteed to survive in
+		// memory. If the fleet is still idle at a route source but already carries
+		// meaningful cargo for the departing leg, loading has already completed.
+		// Resume movement instead of trying to top up the manifest and ending in
+		// "No cargo loaded" when the starbase has nothing further to transfer.
+		if(await resumeLoadedTransportDeparture(i, fleetState, fleetCoords, userFleets[i].starbaseCoord, userFleets[i].destCoord, targetCargoManifest, userFleets[i].moveType, null, 'Transporting', fleetParsedData.moveTarget)) return;
+		if(await resumeLoadedTransportDeparture(i, fleetState, fleetCoords, userFleets[i].destCoord, userFleets[i].starbaseCoord, starbaseCargoManifest, userFleets[i].moveType, null, 'Transporting', fleetParsedData.moveTarget)) return;
 
         //let moveDist = calculateMovementDistance([starbaseX,starbaseY], [destX,destY]);
         if (fleetState === 'Idle') {
