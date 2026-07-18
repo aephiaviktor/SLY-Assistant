@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-140
+// @aephia-version 0.7.35-141
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-140'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-141'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2805,62 +2805,13 @@
 				}
 			}
 		}
+		// Risk control is a legality/cap layer, not a second directional optimizer.
+		// FSTAB/SDU participate in the ordinary source/destination pools whenever
+		// they are below the cap; no separate pass may force crew into them.
 		let specialPriorityTargetCrew = 0;
-		let specialPriorityActualCrew = 0;
+		let specialPriorityActualCrew = rows.filter(row => row.specialRiskControlled).reduce((sum, row) => sum + Math.max(0, Math.floor(Number(row.finalCrew || 0))), 0);
 		let specialPriorityTransfers = 0;
 		let targetAddedIdleCrew = 0;
-		const specialPriorityRows = rows.filter(row => row.specialRiskControlled && !row.specialRiskBlocked && row.phantomUpgradeEligible);
-		if (direction === 'aggressive' && specialPriorityRows.length) {
-			const totalPlannedCrew = rows.reduce((sum, row) => sum + Math.max(0, Math.floor(Number(row.finalCrew || 0))), 0);
-			const specialRiskMultiplier = Math.max(0, ...specialPriorityRows.map(row => Number(row.specialRiskMultiplier || 0)));
-			specialPriorityTargetCrew = Math.min(totalPlannedCrew, Math.floor(totalPlannedCrew * specialRiskMultiplier));
-			const specialCrewTotal = () => specialPriorityRows.reduce((sum, row) => sum + Math.max(0, Math.floor(Number(row.finalCrew || 0))), 0);
-			const specialGuardLimit = Math.max(100, totalPlannedCrew * Math.max(1, specialPriorityRows.length) * 2);
-			for (let guard = 0; guard < specialGuardLimit; guard++) {
-				const currentSpecialCrew = specialCrewTotal();
-				if (currentSpecialCrew >= specialPriorityTargetCrew) break;
-				const currentLp = currentTotal();
-				const distanceNow = Math.abs(targetFinalLp - currentLp);
-				const candidates = [];
-				for (const src of sourcePool) {
-					if (!src || src.specialRiskControlled || Number(src.finalCrew || 0) < 1) continue;
-					const srcSim = simulateRow(src, Math.max(0, Number(src.finalCrew || 0) - 1));
-					if (!srcSim.legal) continue;
-					const srcCurrentLp = (Number(src.neutralUpgradingHour || 0) * remainingNeutralHours + Number(src.finalUpgradingHour || 0) * remainingTargetHours) * Number(src.lpPerUnit || 0);
-					for (const dst of specialPriorityRows) {
-						if (dst === src) continue;
-						const dstSim = simulateRow(dst, Number(dst.finalCrew || 0) + 1);
-						if (!dstSim.legal) continue;
-						if (!pairDirectionAllowed(srcSim, dstSim)) continue;
-						const dstCurrentLp = (Number(dst.neutralUpgradingHour || 0) * remainingNeutralHours + Number(dst.finalUpgradingHour || 0) * remainingTargetHours) * Number(dst.lpPerUnit || 0);
-						const totalAfter = currentLp - srcCurrentLp - dstCurrentLp + Number(srcSim.projectedTotalComponentLp || 0) + Number(dstSim.projectedTotalComponentLp || 0);
-						const distanceAfter = Math.abs(targetFinalLp - totalAfter);
-						if (distanceAfter >= distanceNow) continue;
-						candidates.push({ src, dst, srcSim, dstSim, distanceAfter, totalAfter });
-					}
-				}
-				if (!candidates.length) break;
-				candidates.sort((a, b) => {
-					if (a.distanceAfter !== b.distanceAfter) return a.distanceAfter - b.distanceAfter;
-					const aDstLps = Number(a.dstSim.effectiveLpPerSecond || 0);
-					const bDstLps = Number(b.dstSim.effectiveLpPerSecond || 0);
-					if (aDstLps !== bDstLps) return bDstLps - aDstLps;
-					const aSrcLps = Number(a.srcSim.effectiveLpPerSecond || 0);
-					const bSrcLps = Number(b.srcSim.effectiveLpPerSecond || 0);
-					if (aSrcLps !== bSrcLps) return aSrcLps - bSrcLps;
-					return String(a.dst.displayName || a.dst.name || '').localeCompare(String(b.dst.displayName || b.dst.name || ''));
-				});
-				const best = candidates[0];
-				best.src.finalCrew = Math.max(0, Number(best.src.finalCrew || 0) - 1);
-				best.dst.finalCrew = Math.max(0, Number(best.dst.finalCrew || 0) + 1);
-				syncProjectedFields(best.src);
-				syncProjectedFields(best.dst);
-				actualSourceNames.add(String(best.src.displayName || best.src.name || ''));
-				actualDestNames.add(String(best.dst.displayName || best.dst.name || ''));
-				specialPriorityTransfers++;
-			}
-			specialPriorityActualCrew = specialCrewTotal();
-		}
 		const neutralUnusedCrew = Math.max(0, Math.floor(Number(rows.reduce((max, row) => Math.max(max, Number(row.neutralUnusedCrew || 0)), 0))));
 		for (let added = 0; added < neutralUnusedCrew; added++) {
 			const currentLp = currentTotal();
@@ -2978,8 +2929,11 @@
 		}
 		for (const row of rows) syncProjectedFields(row);
 		for (const row of rows) {
-			row.actualOptimizerSource = actualSourceNames.has(String(row.displayName || row.name || ''));
-			row.actualOptimizerDestination = actualDestNames.has(String(row.displayName || row.name || ''));
+			const optimizerKey = String(row.displayName || row.name || '');
+			row.optimizerSource = sourceNames.has(optimizerKey);
+			row.optimizerDestination = destNames.has(optimizerKey);
+			row.actualOptimizerSource = actualSourceNames.has(optimizerKey);
+			row.actualOptimizerDestination = actualDestNames.has(optimizerKey);
 		}
 		return {
 			rows,
@@ -3158,14 +3112,14 @@
 		const effectiveCrewTotal = (!globalSettings?.upgradeAutomationPhantomCrewUnlimited && globalSettings?.upgradeAutomationMaxPhantomCrew != null && Number(globalSettings.upgradeAutomationMaxPhantomCrew) > 0)
 			? Math.min(crewTotal, Number(globalSettings.upgradeAutomationMaxPhantomCrew))
 			: crewTotal;
-		// Preserve an unrestricted all-component neutral allocation as the target-phase
+		// Preserve an all-component, risk-feasible neutral allocation as the target-phase
 		// baseline. The executable neutral plan still blocks FSTAB/SDU and redistributes
-		// their crew, but target optimization must not start those components from zero.
+		// their crew; target optimization starts from their capped fair share, not zero.
 		const targetBaselineRows = computeUpgradeAutomationNeutralPlan(
 			effectiveCrewTotal,
 			installedTodayByComponent,
 			now,
-			{ enabled: false, multiplier: 1, reason: 'target_baseline' },
+			specialRiskControl,
 			{ blockSpecialNeutral: false }
 		);
 		const targetBaselineByName = new Map(targetBaselineRows.map(row => [row.name, row]));
@@ -5629,7 +5583,7 @@
 					const finalBufferWarning = row.phantomUpgradeEligible && row.finalBufferDays != null && Number.isFinite(Number(row.finalBufferDays)) && Number(row.finalBufferDays) < 5;
 					const neutralBufferStyle = neutralBufferWarning ? (neutralHighlightStyle ? neutralHighlightStyle.replace(/"$/, '; color:#ffb366"') : ' style="color:#ffb366"') : neutralHighlightStyle;
 					const finalBufferStyle = finalBufferWarning ? (finalHighlightStyle ? finalHighlightStyle.replace(/"$/, '; color:#ffb366"') : ' style="color:#ffb366"') : finalHighlightStyle;
-					const actualSideStyle = row.actualOptimizerSource ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.actualOptimizerDestination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
+					const actualSideStyle = row.optimizerSource ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.optimizerDestination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
 					const riskLabel = row.specialRiskControlled ? (' (risk ' + Math.round(Number(row.specialRiskMultiplier || 0) * 100) + '%)') : '';
 					const neutralBlockedLabel = row.neutralPhaseBlocked && !row.specialRiskBlocked && highlightNeutral ? ' (neutral blocked)' : '';
 					const optimizerDisplayName = row.phantomBlocked ? '<span style="color:#ff8080">' + row.displayName + ' (blocked)</span>' : (row.specialRiskBlocked ? row.displayName + ' (risk blocked)' : row.displayName + neutralBlockedLabel + riskLabel);
