@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-132
+// @aephia-version 0.7.35-133
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-132'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-133'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -13335,13 +13335,13 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		function scoreTransportRecoveryManifest(manifest, cargoAmounts) {
 			let score = 0;
 			const matches = [];
+			const keepAmount = globalSettings.transportKeep1 ? 1 : 0;
 			for(const entry of manifest || []) {
 				if(!entry || !entry.res || !(Number(entry.amt || 0) > 0)) continue;
 				const rawAmount = Number(cargoAmounts[entry.res] || 0);
-				// Recovery uses cargo only as a direction signal after reload/update.
-				// Do not subtract transportKeep1 here; a fleet carrying exactly 1
-				// configured resource still tells us which leg it is on.
-				const effectiveAmount = Math.max(0, rawAmount);
+				// A configured keep-one residue is not carried route cargo and must not
+				// make both transport directions appear to match after a reload/update.
+				const effectiveAmount = Math.max(0, rawAmount - keepAmount);
 				if(effectiveAmount <= 0) continue;
 				const cargoSize = Number((cargoItems.find(r => r.token == entry.res) || {}).size || 1);
 				const matchedAmount = Math.min(effectiveAmount, Number(entry.amt || 0));
@@ -13913,8 +13913,13 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
             if(userFleets[i].stopping) return;
 
-			const savedMoveTarget = typeof fleetParsedData.moveTarget === 'string' ? fleetParsedData.moveTarget : '';
-			const activeMoveTarget = userFleets[i].moveTarget && userFleets[i].moveTarget !== '' ? userFleets[i].moveTarget : savedMoveTarget;
+			const savedMoveTarget = typeof fleetParsedData.moveTarget === 'string' ? fleetParsedData.moveTarget.trim() : '';
+			const currentMoveTarget = typeof userFleets[i].moveTarget === 'string' ? userFleets[i].moveTarget.trim() : '';
+			// Persisted route state is the strongest recovery signal. Prefer it over
+			// cargo inference (and over a stale in-memory target) when it is valid.
+			const activeMoveTarget = CoordsValid(ConvertCoords(savedMoveTarget))
+				? savedMoveTarget
+				: (CoordsValid(ConvertCoords(currentMoveTarget)) ? currentMoveTarget : '');
 	            if (activeMoveTarget !== '') {
 				userFleets[i].moveTarget = activeMoveTarget;
 	                const targetX = activeMoveTarget.split(',').length > 1 ? activeMoveTarget.split(',')[0].trim() : '';
@@ -14781,6 +14786,13 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 	async function operateFleet(i) {
         if (globalErrorTracker.errorCount > 9) toggleAssistant('ERROR');
+
+		const transportRouteRecoveryError = userFleets[i].state === 'ERROR: Fleet must start at Target or Starbase';
+		if(transportRouteRecoveryError) {
+			// This error can become recoverable once persisted route state is loaded.
+			// Clear only this exact route error; transaction/fuel errors stay locked.
+			updateFleetState(userFleets[i], 'Starting', true);
+		}
 
 		const transportUnloadRetry = getTransportUnloadRetry(userFleets[i]);
 		if(transportUnloadRetry) {
