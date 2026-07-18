@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-139
+// @aephia-version 0.7.35-140
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-139'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-140'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -13435,12 +13435,25 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			});
 		}
 
-		async function resumeLoadedTransportDeparture(i, fleetState, fleetCoords, sourceCoord, destCoord, destinationManifest, moveType, roundTrip, routeIndex = null, logPrefix = 'Transporting', persistedMoveTarget = '') {
+		async function resumeLoadedTransportDeparture(i, fleetState, fleetCoords, sourceCoord, destCoord, destinationManifest, arrivalManifest, moveType, roundTrip, routeIndex = null, logPrefix = 'Transporting', persistedMoveTarget = '') {
 			if(fleetState !== 'Idle' || !CoordsEqual(fleetCoords, ConvertCoords(sourceCoord))) return false;
 			const savedTarget = String(userFleets[i].moveTarget || persistedMoveTarget || '').trim();
 			if(savedTarget) return false;
 			const cargoAmounts = await getTransportRecoveryCargoAmounts(userFleets[i]);
 			if(!hasLoadedTransportCargoForManifest(destinationManifest, cargoAmounts)) return false;
+
+			// Recovery may only skip a stop that has nothing left to unload. Cargo for
+			// the next leg (especially retained ammo-bank ammunition) is not proof that
+			// the arriving leg was already processed. Otherwise a fleet can shuttle
+			// forever while carrying passenger crew or inbound cargo through each stop.
+			const arrivalCrew = Math.max(0, Math.floor(Number(arrivalManifest?.[0]?.crew || 0)));
+			const passengerCrew = Math.max(0, Math.floor(Number(userFleets[i].crewCount || 0) - Number(userFleets[i].requiredCrew || 0)));
+			const pendingCrewUnload = arrivalCrew > 0 && passengerCrew > 0;
+			const pendingCargoUnload = hasLoadedTransportCargoForManifest(arrivalManifest, cargoAmounts);
+			if(pendingCrewUnload || pendingCargoUnload) {
+				cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${logPrefix} - recovery departure blocked: arriving leg still has ${pendingCrewUnload ? passengerCrew + ' crew' : 'cargo'} to unload`);
+				return false;
+			}
 
 			// Loaded cargo proves which leg was prepared, but it does not prove the
 			// propulsion tank was filled before the reload/update. Only bypass the
@@ -13669,8 +13682,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		// meaningful cargo for the departing leg, loading has already completed.
 		// Resume movement instead of trying to top up the manifest and ending in
 		// "No cargo loaded" when the starbase has nothing further to transfer.
-		if(await resumeLoadedTransportDeparture(i, fleetState, fleetCoords, userFleets[i].starbaseCoord, userFleets[i].destCoord, targetCargoManifest, userFleets[i].moveType, true, null, 'Transporting', fleetParsedData.moveTarget)) return;
-		if(await resumeLoadedTransportDeparture(i, fleetState, fleetCoords, userFleets[i].destCoord, userFleets[i].starbaseCoord, starbaseCargoManifest, userFleets[i].moveType, false, null, 'Transporting', fleetParsedData.moveTarget)) return;
+		if(await resumeLoadedTransportDeparture(i, fleetState, fleetCoords, userFleets[i].starbaseCoord, userFleets[i].destCoord, targetCargoManifest, starbaseCargoManifest, userFleets[i].moveType, true, null, 'Transporting', fleetParsedData.moveTarget)) return;
+		if(await resumeLoadedTransportDeparture(i, fleetState, fleetCoords, userFleets[i].destCoord, userFleets[i].starbaseCoord, starbaseCargoManifest, targetCargoManifest, userFleets[i].moveType, false, null, 'Transporting', fleetParsedData.moveTarget)) return;
 
         //let moveDist = calculateMovementDistance([starbaseX,starbaseY], [destX,destY]);
         if (fleetState === 'Idle') {
