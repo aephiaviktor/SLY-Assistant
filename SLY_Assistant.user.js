@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-136
+// @aephia-version 0.7.35-137
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-136'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-137'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -7496,6 +7496,13 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return '';
 	}
 
+	function shouldIsolateInstructionError(opName, ixErrorDetail = {}) {
+		const normalizedOp = String(opName || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+		const normalizedError = `${ixErrorDetail.status || ''} ${ixErrorDetail.detail || ''}`.toLowerCase();
+		return normalizedOp === 'registerstarbaseplayer'
+			&& (/\bfactionmismatch\b/.test(normalizedError) || /\b6037\b/.test(normalizedError));
+	}
+
 	function describeInstructionError(confirmation, txResult, sentInstructions, opName) {
 		const instructionError = getTransactionInstructionError(confirmation, txResult);
 		const logMessages = txResult?.meta?.logMessages || [];
@@ -7688,15 +7695,18 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                         cLog(1,`${FleetTimeStamp(fleetName)} <${opName}> recoverable ix error: ${ixErrorDetail.detail}`);
                         txResult.slyaWarpCooldownRetryAt = await handleRecoverableWarpCooldownError(fleet);
                     } else {
-                        if (globalErrorTracker.firstErrorTime === 0) globalErrorTracker.firstErrorTime = Date.now();
-                        if (Date.now() < globalErrorTracker.firstErrorTime + 600000) {
-                            globalErrorTracker.errorCount++
-                        } else {
-                            globalErrorTracker.firstErrorTime = Date.now();
-                            globalErrorTracker.errorCount = 1;
+                        const isolatedInstructionError = shouldIsolateInstructionError(opName, ixErrorDetail);
+                        if (!isolatedInstructionError) {
+                            if (globalErrorTracker.firstErrorTime === 0) globalErrorTracker.firstErrorTime = Date.now();
+                            if (Date.now() < globalErrorTracker.firstErrorTime + 600000) {
+                                globalErrorTracker.errorCount++
+                            } else {
+                                globalErrorTracker.firstErrorTime = Date.now();
+                                globalErrorTracker.errorCount = 1;
+                            }
                         }
                         updateFleetState(fleet, ixErrorDetail.status);
-                        cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> ERROR ❌ ${ixErrorDetail.detail}`);
+                        cLog(isolatedInstructionError ? 1 : 2,`${FleetTimeStamp(fleetName)} <${opName}> ERROR ❌ ${ixErrorDetail.detail}${isolatedInstructionError ? ' (isolated from global error cutoff)' : ''}`);
                         let ixError = txResult && txResult.meta && txResult.meta.logMessages ? txResult.meta.logMessages : 'Unknown';
                         console.log(FleetTimeStamp(fleetName), ' txResult.logMessages: ', ixError);
                         logError(`ix error: ${ixErrorDetail.detail}; tx: ${txHash || 'unknown'}; logs: ${ixError}`, fleetName);
