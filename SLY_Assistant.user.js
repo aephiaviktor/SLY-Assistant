@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-134
+// @aephia-version 0.7.35-135
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-134'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-135'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -1421,6 +1421,7 @@
 				coordinates: phantomCoords,
 				crew,
 				upgradingHour,
+				secondsPerUnit: Math.max(1, Number(row.secondsPerUnit || 1)),
 				slotOrderIndex: orderIndex
 			};
 			if (!fixedRowsByComponent.has(componentName)) {
@@ -1443,6 +1444,7 @@
 					coordinates: phantomCoords,
 					crew: 0,
 					upgradingHour: 0,
+					secondsPerUnit: 1,
 					slotOrderIndex: orderIndex
 				});
 			}
@@ -1840,7 +1842,7 @@
 			const craftLabel = String(row?.craftLabel || '');
 			if (!craftLabel) continue;
 			const slot = await getUpgradeAutomationCraftSlotState(craftLabel);
-			const expectedAmount = Math.max(0, Math.floor(Number(row.nextAmount || 0)));
+			const expectedAmount = 0;
 			const expectedCrew = Math.max(0, Math.floor(Number(row.nextCrew || 0)));
 			const actualAmount = Math.max(0, Math.floor(Number(slot?.amount || 0)));
 			const actualCrew = Math.max(0, Math.floor(Number(slot?.crew || 0)));
@@ -2309,7 +2311,8 @@
 		}
 	}
 
-	// Viktor: Scheduler write pass - reads pre-computed nextAmount/nextCrew from optimizer rows
+	// Scheduler write pass persists optimizer ownership: component + crew only.
+	// Upgrade amounts are calculated just-in-time immediately before Upgrade Starting.
 	// At xx:55: capture optimizer output -> stored in persisted pending plan
 	// At xx:56: refresh the pending plan
 	// At xx:57: write captured rows to config slots using the stored schedule
@@ -2323,50 +2326,55 @@
 		const planRowsArr = Array.isArray(planRows) ? planRows : [];
 		const scheduledCraftLabels = new Set();
 		const targetFinishAtUtc = String(schedule?.targetFinishAtUtc || '');
-		const writeSlotState = async (craftLabel, row, existing, amount, crew) => {
+		const writeSlotState = async (craftLabel, row, existing, crew) => {
 			const fixedCraftConfig = getUpgradeAutomationFixedCraftConfigForLabel(craftLabel, settings) || {};
 			await saveCraftConfig(craftLabel, {
 				...(existing || {}),
 				coordinates: String(row?.coordinates || fixedCraftConfig.coordinates || existing?.coordinates || ''),
 				item: String(row?.craftItem || fixedCraftConfig.item || existing?.item || ''),
-				amount,
+				amount: 0,
 				crew,
 				lpAutomationManaged: true,
 				lpAutomationUpdatedAt: now.toISOString(),
 				lpAutomationCycleStamp: cycleStamp,
-				lpAutomationPlannedAmount: amount,
-				lpAutomationPlannedRuntime: Math.max(0, Math.floor(Number(row?.nextRuntime || 0))),
+				lpAutomationSecondsPerUnit: Math.max(1, Number(row?.secondsPerUnit || 1)),
+				lpAutomationUpgradingHour: Math.max(0, Math.floor(Number(row?.finalUpgradingHour || row?.upgradingHour || 0))),
 				lpAutomationTargetFinishAtUtc: String(row?.nextXx59Utc || targetFinishAtUtc || ''),
-				lpAutomationAmountAdjustedAt: '',
-				lpAutomationAmountAdjustmentRatio: 1
-			}, 'lp-auto-slot-state-write');
+				lpAutomationPreviewAmount: Math.max(0, Math.floor(Number(row?.nextAmount || 0))),
+				lpAutomationPreviewRuntime: Math.max(0, Math.floor(Number(row?.nextRuntime || 0))),
+				lpAutomationAmountSetAt: '',
+				// Remove the superseded v131 baseline/scaling state.
+				lpAutomationPlannedAmount: undefined,
+				lpAutomationPlannedRuntime: undefined,
+				lpAutomationAmountAdjustedAt: undefined,
+				lpAutomationAmountAdjustmentRatio: undefined,
+				lpAutomationRemainingRuntime: undefined
+			}, 'lp-auto-slot-crew-write');
 		};
 
-		// Viktor: Write pre-computed nextAmount and nextCrew from optimizer output
+		// Write optimizer-selected crew. Amount remains zero until the slot is
+		// actually ready to start, so delayed completions cannot launch stale work.
 		for (const row of planRowsArr) {
 			const craftLabel = String(row.craftLabel || '');
 			if (!craftLabel) continue;
 			scheduledCraftLabels.add(craftLabel);
 			const existing = await getUpgradeAutomationCraftSlotState(craftLabel);
-			const amount = Math.max(0, Math.floor(Number(row.nextAmount || 0)));
 			const crew = Math.max(0, Math.floor(Number(row.nextCrew || 0)));
 			const writtenUph = Math.max(0, Math.floor(Number(row.finalUpgradingHour || row.upgradingHour || 0)));
-			const impliedDurationSec = writtenUph > 0 ? Math.floor((amount * 3600) / writtenUph) : 0;
-			row.writtenAmount = amount;
+			row.writtenAmount = 0;
 			row.writtenCrew = crew;
 			row.writtenUph = writtenUph;
 			row.writtenAtUtc = now.toISOString();
-			row.impliedDurationSec = impliedDurationSec;
-			await writeSlotState(craftLabel, row, existing, amount, crew);
+			await writeSlotState(craftLabel, row, existing, crew);
 			let readBack = await getUpgradeAutomationCraftSlotState(craftLabel);
-			const missingAmount = amount > 0 && Math.max(0, Math.floor(Number(readBack?.amount || 0))) <= 0;
+			const actualAmount = Math.max(0, Math.floor(Number(readBack?.amount || 0)));
 			const missingCrew = crew > 0 && Math.max(0, Math.floor(Number(readBack?.crew || 0))) <= 0;
-			if (missingAmount || missingCrew) {
-				console.log('[Scheduler][RetryWrite]', craftLabel, 'reason=', [missingAmount ? 'missing_amount' : '', missingCrew ? 'missing_crew' : ''].filter(Boolean).join('+'), 'expectedAmount=', amount, 'expectedCrew=', crew, 'actualAmount=', Math.floor(Number(readBack?.amount || 0)), 'actualCrew=', Math.floor(Number(readBack?.crew || 0)));
-				await writeSlotState(craftLabel, row, readBack || existing, amount, crew);
+			if (actualAmount !== 0 || missingCrew) {
+				console.log('[Scheduler][RetryWrite]', craftLabel, 'reason=', [actualAmount !== 0 ? 'stale_amount' : '', missingCrew ? 'missing_crew' : ''].filter(Boolean).join('+'), 'expectedAmount=0', 'expectedCrew=', crew, 'actualAmount=', actualAmount, 'actualCrew=', Math.floor(Number(readBack?.crew || 0)));
+				await writeSlotState(craftLabel, row, readBack || existing, crew);
 				readBack = await getUpgradeAutomationCraftSlotState(craftLabel);
 			}
-			console.log('[Scheduler] WROTE', craftLabel, 'amount=', amount, 'crew=', crew, 'uph=', writtenUph, 'runtime=', Number(row.nextRuntime || 0), 'impliedDurationSec=', impliedDurationSec, 'readBackAmount=', Math.floor(Number(readBack?.amount || 0)), 'readBackCrew=', Math.floor(Number(readBack?.crew || 0)));
+			console.log('[Scheduler] WROTE CREW', craftLabel, 'amount=0', 'crew=', crew, 'uph=', writtenUph, 'previewAmount=', Number(row.nextAmount || 0), 'previewRuntime=', Number(row.nextRuntime || 0), 'readBackAmount=', Math.floor(Number(readBack?.amount || 0)), 'readBackCrew=', Math.floor(Number(readBack?.crew || 0)));
 		}
 
 		// Viktor: Clear unscheduled slots - reassert fixed item/coordinates and zero amount/crew
@@ -2408,44 +2416,50 @@
 		return { wrote: true, reason: 'simple_timed_write', schedule, completion, reconciliation };
 	}
 
-	async function adjustUpgradeAutomationAmountAfterCompletion(userCraft, completedAt = new Date()) {
+	async function prepareUpgradeAutomationAmountForStart(userCraft, now = new Date()) {
 		const craftLabel = String(userCraft?.label || '');
-		if(!craftLabel) return { adjusted: false, reason: 'missing_craft_label' };
+		if(!craftLabel) return userCraft;
 		const slot = await getUpgradeAutomationCraftSlotState(craftLabel);
-		if(!slot?.lpAutomationManaged) return { adjusted: false, reason: 'not_lp_managed' };
+		if(!slot?.lpAutomationManaged || String(slot.state || '') !== 'Idle') return slot;
+		const crew = Math.max(0, Math.floor(Number(slot.crew || 0)));
+		if(crew <= 0 || !slot.item || !slot.coordinates) return slot;
 
-		const plannedAmount = Math.max(0, Math.floor(Number(slot.lpAutomationPlannedAmount || 0)));
-		const plannedRuntime = Math.max(0, Math.floor(Number(slot.lpAutomationPlannedRuntime || 0)));
-		const targetFinishMs = Date.parse(String(slot.lpAutomationTargetFinishAtUtc || ''));
-		if(plannedAmount <= 0 || plannedRuntime <= 0 || !Number.isFinite(targetFinishMs)) {
-			return { adjusted: false, reason: 'missing_plan_baseline' };
+		const recipe = upgradeRecipes.find(item => item.name === slot.item);
+		const secondsPerUnit = Math.max(1, Number(slot.lpAutomationSecondsPerUnit || recipe?.duration || 1));
+		let targetFinishMs = Date.parse(String(slot.lpAutomationTargetFinishAtUtc || ''));
+		const nowMs = now.getTime();
+		if(!Number.isFinite(targetFinishMs) || targetFinishMs <= nowMs + UPGRADE_AUTOMATION_LANDING_BUFFER_SECONDS * 1000) {
+			targetFinishMs = getUpgradeAutomationNextTargetWindow(now, globalSettings).targetFinishAt.getTime();
 		}
-
-		const completedMs = completedAt instanceof Date ? completedAt.getTime() : Date.parse(String(completedAt || ''));
-		if(!Number.isFinite(completedMs)) return { adjusted: false, reason: 'invalid_completion_time' };
-		const remainingRuntime = Math.max(0, Math.floor((targetFinishMs - completedMs - UPGRADE_AUTOMATION_LANDING_BUFFER_SECONDS * 1000) / 1000));
-		const ratio = Math.max(0, Math.min(1, remainingRuntime / plannedRuntime));
-		const adjustedAmount = Math.max(0, Math.floor(plannedAmount * ratio));
-
-		await saveCraftConfig(craftLabel, {
+		const runtime = Math.max(0, Math.floor((targetFinishMs - nowMs - UPGRADE_AUTOMATION_LANDING_BUFFER_SECONDS * 1000) / 1000));
+		const amount = Math.max(0, Math.floor((crew * runtime) / secondsPerUnit));
+		const prepared = {
 			...slot,
-			amount: adjustedAmount,
-			lpAutomationAmountAdjustedAt: new Date(completedMs).toISOString(),
-			lpAutomationAmountAdjustmentRatio: ratio,
-			lpAutomationRemainingRuntime: remainingRuntime
-		}, 'lp-auto-adjust-amount-after-completion');
-		await logUpgradeAutomationSchedulerEvent('Adjusted amount after upgrade completion', {
+			amount,
+			lpAutomationSecondsPerUnit: secondsPerUnit,
+			lpAutomationUpgradingHour: Math.max(0, Math.floor(crew * 3600 / secondsPerUnit)),
+			lpAutomationTargetFinishAtUtc: new Date(targetFinishMs).toISOString(),
+			lpAutomationLaunchRuntime: runtime,
+			lpAutomationAmountSetAt: now.toISOString()
+		};
+		await saveCraftConfig(craftLabel, prepared, 'lp-auto-jit-amount-before-start');
+		const readBack = await getUpgradeAutomationCraftSlotState(craftLabel);
+		const persistedAmount = Math.max(0, Math.floor(Number(readBack?.amount || 0)));
+		await logUpgradeAutomationSchedulerEvent('Prepared JIT upgrade amount', {
 			craftLabel,
-			plannedAmount,
-			adjustedAmount,
-			crew: Math.max(0, Math.floor(Number(slot.crew || 0))),
-			plannedRuntime,
-			remainingRuntime,
-			ratio,
-			targetFinishAtUtc: slot.lpAutomationTargetFinishAtUtc,
-			completedAtUtc: new Date(completedMs).toISOString()
+			crew,
+			secondsPerUnit,
+			runtime,
+			amount,
+			persistedAmount,
+			targetFinishAtUtc: prepared.lpAutomationTargetFinishAtUtc,
+			preparedAtUtc: now.toISOString()
 		});
-		return { adjusted: true, plannedAmount, adjustedAmount, plannedRuntime, remainingRuntime, ratio };
+		if(persistedAmount !== amount) {
+			await logUpgradeAutomationSchedulerEvent('JIT upgrade amount read-back mismatch', { craftLabel, amount, persistedAmount });
+			return { ...readBack, amount: 0 };
+		}
+		return readBack;
 	}
 
 	function getUpgradeAutomationPlanningHorizon(now = new Date()) {
@@ -15309,7 +15323,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
             }
 
             //if this job isn't active, we exit immediately and check every 10 seconds for an update, this saves at least 2 RPC requests. Also it prevents a error in getRecipe
-            if(userCraft.state === 'Idle' && (!userCraft.item || !userCraft.coordinates || !userCraft.amount)) {
+            if(userCraft.state === 'Idle' && (!userCraft.item || !userCraft.coordinates || (!userCraft.amount && !userCraft.lpAutomationManaged))) {
 		setTimeout(() => { startCraft(userCraft); }, 10000);
 		return;
             }
@@ -15467,7 +15481,6 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	                        await execCompleteUpgrade(starbase, starbasePlayer, starbasePlayerCargoHoldsAndTokens, upgradeProcess, userCraft, upgradeTelemetryJob);
 	                        if (!userCraft.state.includes('ERROR')) {
 	                            if (userCraft.craftingId && upgradeProcess.craftingId == userCraft.craftingId) {
-					await adjustUpgradeAutomationAmountAfterCompletion(userCraft, new Date());
 	                                userCraft.craftingId = 0;
 					userCraft.errorCount = 0;
 					userCraft.txCostSolStart = 0;
@@ -15491,6 +15504,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
             craftSavedData = await GM.getValue(userCraft.label, '{}');
             craftParsedData = JSON.parse(craftSavedData);
             userCraft = craftParsedData;
+
+	    // LP optimizer selects crew only. Calculate and persist the authoritative
+	    // amount at the last possible moment, after any prior upgrade completed.
+	    if(userCraft.state === 'Idle' && userCraft.lpAutomationManaged && userCraft.item && userCraft.coordinates && userCraft.crew > 0) {
+		userCraft = await prepareUpgradeAutomationAmountForStart(userCraft, new Date());
+	    }
 
 	    //only continue if the job is in a idle state and if we need something to craft, otherwise we save a cargo hold request
 	    if(userCraft.state === 'Idle' && userCraft.item && userCraft.coordinates && userCraft.amount > 0 && userCraft.crew > 0)
