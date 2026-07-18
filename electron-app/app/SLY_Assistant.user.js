@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-137
+// @aephia-version 0.7.35-138
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-137'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-138'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -3135,11 +3135,12 @@
 				if (userProfileAcct && starbase.publicKey) {
 					starbasePlayer = await getStarbasePlayer(userProfileAcct, starbase.publicKey);
 				}
-				if (!starbasePlayer && userProfileAcct) {
-					starbasePlayer = await execRegisterStarbasePlayer('Craft', factionCfg.phantomCrewCoords);
-				}
+				// Execution summaries are read-only. A missing StarbasePlayer means crew
+				// data is unavailable; never create an on-chain account from dry-run,
+				// influx, startup, catch-up, or panel-refresh summary collection.
 				starbasePlayer = starbasePlayer?.publicKey || starbasePlayer || null;
 				crewDebug += ' starbasePlayer=' + (!!starbasePlayer) + ' userProfileAcct=' + (!!userProfileAcct) + ' starbasePk=' + (starbase.publicKey ? starbase.publicKey.toString() : 'null');
+				if (!starbasePlayer) crewDebug += ' readOnlyMissingStarbasePlayer=true';
 				if (starbasePlayer) {
 					const starbasePlayerInfo = await sageProgram.account.starbasePlayer.fetch(starbasePlayer);
 					crewTotal = Number(starbasePlayerInfo?.totalCrew || 0);
