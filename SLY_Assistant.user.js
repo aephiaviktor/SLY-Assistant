@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-135
+// @aephia-version 0.7.35-136
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-135'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-136'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2419,8 +2419,34 @@
 	async function prepareUpgradeAutomationAmountForStart(userCraft, now = new Date()) {
 		const craftLabel = String(userCraft?.label || '');
 		if(!craftLabel) return userCraft;
-		const slot = await getUpgradeAutomationCraftSlotState(craftLabel);
-		if(!slot?.lpAutomationManaged || String(slot.state || '') !== 'Idle') return slot;
+		let slot = await getUpgradeAutomationCraftSlotState(craftLabel);
+		if(String(slot?.state || '') !== 'Idle') return slot;
+
+		// Recover LP ownership after stale/default state has stripped the marker.
+		// Adoption is deliberately narrow: automation must be enabled and the slot,
+		// fixed component, and phantom coordinates must all match this instance.
+		if(!slot?.lpAutomationManaged) {
+			const fixedCraftConfig = globalSettings.upgradeAutomationEnabled
+				? getUpgradeAutomationFixedCraftConfigForLabel(craftLabel, globalSettings)
+				: null;
+			const matchesFixedConfig = !!fixedCraftConfig
+				&& String(slot?.item || '') === String(fixedCraftConfig.item || '')
+				&& String(slot?.coordinates || '') === String(fixedCraftConfig.coordinates || '');
+			if(!matchesFixedConfig) return slot;
+			slot = {
+				...slot,
+				lpAutomationManaged: true,
+				lpAutomationUpdatedAt: now.toISOString()
+			};
+			await saveCraftConfig(craftLabel, slot, 'lp-auto-slot-adopt-before-start');
+			await logUpgradeAutomationSchedulerEvent('Adopted fixed LP upgrade slot before start', {
+				craftLabel,
+				item: slot.item,
+				coordinates: slot.coordinates,
+				adoptedAtUtc: now.toISOString()
+			});
+		}
+
 		const crew = Math.max(0, Math.floor(Number(slot.crew || 0)));
 		if(crew <= 0 || !slot.item || !slot.coordinates) return slot;
 
@@ -15507,7 +15533,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 	    // LP optimizer selects crew only. Calculate and persist the authoritative
 	    // amount at the last possible moment, after any prior upgrade completed.
-	    if(userCraft.state === 'Idle' && userCraft.lpAutomationManaged && userCraft.item && userCraft.coordinates && userCraft.crew > 0) {
+	    if(userCraft.state === 'Idle' && userCraft.item && userCraft.coordinates && userCraft.crew > 0) {
 		userCraft = await prepareUpgradeAutomationAmountForStart(userCraft, new Date());
 	    }
 
