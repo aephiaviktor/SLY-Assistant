@@ -12,6 +12,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     readSlyaStateBackup: () => ipcRenderer.invoke('readSlyaStateBackup'),
     restoreLeveldbFromBackup: () => ipcRenderer.invoke('restoreLeveldbFromBackup'),
     auditLeveldb: () => ipcRenderer.invoke('auditLeveldb'),
+    getWalletSecretStatus: () => ipcRenderer.invoke('walletSecret:getStatus'),
+    setWalletSecret: (secretKey) => ipcRenderer.invoke('walletSecret:set', secretKey),
+    removeWalletSecret: () => ipcRenderer.invoke('walletSecret:remove'),
+    signWithWalletSecret: (messageBytes) => ipcRenderer.invoke('walletSecret:sign', messageBytes),
 })
 
 ipcRenderer.on('firstinitdone', (event, data) => {

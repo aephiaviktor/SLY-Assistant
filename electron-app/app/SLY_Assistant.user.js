@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-122
+// @aephia-version 0.7.35-128
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-122'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-128'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -411,6 +411,7 @@
 	let upgradeAutomationInfluxDebugStatus = '';
 	const UPGRADE_AUTOMATION_TARGET_BUFFER_DAYS = 10;
 	const UPGRADE_AUTOMATION_LANDING_BUFFER_SECONDS = 30;
+	const UPGRADE_AUTOMATION_MIN_JOB_CREW = 10;
 
 	async function loadUpgradeAutomationEvents() {
 		const raw = await GM.getValue(UPGRADE_AUTOMATION_EVENTS_KEY, '[]');
@@ -2514,29 +2515,39 @@
 				const currentNeutralDeficitDay = currentNeutralUpgradingDay - Number(row.craft24h || 0);
 				return Number(row.inventoryGlobal || 0) > 0 && getUpgradeAutomationEffectiveDrain(currentNeutralDeficitDay, row.observedDrain) <= 0;
 			};
+			const neutralCrewStep = row => Number(row.crew || 0) === 0 ? UPGRADE_AUTOMATION_MIN_JOB_CREW : 1;
 			for (const row of activeRows) {
-				while (usedCrew < totalCrew && isCurrentInfinity(row) && isProjectedNeutralCrewAllowed(row, Number(row.crew || 0) + 1)) {
-					row.crew += 1;
-					usedCrew += 1;
+				while (usedCrew < totalCrew && isCurrentInfinity(row)) {
+					const crewStep = neutralCrewStep(row);
+					const projectedCrew = Number(row.crew || 0) + crewStep;
+					if (usedCrew + crewStep > totalCrew || !isProjectedNeutralCrewAllowed(row, projectedCrew)) break;
+					row.crew += crewStep;
+					usedCrew += crewStep;
 				}
 			}
 			while (usedCrew < totalCrew) {
-				const eligibleRows = activeRows.filter(row => isProjectedNeutralCrewAllowed(row, Number(row.crew || 0) + 1));
+				const eligibleRows = activeRows.filter(row => {
+					const crewStep = neutralCrewStep(row);
+					return usedCrew + crewStep <= totalCrew && isProjectedNeutralCrewAllowed(row, Number(row.crew || 0) + crewStep);
+				});
 				if (!eligibleRows.length) break;
 				const best = eligibleRows.sort((a, b) => {
-					const aProjected = projectNeutralBufferDays(a, Number(a.crew || 0) + 1);
-					const bProjected = projectNeutralBufferDays(b, Number(b.crew || 0) + 1);
+					const aProjectedCrew = Number(a.crew || 0) + neutralCrewStep(a);
+					const bProjectedCrew = Number(b.crew || 0) + neutralCrewStep(b);
+					const aProjected = projectNeutralBufferDays(a, aProjectedCrew);
+					const bProjected = projectNeutralBufferDays(b, bProjectedCrew);
 					const aScore = Number.isFinite(Number(aProjected)) ? Number(aProjected) : Number.POSITIVE_INFINITY;
 					const bScore = Number.isFinite(Number(bProjected)) ? Number(bProjected) : Number.POSITIVE_INFINITY;
 					if (aScore !== bScore) return bScore - aScore;
-					const aNeed = Math.abs(Number(a.avgCrewNeeded || 0) - (Number(a.crew || 0) + 1));
-					const bNeed = Math.abs(Number(b.avgCrewNeeded || 0) - (Number(b.crew || 0) + 1));
+					const aNeed = Math.abs(Number(a.avgCrewNeeded || 0) - aProjectedCrew);
+					const bNeed = Math.abs(Number(b.avgCrewNeeded || 0) - bProjectedCrew);
 					if (aNeed !== bNeed) return aNeed - bNeed;
 					return String(a.displayName).localeCompare(String(b.displayName));
 				})[0];
 				if (!best) break;
-				best.crew += 1;
-				usedCrew += 1;
+				const crewStep = neutralCrewStep(best);
+				best.crew += crewStep;
+				usedCrew += crewStep;
 			}
 		}
 		const neutralAssignedCrew = rows.reduce((sum, row) => sum + Math.max(0, Math.floor(Number(row.crew || 0))), 0);
@@ -2603,7 +2614,9 @@
 		const simulateRow = (row, projectedCrew) => {
 			if (!row?.phantomUpgradeEligible || row.targetPhaseBlocked) return { legal: false };
 			if (!Number.isFinite(projectedCrew) || projectedCrew < 0) return { legal: false };
-			if (Number.isFinite(Number(row.specialRiskMaxCrew)) && Math.max(0, Math.floor(Number(projectedCrew || 0))) > Number(row.specialRiskMaxCrew)) return { legal: false };
+			const normalizedProjectedCrew = Math.max(0, Math.floor(Number(projectedCrew || 0)));
+			if (normalizedProjectedCrew > 0 && normalizedProjectedCrew < UPGRADE_AUTOMATION_MIN_JOB_CREW) return { legal: false };
+			if (Number.isFinite(Number(row.specialRiskMaxCrew)) && normalizedProjectedCrew > Number(row.specialRiskMaxCrew)) return { legal: false };
 			if (row.specialRiskControlled && Number.isFinite(Number(row.specialRiskMaxCrew))) {
 				const projectedSpecialCrew = rows.reduce((sum, candidate) => {
 					if (!candidate.specialRiskControlled) return sum;
@@ -5080,6 +5093,12 @@
 			globalSettings = {};
 			settingsParseError = String(e?.message || e || 'parse_error');
 		}
+		if (globalSettings?.mySecretKey && window.electronAPI?.setWalletSecret) {
+			const migration = await window.electronAPI.setWalletSecret(globalSettings.mySecretKey);
+			if (!migration?.ok) throw new Error('Could not migrate wallet secret to operating-system encryption: ' + String(migration?.error || 'unknown error'));
+			delete globalSettings.mySecretKey;
+			await GM.setValue(settingsGmKey, JSON.stringify(globalSettings));
+		}
 		const restoredFromBackup = await restoreSlyaStateBackupIfCurrentSettingsMissing('load-global-settings', rawSettingsData, settingsParseError);
 		await reconcileUpgradeAutomationCraftConfigsAfterReload('load-global-settings');
 		try {
@@ -5886,6 +5905,12 @@ function renderAssistStats() {
 					const persistedPlan = await loadUpgradeAutomationSchedulerPlan(globalSettings, now);
 					if (!persistedPlan) {
 						await logUpgradeAutomationSchedulerEvent('Fallback skipped - no persisted plan', { utc: now.toISOString() });
+					} else if (!isUpgradeAutomationSchedulerPlanWriteDue(persistedPlan, now)) {
+						await logUpgradeAutomationSchedulerEvent('Fallback skipped - plan not due', {
+							utc: now.toISOString(),
+							target: persistedPlan.targetFinishAtUtc || '',
+							writeAfterUtc: getUpgradeAutomationSchedulerWriteAfterUtc(persistedPlan)
+						});
 					} else {
 						const receipt = await loadUpgradeAutomationSchedulerReceipt(globalSettings, now);
 						const verification = await verifyUpgradeAutomationSchedulerPlanWritten(persistedPlan);
@@ -7519,8 +7544,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const signStart = Date.now();
 
                 try {
-                    if(customKeypair) {
-                        tx.sign([customKeypair]);
+					if(customKeypair && window.electronAPI?.signWithWalletSecret) {
+						const signed = await window.electronAPI.signWithWalletSecret(Array.from(tx.message.serialize()));
+						if (!signed?.ok) throw new Error('Operating-system wallet signing failed: ' + String(signed?.error || 'unknown error'));
+						tx.addSignature(customKeypair.publicKey, new Uint8Array(signed.signature));
+					} else if(customKeypair) {
+						tx.sign([customKeypair]);
                         txSigned = [tx];
                     } else if (typeof solflare === 'undefined') {
                         txSigned = phantom && phantom.solana ? await phantom.solana.signAllTransactions([tx]) : solana.signAllTransactions([tx]);
@@ -7531,8 +7560,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                     /* Catch the very rare "Could not establish connection. Receiving end does not exist" error from Solflare and just try it again: */
                     cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> Wallet extension error`, error1);
                     await wait(1000);
-                    if(customKeypair) {
-                        tx.sign([customKeypair]);
+					if(customKeypair && window.electronAPI?.signWithWalletSecret) {
+						const signed = await window.electronAPI.signWithWalletSecret(Array.from(tx.message.serialize()));
+						if (!signed?.ok) throw new Error('Operating-system wallet signing failed: ' + String(signed?.error || 'unknown error'));
+						tx.addSignature(customKeypair.publicKey, new Uint8Array(signed.signature));
+					} else if(customKeypair) {
+						tx.sign([customKeypair]);
                         txSigned = [tx];
                     } else if (typeof solflare === 'undefined') {
                         txSigned = phantom && phantom.solana ? await phantom.solana.signAllTransactions([tx]) : solana.signAllTransactions([tx]);
@@ -11709,7 +11742,17 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			upgradeAutomationMaxPhantomCrew: document.querySelector('#upgradeAutomationMaxPhantomCrew') ? Math.max(0, parseIntDefault(document.querySelector('#upgradeAutomationMaxPhantomCrew').value, 0)) : Math.max(0, parseIntDefault(globalSettings.upgradeAutomationMaxPhantomCrew, 0)),
 			autoStartScript: document.querySelector('#autoStartScript').checked,
 			reloadPageOnFailedFleets: parseIntDefault(document.querySelector('#reloadPageOnFailedFleets').value, 0),
-			mySecretKey: parseStringDefault(document.querySelector('#mySecretKey').value,''),
+			...(window.electronAPI?.setWalletSecret ? {} : { mySecretKey: parseStringDefault(document.querySelector('#mySecretKey').value,'') }),
+		}
+		if (window.electronAPI?.setWalletSecret) {
+			const enteredSecret = parseStringDefault(document.querySelector('#mySecretKey').value,'').trim();
+			if (enteredSecret) {
+				const secretResult = await window.electronAPI.setWalletSecret(enteredSecret);
+				if (!secretResult?.ok) {
+					errElem[0].textContent = 'Secret key was not saved: ' + String(secretResult?.error || 'unknown error');
+					return;
+				}
+			}
 		}
 		slyaTimingMark(timingMarks, timingStart, 'read-inputs-build-settings');
 		// just to be sure there are no bad mistakes, restrict both fee settings to 50k lamports
@@ -11824,7 +11867,16 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		document.querySelector('#statusPanelOpacity').value = globalSettings.statusPanelOpacity;
 		document.querySelector('#autoStartScript').checked = globalSettings.autoStartScript;
 		document.querySelector('#reloadPageOnFailedFleets').value = globalSettings.reloadPageOnFailedFleets;
-		document.querySelector('#mySecretKey').value = globalSettings.mySecretKey;
+		const secretInput = document.querySelector('#mySecretKey');
+		if (window.electronAPI?.getWalletSecretStatus) {
+			const secretStatus = await window.electronAPI.getWalletSecretStatus();
+			secretInput.value = '';
+			secretInput.placeholder = secretStatus?.configured ? 'Encrypted key configured — leave blank to keep' : 'Paste secret key to configure';
+			const statusEl = document.querySelector('#walletSecretStatus');
+			if (statusEl) statusEl.textContent = secretStatus?.configured ? 'Stored with operating-system encryption.' : 'No encrypted key configured.';
+		} else {
+			secretInput.value = globalSettings.mySecretKey;
+		}
 		const toggleSensitiveFields = document.querySelector('#toggleSensitiveFields');
 		if (toggleSensitiveFields && !toggleSensitiveFields.dataset.bound) {
 			toggleSensitiveFields.dataset.bound = '1';
@@ -11832,6 +11884,21 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				sensitiveFieldsVisible = !sensitiveFieldsVisible;
 				applySensitiveFieldMasking();
 			});
+		}
+		const removeWalletSecret = document.querySelector('#removeWalletSecret');
+		if (removeWalletSecret) {
+			removeWalletSecret.style.display = window.electronAPI?.removeWalletSecret ? '' : 'none';
+			if (!removeWalletSecret.dataset.bound) {
+				removeWalletSecret.dataset.bound = '1';
+				removeWalletSecret.addEventListener('click', async () => {
+					if (!confirm('Remove the encrypted wallet secret from this SLYA installation?')) return;
+					const result = await window.electronAPI.removeWalletSecret();
+					const statusEl = document.querySelector('#walletSecretStatus');
+					if (statusEl) statusEl.textContent = result?.ok ? 'No encrypted key configured.' : 'Could not remove key: ' + String(result?.error || 'unknown error');
+					secretInput.placeholder = result?.ok ? 'Paste secret key to configure' : secretInput.placeholder;
+					customKeypair = null;
+				});
+			}
 		}
 		for (const selector of ['#mySecretKey', '#aephiaApiKey', '#heliusRpcURL', '#influxAuth']) {
 			const el = document.querySelector(selector);
@@ -15735,15 +15802,24 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	function initUser() {
 		return new Promise(async resolve => {
 
-			if(globalSettings.mySecretKey) {
+			if(window.electronAPI?.getWalletSecretStatus) {
+				const secretStatus = await window.electronAPI.getWalletSecretStatus();
+				if (secretStatus?.error) throw new Error('Encrypted wallet secret is unavailable: ' + secretStatus.error);
+				if (secretStatus?.configured) {
+					customKeypair = { publicKey: new solanaWeb3.PublicKey(new Uint8Array(secretStatus.publicKey)) };
+					userPublicKey = customKeypair.publicKey;
+					cLog(1, "SLYA uses an operating-system encrypted custom key with public address:", userPublicKey.toString());
+				}
+			}
+			if(!customKeypair && globalSettings.mySecretKey) {
 				let mySecret = JSON.parse(globalSettings.mySecretKey);
 				customKeypair = solanaWeb3.Keypair.fromSecretKey(new Uint8Array(mySecret));
 				cLog(1, "SLYA uses custom key with public address:", customKeypair.publicKey.toString());
 				userPublicKey = customKeypair.publicKey;
-			} else if (typeof solflare === 'undefined') {
+			} else if (!customKeypair && typeof solflare === 'undefined') {
 				let walletConn = phantom && phantom.solana ? await phantom.solana.connect() : await solana.connect();
 				userPublicKey = walletConn.publicKey;
-			} else {
+			} else if (!customKeypair) {
 				await solflare.connect();
 				userPublicKey = solflare.publicKey;
 			}
@@ -16178,7 +16254,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			settingsModalContentString += '<div>Exclude fleets:<br><textarea id="excludeFleets" cols="40" rows="6"></textarea><br><small>Fleets that should be ignored<br>(one fleet name per line, case sensivity, reload required)</small></div>';
 			settingsModalContentString += '</li>';
 			settingsModalContentString += '<li class="tab_advanced">';
-			settingsModalContentString += '<div>My secret key <input id="mySecretKey" type="text" size="40"></input><br><small>Normally SLYA will use Solflare or Phantom to sign transactions. You can optionally import the secret key of your wallet and let SLYA sign each transaction. While it works with any wallet, for security reasons you should only do this with a lancer wallet. Please also note any security aspects.<br>To get the key of your wallet, open Solflare, go to the list of all wallets, press the three dots next to the wallet, select "Export private key" (not the recovery phrase!), copy the key and paste it here (e.g.: "[82, 194, ...]" ). Then save the settings and reload SLYA. SLYA will output "SLYA uses custom key with public address: [...]" in the console log.</small></div>';
+			settingsModalContentString += '<div>My secret key <input id="mySecretKey" type="password" size="40" autocomplete="off"></input> <button id="removeWalletSecret" type="button">Remove encrypted key</button><br><small id="walletSecretStatus">Normally SLYA will use Solflare or Phantom to sign transactions.</small><br><small>In the standalone Electron app the key is encrypted automatically with Windows DPAPI or macOS Keychain and transaction signing stays in the Electron main process. Paste a key only to set or replace it; the plaintext is never loaded back into this field.</small></div>';
 			settingsModalContentString += '<div>Tx Poll Delay <input id="confirmationCheckingDelay" type="number" min="2000" max="10000" placeholder="2000"></input><br><small>How many milliseconds to wait before re-reading the chain for confirmation (min: 2000)</small></div>';
 			settingsModalContentString += '<div>Console Logging <input id="debugLogLevel" type="number" min="0" max="9" placeholder="3"></input><br><small>How much console logging you want to see (higher number = more, 0 = none)</small></div>';
 			settingsModalContentString += '<div>Auto Start Script <input id="autoStartScript" type="checkbox"></input><br><small>Should Lab Assistant automatically start after initialization is complete?</small></div>';

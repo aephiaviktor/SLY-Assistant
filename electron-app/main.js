@@ -1,6 +1,7 @@
-const { ipcMain, session, app, BrowserWindow, powerSaveBlocker } = require('electron')
+const { ipcMain, session, app, BrowserWindow, powerSaveBlocker, safeStorage } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
+const crypto = require('node:crypto')
 
 // SLYA is a 24/7 automation process. Chromium otherwise throttles timers when
 // its window is covered, minimized, or inactive on Windows.
@@ -9,6 +10,40 @@ app.commandLine.appendSwitch('disable-background-timer-throttling')
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
 
 const APP_ROOT = __dirname
+const SECRET_KEY_PATH = path.join(APP_ROOT, 'data', 'wallet-secret-key.enc')
+const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex')
+
+function parseWalletSecretKey(value)
+{
+	const parsed = typeof value === 'string' ? JSON.parse(value) : value
+	if (!Array.isArray(parsed) || parsed.length !== 64 || parsed.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 255)) {
+		throw new Error('Secret key must be a JSON array containing exactly 64 bytes')
+	}
+	const secretKey = Buffer.from(parsed)
+	const privateKey = crypto.createPrivateKey({ key: Buffer.concat([ED25519_PKCS8_PREFIX, secretKey.subarray(0, 32)]), format: 'der', type: 'pkcs8' })
+	const derivedPublicKey = crypto.createPublicKey(privateKey).export({ format: 'der', type: 'spki' }).subarray(-32)
+	if (!crypto.timingSafeEqual(derivedPublicKey, secretKey.subarray(32))) throw new Error('Secret key public key does not match its private seed')
+	return { secretKey, privateKey, publicKey: derivedPublicKey }
+}
+
+function readEncryptedWalletSecretKey()
+{
+	if (!safeStorage.isEncryptionAvailable()) throw new Error('Operating-system encryption is not available')
+	const encrypted = fs.readFileSync(SECRET_KEY_PATH)
+	return parseWalletSecretKey(safeStorage.decryptString(encrypted))
+}
+
+function getWalletSecretStatus()
+{
+	const configured = fs.existsSync(SECRET_KEY_PATH)
+	if (!configured) return { configured: false, encryptionAvailable: safeStorage.isEncryptionAvailable() }
+	try {
+		const { publicKey } = readEncryptedWalletSecretKey()
+		return { configured: true, encryptionAvailable: true, publicKey: Array.from(publicKey) }
+	} catch (error) {
+		return { configured: true, encryptionAvailable: safeStorage.isEncryptionAvailable(), error: String(error?.message || error) }
+	}
+}
 
 function getInstallInstanceName()
 {
@@ -871,6 +906,40 @@ scheduleDailyAepUpdateCheck(win, aephiaVersion !== 'unknown' ? aephiaVersion : v
 		return { ok: true, path: logPath };
 	} catch (error) {
 		return { ok: false, error: String(error?.message || error) };
+	}
+  })
+
+  ipcMain.handle('walletSecret:getStatus', async () => getWalletSecretStatus())
+
+  ipcMain.handle('walletSecret:set', async (_event, plaintext) => {
+	try {
+		if (!safeStorage.isEncryptionAvailable()) throw new Error('Operating-system encryption is not available')
+		const { publicKey } = parseWalletSecretKey(plaintext)
+		fs.mkdirSync(path.dirname(SECRET_KEY_PATH), { recursive: true })
+		fs.writeFileSync(SECRET_KEY_PATH, safeStorage.encryptString(String(plaintext)), { mode: 0o600 })
+		return { ok: true, configured: true, publicKey: Array.from(publicKey) }
+	} catch (error) {
+		return { ok: false, error: String(error?.message || error) }
+	}
+  })
+
+  ipcMain.handle('walletSecret:remove', async () => {
+	try {
+		if (fs.existsSync(SECRET_KEY_PATH)) fs.unlinkSync(SECRET_KEY_PATH)
+		return { ok: true, configured: false }
+	} catch (error) {
+		return { ok: false, error: String(error?.message || error) }
+	}
+  })
+
+  ipcMain.handle('walletSecret:sign', async (_event, messageBytes) => {
+	try {
+		if (!Array.isArray(messageBytes) || messageBytes.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 255)) throw new Error('Invalid transaction message')
+		const { privateKey, publicKey } = readEncryptedWalletSecretKey()
+		const signature = crypto.sign(null, Buffer.from(messageBytes), privateKey)
+		return { ok: true, publicKey: Array.from(publicKey), signature: Array.from(signature) }
+	} catch (error) {
+		return { ok: false, error: String(error?.message || error) }
 	}
   })
 
