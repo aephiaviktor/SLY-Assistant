@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-130
+// @aephia-version 0.7.35-131
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-130'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-131'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2330,7 +2330,12 @@
 				crew,
 				lpAutomationManaged: true,
 				lpAutomationUpdatedAt: now.toISOString(),
-				lpAutomationCycleStamp: cycleStamp
+				lpAutomationCycleStamp: cycleStamp,
+				lpAutomationPlannedAmount: amount,
+				lpAutomationPlannedRuntime: Math.max(0, Math.floor(Number(row?.nextRuntime || 0))),
+				lpAutomationTargetFinishAtUtc: String(row?.nextXx59Utc || targetFinishAtUtc || ''),
+				lpAutomationAmountAdjustedAt: '',
+				lpAutomationAmountAdjustmentRatio: 1
 			}, 'lp-auto-slot-state-write');
 		};
 
@@ -2398,6 +2403,46 @@
 		});
 
 		return { wrote: true, reason: 'simple_timed_write', schedule, completion, reconciliation };
+	}
+
+	async function adjustUpgradeAutomationAmountAfterCompletion(userCraft, completedAt = new Date()) {
+		const craftLabel = String(userCraft?.label || '');
+		if(!craftLabel) return { adjusted: false, reason: 'missing_craft_label' };
+		const slot = await getUpgradeAutomationCraftSlotState(craftLabel);
+		if(!slot?.lpAutomationManaged) return { adjusted: false, reason: 'not_lp_managed' };
+
+		const plannedAmount = Math.max(0, Math.floor(Number(slot.lpAutomationPlannedAmount || 0)));
+		const plannedRuntime = Math.max(0, Math.floor(Number(slot.lpAutomationPlannedRuntime || 0)));
+		const targetFinishMs = Date.parse(String(slot.lpAutomationTargetFinishAtUtc || ''));
+		if(plannedAmount <= 0 || plannedRuntime <= 0 || !Number.isFinite(targetFinishMs)) {
+			return { adjusted: false, reason: 'missing_plan_baseline' };
+		}
+
+		const completedMs = completedAt instanceof Date ? completedAt.getTime() : Date.parse(String(completedAt || ''));
+		if(!Number.isFinite(completedMs)) return { adjusted: false, reason: 'invalid_completion_time' };
+		const remainingRuntime = Math.max(0, Math.floor((targetFinishMs - completedMs - UPGRADE_AUTOMATION_LANDING_BUFFER_SECONDS * 1000) / 1000));
+		const ratio = Math.max(0, Math.min(1, remainingRuntime / plannedRuntime));
+		const adjustedAmount = Math.max(0, Math.floor(plannedAmount * ratio));
+
+		await saveCraftConfig(craftLabel, {
+			...slot,
+			amount: adjustedAmount,
+			lpAutomationAmountAdjustedAt: new Date(completedMs).toISOString(),
+			lpAutomationAmountAdjustmentRatio: ratio,
+			lpAutomationRemainingRuntime: remainingRuntime
+		}, 'lp-auto-adjust-amount-after-completion');
+		await logUpgradeAutomationSchedulerEvent('Adjusted amount after upgrade completion', {
+			craftLabel,
+			plannedAmount,
+			adjustedAmount,
+			crew: Math.max(0, Math.floor(Number(slot.crew || 0))),
+			plannedRuntime,
+			remainingRuntime,
+			ratio,
+			targetFinishAtUtc: slot.lpAutomationTargetFinishAtUtc,
+			completedAtUtc: new Date(completedMs).toISOString()
+		});
+		return { adjusted: true, plannedAmount, adjustedAmount, plannedRuntime, remainingRuntime, ratio };
 	}
 
 	function getUpgradeAutomationPlanningHorizon(now = new Date()) {
@@ -15392,6 +15437,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	                        await execCompleteUpgrade(starbase, starbasePlayer, starbasePlayerCargoHoldsAndTokens, upgradeProcess, userCraft, upgradeTelemetryJob);
 	                        if (!userCraft.state.includes('ERROR')) {
 	                            if (userCraft.craftingId && upgradeProcess.craftingId == userCraft.craftingId) {
+					await adjustUpgradeAutomationAmountAfterCompletion(userCraft, new Date());
 	                                userCraft.craftingId = 0;
 					userCraft.errorCount = 0;
 					userCraft.txCostSolStart = 0;
