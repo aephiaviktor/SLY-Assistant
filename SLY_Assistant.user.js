@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-145
+// @aephia-version 0.7.35-146
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-145'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-146'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4907,13 +4907,17 @@
 		const starbase = String(load.starbase || 'unknown');
 		// A Supply Chain stop may mechanically unload and immediately reload cargo. Restore
 		// those exact FIFO lot fragments, including their original provenance and leg costs.
+		// Legacy lots whose origin was never observed are re-seeded at this known pickup
+		// starbase so keep-one inventory cannot circulate as unknown forever.
 		for(const pending of cycle.pendingReloads.filter(item => item.mint === mint && item.starbase === starbase).sort((x, y) => x.createdAt - y.createdAt)) {
 			if(remaining <= 0 || Number(pending.remainingAmount || 0) <= 0) continue;
 			const amount = Math.min(remaining, Number(pending.remainingAmount || 0));
 			const delivery = cycle.deliveries.find(item => item.id === pending.deliveryId);
 			const ratio = amount / Number(pending.originalAmount || pending.remainingAmount || amount);
+			const pendingOrigin = String(pending.originStarbase || 'unknown');
+			const originStarbase = pendingOrigin === 'unknown' ? starbase : pendingOrigin;
 			cycle.lots.push({ id: `${cycle.id}:reload:${Date.now()}:${cycle.lots.length}`, mint, rssName: pending.rssName,
-				originStarbase: pending.originStarbase || 'unknown', remainingAmount: amount, cargoSize: pending.cargoSize,
+				originStarbase, remainingAmount: amount, cargoSize: pending.cargoSize,
 				loadedFuel: Number(pending.loadedFuel || 0) * ratio, loadedTxCostSol: Number(pending.loadedTxCostSol || 0) * ratio,
 				loadedTxFeeLamports: Number(pending.loadedTxFeeLamports || 0) * ratio, loadedLegCount: Number(pending.loadedLegCount || 0) });
 			pending.remainingAmount -= amount;
