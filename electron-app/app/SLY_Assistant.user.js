@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-146
+// @aephia-version 0.7.35-147
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-146'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-147'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4941,7 +4941,19 @@
 
 	async function addFleetTelemetryMovementCost(fleet, fleetParsedData, movementCost, fleetCurrentCargo) {
 		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return null;
-		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
+		let cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
+		const homeStarbase = cycle.homeStarbase || getFleetTelemetryHomeStarbaseName(fleet, fleetParsedData);
+		// A home turnaround can unload the completed cycle and load the next trip in
+		// one bundle. Roll the old cycle over before charging the first outbound leg.
+		if(cycle.deliveries.some(item => String(item?.starbase || '') === String(homeStarbase || ''))) {
+			const timerKey = fleet.publicKey.toString();
+			if(fleetTelemetryFinalizeTimers.has(timerKey)) {
+				clearTimeout(fleetTelemetryFinalizeTimers.get(timerKey));
+				fleetTelemetryFinalizeTimers.delete(timerKey);
+			}
+			await maybeFinalizeFleetTelemetryCostCycle(fleet, fleetParsedData, homeStarbase);
+			cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
+		}
 		const fuel = Math.max(0, Number(movementCost?.burnedFuel || 0));
 		const txSol = getSlyaTxCostSol(movementCost?.txResult);
 		const txLamports = getSlyaTxFeeLamports(movementCost?.txResult);
@@ -5029,13 +5041,13 @@
 	}
 
 	async function maybeFinalizeFleetTelemetryCostCycle(fleet, fleetParsedData, starbaseName) {
-		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return;
+		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return false;
 		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
 		const homeStarbase = cycle.homeStarbase || getFleetTelemetryHomeStarbaseName(fleet, fleetParsedData);
-		if(String(starbaseName || '') !== String(homeStarbase || '')) return;
+		if(String(starbaseName || '') !== String(homeStarbase || '')) return false;
 		const deliveries = cycle.deliveries.filter(item => Number(item?.cargoVolume || 0) > 0);
 		const totalVolume = deliveries.reduce((sum, item) => sum + Number(item.cargoVolume || 0), 0);
-		if(deliveries.length < 1 || totalVolume <= 0) return;
+		if(deliveries.length < 1 || totalVolume <= 0) return false;
 		// Reconcile floating-point and partial-lot residue deterministically onto the
 		// final delivery so every completed cycle is allocated exactly once.
 		const finalDelivery = deliveries[deliveries.length - 1];
@@ -5056,7 +5068,23 @@
 				` amount=${Number(item.amount || 0)},cargoVolume=${Number(item.cargoVolume || 0)},assetMint=${influxFieldString(item.mint || '')},loadedLegFuel=${loadedFuel},loadedLegTxCostSol=${loadedTx},loadedLegTxFeeLamports=${Math.round(loadedFees)}i,emptyLegFuelOverhead=${overheadFuel[index]},emptyLegTxCostSolOverhead=${overheadTx[index]},emptyLegTxFeeLamportsOverhead=${Math.round(overheadFees[index])}i,allocatedFuel=${loadedFuel + overheadFuel[index]},allocatedTxCostSol=${loadedTx + overheadTx[index]},allocatedTxFeeLamports=${Math.round(loadedFees + overheadFees[index])}i,loadedLegCount=${Math.round(Number(item.loadedLegCount || 0))}i,cycleBurnedFuel=${cycle.burnedFuel},cycleTxCostSol=${cycle.txCostSol},cycleTxFeeLamports=${Math.round(cycle.txFeeLamports)}i,cycleEmptyFuel=${cycle.emptyBurnedFuel},cycleEmptyTxCostSol=${cycle.emptyTxCostSol},cycleMovementCount=${cycle.movementCount}i,cycleDeliveredVolume=${totalVolume},cycleDeliveryCount=${deliveries.length}i,deliveryIndex=${index}i`;
 		}).join('\n');
 		if(lines) await sendToInflux(lines);
-		await clearFleetTelemetryCostCycle(fleet);
+		// Loads performed during the same home turnaround belong to the next cycle.
+		// Preserve their provenance, but reset all movement costs because the cycle
+		// being finalized above has already allocated its complete cost total.
+		const carriedLots = cycle.lots.filter(lot => Number(lot?.remainingAmount || 0) > 1e-9).map(lot => ({
+			mint: String(lot.mint || ''), rssName: lot.rssName || getCargoTelemetryNameByMint(lot.mint),
+			originStarbase: lot.originStarbase || 'unknown', remainingAmount: Number(lot.remainingAmount || 0),
+			cargoSize: Number(lot.cargoSize || getCargoTelemetrySizeByMint(lot.mint)),
+			loadedFuel: 0, loadedTxCostSol: 0, loadedTxFeeLamports: 0, loadedLegCount: 0
+		}));
+		if(carriedLots.length) {
+			const nextCycle = normalizeFleetTelemetryCostCycle({}, fleet, fleetParsedData);
+			nextCycle.lots = carriedLots.map((lot, index) => ({ ...lot, id: `${nextCycle.id}:carry:${index}` }));
+			await saveFleetTelemetryCostCycle(fleet, nextCycle);
+		} else {
+			await clearFleetTelemetryCostCycle(fleet);
+		}
+		return true;
 	}
 
 	async function sendFleetMovementCargoTelemetry(fleet, fleetParsedData, fleetCurrentCargo, movementTags, movementType = '') {
