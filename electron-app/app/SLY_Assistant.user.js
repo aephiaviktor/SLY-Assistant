@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-142
+// @aephia-version 0.7.35-143
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-142'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-143'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4807,25 +4807,34 @@
 		return `${fleet.publicKey.toString()}:${homeCoord || 'unknown'}:${Date.now()}`;
 	}
 
+	function normalizeFleetTelemetryCostCycle(cycle, fleet, fleetParsedData = {}) {
+		cycle = cycle && typeof cycle === 'object' ? cycle : {};
+		cycle.id = cycle.id || buildFleetTelemetryCycleId(fleet, fleetParsedData);
+		cycle.fleet = cycle.fleet || fleet.label || '';
+		cycle.assignment = fleetParsedData.assignment || cycle.assignment || '';
+		cycle.homeCoord = cycle.homeCoord || getFleetTelemetryHomeCoord(fleet, fleetParsedData);
+		cycle.homeStarbase = cycle.homeStarbase || getFleetTelemetryHomeStarbaseName(fleet, fleetParsedData);
+		cycle.startedAt = Number(cycle.startedAt || Date.now());
+		cycle.movementCount = Math.max(0, Number(cycle.movementCount || 0));
+		cycle.burnedFuel = Math.max(0, Number(cycle.burnedFuel || 0));
+		cycle.txCostSol = Math.max(0, Number(cycle.txCostSol || 0));
+		cycle.txFeeLamports = Math.max(0, Number(cycle.txFeeLamports || 0));
+		cycle.emptyBurnedFuel = Math.max(0, Number(cycle.emptyBurnedFuel || 0));
+		cycle.emptyTxCostSol = Math.max(0, Number(cycle.emptyTxCostSol || 0));
+		cycle.emptyTxFeeLamports = Math.max(0, Number(cycle.emptyTxFeeLamports || 0));
+		cycle.lots = Array.isArray(cycle.lots) ? cycle.lots : [];
+		cycle.deliveries = Array.isArray(cycle.deliveries) ? cycle.deliveries : [];
+		cycle.pendingReloads = Array.isArray(cycle.pendingReloads) ? cycle.pendingReloads : [];
+		return cycle;
+	}
+
 	async function getFleetTelemetryCostCycle(fleet, fleetParsedData = {}) {
 		const key = getFleetTelemetryCostCycleKey(fleet);
 		try {
 			const saved = JSON.parse(await GM.getValue(key, '{}'));
-			if(saved && saved.id) return saved;
+			if(saved && saved.id) return normalizeFleetTelemetryCostCycle(saved, fleet, fleetParsedData);
 		} catch (e) {}
-		return {
-			id: buildFleetTelemetryCycleId(fleet, fleetParsedData),
-			fleet: fleet.label || '',
-			assignment: fleetParsedData.assignment || '',
-			homeCoord: getFleetTelemetryHomeCoord(fleet, fleetParsedData),
-			homeStarbase: getFleetTelemetryHomeStarbaseName(fleet, fleetParsedData),
-			startedAt: Date.now(),
-			movementCount: 0,
-			burnedFuel: 0,
-			txCostSol: 0,
-			txFeeLamports: 0,
-			deliveries: []
-		};
+		return normalizeFleetTelemetryCostCycle({}, fleet, fleetParsedData);
 	}
 
 	async function saveFleetTelemetryCostCycle(fleet, cycle) {
@@ -4838,16 +4847,110 @@
 		scheduleSlyaStateBackup('transport-cost-cycle-clear');
 	}
 
-	async function addFleetTelemetryMovementCost(fleet, fleetParsedData, movementCost) {
+	function splitTelemetryCost(total, weights) {
+		const sum = weights.reduce((value, weight) => value + Math.max(0, Number(weight || 0)), 0);
+		if(sum <= 0) return weights.map(() => 0);
+		let assigned = 0;
+		return weights.map((weight, index) => {
+			if(index === weights.length - 1) return Number(total || 0) - assigned;
+			const value = Number(total || 0) * Math.max(0, Number(weight || 0)) / sum;
+			assigned += value;
+			return value;
+		});
+	}
+
+	function snapshotFleetTelemetryCargo(fleetCurrentCargo) {
+		const result = [];
+		for(const tokenAccount of (Array.isArray(fleetCurrentCargo?.value) ? fleetCurrentCargo.value : [])) {
+			const mint = String(tokenAccount?.account?.data?.parsed?.info?.mint || '');
+			const amount = Math.max(0, Number(tokenAccount?.account?.data?.parsed?.info?.tokenAmount?.uiAmount || 0));
+			if(mint && amount > 0) result.push({ mint, amount });
+		}
+		return result;
+	}
+
+	function reconcileTelemetryLotsToSnapshot(cycle, snapshot) {
+		for(const item of snapshot) {
+			const tracked = cycle.lots.filter(lot => lot.mint === item.mint).reduce((sum, lot) => sum + Number(lot.remainingAmount || 0), 0);
+			if(item.amount > tracked) cycle.lots.push({
+				id: `${cycle.id}:unknown:${Date.now()}:${cycle.lots.length}`,
+				mint: item.mint, rssName: getCargoTelemetryNameByMint(item.mint), originStarbase: 'unknown',
+				remainingAmount: item.amount - tracked, cargoSize: getCargoTelemetrySizeByMint(item.mint),
+				loadedFuel: 0, loadedTxCostSol: 0, loadedTxFeeLamports: 0, loadedLegCount: 0
+			});
+		}
+	}
+
+	async function addFleetTelemetryCargoLoad(fleet, fleetParsedData, load) {
+		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return null;
+		if(!load || load.loadType !== 'cargo_in' || !(Number(load.amount || 0) > 0)) return null;
+		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
+		const mint = String(load.mint || '');
+		let remaining = Math.max(0, Number(load.amount || 0));
+		const starbase = String(load.starbase || 'unknown');
+		// A Supply Chain stop may mechanically unload and immediately reload cargo. Restore
+		// those exact FIFO lot fragments, including their original provenance and leg costs.
+		for(const pending of cycle.pendingReloads.filter(item => item.mint === mint && item.starbase === starbase).sort((x, y) => x.createdAt - y.createdAt)) {
+			if(remaining <= 0 || Number(pending.remainingAmount || 0) <= 0) continue;
+			const amount = Math.min(remaining, Number(pending.remainingAmount || 0));
+			const delivery = cycle.deliveries.find(item => item.id === pending.deliveryId);
+			const ratio = amount / Number(pending.originalAmount || pending.remainingAmount || amount);
+			cycle.lots.push({ id: `${cycle.id}:reload:${Date.now()}:${cycle.lots.length}`, mint, rssName: pending.rssName,
+				originStarbase: pending.originStarbase || 'unknown', remainingAmount: amount, cargoSize: pending.cargoSize,
+				loadedFuel: Number(pending.loadedFuel || 0) * ratio, loadedTxCostSol: Number(pending.loadedTxCostSol || 0) * ratio,
+				loadedTxFeeLamports: Number(pending.loadedTxFeeLamports || 0) * ratio, loadedLegCount: Number(pending.loadedLegCount || 0) });
+			pending.remainingAmount -= amount;
+			if(delivery) {
+				const deliveryRatio = amount / Number(delivery.amount || amount);
+				delivery.amount -= amount; delivery.cargoVolume = delivery.amount * Number(delivery.cargoSize || 1);
+				delivery.loadedFuel -= Number(delivery.loadedFuel || 0) * deliveryRatio;
+				delivery.loadedTxCostSol -= Number(delivery.loadedTxCostSol || 0) * deliveryRatio;
+				delivery.loadedTxFeeLamports -= Number(delivery.loadedTxFeeLamports || 0) * deliveryRatio;
+			}
+			remaining -= amount;
+		}
+		cycle.pendingReloads = cycle.pendingReloads.filter(item => Number(item.remainingAmount || 0) > 1e-9);
+		cycle.deliveries = cycle.deliveries.filter(item => Number(item.amount || 0) > 1e-9);
+		if(remaining > 0) cycle.lots.push({ id: `${cycle.id}:load:${Date.now()}:${cycle.lots.length}`, mint,
+			rssName: load.rssName || getCargoTelemetryNameByMint(mint), originStarbase: starbase || 'unknown', remainingAmount: remaining,
+			cargoSize: getCargoTelemetrySizeByMint(mint), loadedFuel: 0, loadedTxCostSol: 0, loadedTxFeeLamports: 0, loadedLegCount: 0 });
+		await saveFleetTelemetryCostCycle(fleet, cycle);
+		return cycle;
+	}
+
+	async function addFleetTelemetryMovementCost(fleet, fleetParsedData, movementCost, fleetCurrentCargo) {
 		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return null;
 		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
-		cycle.assignment = fleetParsedData.assignment || cycle.assignment || '';
-		cycle.homeCoord = cycle.homeCoord || getFleetTelemetryHomeCoord(fleet, fleetParsedData);
-		cycle.homeStarbase = cycle.homeStarbase || getFleetTelemetryHomeStarbaseName(fleet, fleetParsedData);
-		cycle.movementCount = Math.max(0, Number(cycle.movementCount || 0)) + 1;
-		cycle.burnedFuel = Number(cycle.burnedFuel || 0) + Math.max(0, Number(movementCost?.burnedFuel || 0));
-		cycle.txCostSol = Number(cycle.txCostSol || 0) + getSlyaTxCostSol(movementCost?.txResult);
-		cycle.txFeeLamports = Number(cycle.txFeeLamports || 0) + getSlyaTxFeeLamports(movementCost?.txResult);
+		const fuel = Math.max(0, Number(movementCost?.burnedFuel || 0));
+		const txSol = getSlyaTxCostSol(movementCost?.txResult);
+		const txLamports = getSlyaTxFeeLamports(movementCost?.txResult);
+		cycle.movementCount += 1; cycle.burnedFuel += fuel; cycle.txCostSol += txSol; cycle.txFeeLamports += txLamports;
+		const snapshot = snapshotFleetTelemetryCargo(fleetCurrentCargo);
+		reconcileTelemetryLotsToSnapshot(cycle, snapshot);
+		const onboard = [];
+		for(const item of snapshot) {
+			let needed = item.amount;
+			for(const lot of cycle.lots.filter(candidate => candidate.mint === item.mint)) {
+				if(needed <= 0) break;
+				const amount = Math.min(needed, Number(lot.remainingAmount || 0));
+				if(amount > 0) onboard.push({ lot, amount, volume: amount * Number(lot.cargoSize || 1) });
+				needed -= amount;
+			}
+		}
+		const totalVolume = onboard.reduce((sum, item) => sum + item.volume, 0);
+		if(totalVolume <= 0) {
+			cycle.emptyBurnedFuel += fuel; cycle.emptyTxCostSol += txSol; cycle.emptyTxFeeLamports += txLamports;
+		} else {
+			const fuelShares = splitTelemetryCost(fuel, onboard.map(item => item.volume));
+			const txShares = splitTelemetryCost(txSol, onboard.map(item => item.volume));
+			const feeShares = splitTelemetryCost(txLamports, onboard.map(item => item.volume));
+			onboard.forEach((item, index) => {
+				item.lot.loadedFuel += fuelShares[index];
+				item.lot.loadedTxCostSol += txShares[index];
+				item.lot.loadedTxFeeLamports += feeShares[index];
+				item.lot.loadedLegCount = Number(item.lot.loadedLegCount || 0) + 1;
+			});
+		}
 		await saveFleetTelemetryCostCycle(fleet, cycle);
 		return cycle;
 	}
@@ -4857,22 +4960,51 @@
 		if(!delivery || !(Number(delivery.amount || 0) > 0) || delivery.loadType !== 'cargo_out') return null;
 		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
 		const mint = String(delivery.mint || '');
-		const amount = Math.max(0, Number(delivery.amount || 0));
+		let remaining = Math.max(0, Number(delivery.amount || 0));
 		const cargoSize = getCargoTelemetrySizeByMint(mint);
-		cycle.deliveries = Array.isArray(cycle.deliveries) ? cycle.deliveries : [];
-		cycle.deliveries.push({
-			mint: mint,
-			rssName: delivery.rssName || getCargoTelemetryNameByMint(mint),
-			amount: amount,
-			cargoSize: cargoSize,
-			cargoVolume: amount * cargoSize,
-			starbase: delivery.starbase || 'unknown',
-			sectorX: delivery.sectorX,
-			sectorY: delivery.sectorY,
-			deliveredAt: Date.now()
-		});
+		const matchingLots = cycle.lots.filter(lot => lot.mint === mint);
+		if(!matchingLots.length) matchingLots.push({ id: `${cycle.id}:unknown-delivery:${Date.now()}`, mint, rssName: delivery.rssName,
+			originStarbase: 'unknown', remainingAmount: remaining, cargoSize, loadedFuel: 0, loadedTxCostSol: 0, loadedTxFeeLamports: 0, loadedLegCount: 0 });
+		for(const lot of matchingLots) {
+			if(remaining <= 0) break;
+			const available = Math.max(0, Number(lot.remainingAmount || 0));
+			const amount = Math.min(remaining, available);
+			if(amount <= 0) continue;
+			const ratio = amount / available;
+			const row = { id: `${cycle.id}:delivery:${Date.now()}:${cycle.deliveries.length}`, mint,
+				rssName: delivery.rssName || lot.rssName || getCargoTelemetryNameByMint(mint), originStarbase: lot.originStarbase || 'unknown',
+				amount, cargoSize, cargoVolume: amount * cargoSize, starbase: delivery.starbase || 'unknown', sectorX: delivery.sectorX,
+				sectorY: delivery.sectorY, deliveredAt: Date.now(), loadedFuel: Number(lot.loadedFuel || 0) * ratio,
+				loadedTxCostSol: Number(lot.loadedTxCostSol || 0) * ratio, loadedTxFeeLamports: Number(lot.loadedTxFeeLamports || 0) * ratio,
+				loadedLegCount: Number(lot.loadedLegCount || 0) };
+			cycle.deliveries.push(row);
+			cycle.pendingReloads.push({ deliveryId: row.id, mint, rssName: row.rssName, starbase: row.starbase, originStarbase: row.originStarbase,
+				remainingAmount: amount, originalAmount: amount, cargoSize, loadedFuel: row.loadedFuel, loadedTxCostSol: row.loadedTxCostSol,
+				loadedTxFeeLamports: row.loadedTxFeeLamports, loadedLegCount: row.loadedLegCount, createdAt: Date.now() });
+			lot.remainingAmount -= amount; lot.loadedFuel -= row.loadedFuel; lot.loadedTxCostSol -= row.loadedTxCostSol; lot.loadedTxFeeLamports -= row.loadedTxFeeLamports;
+			remaining -= amount;
+		}
+		if(remaining > 0) {
+			const row = { id: `${cycle.id}:delivery:${Date.now()}:${cycle.deliveries.length}`, mint, rssName: delivery.rssName || getCargoTelemetryNameByMint(mint),
+				originStarbase: 'unknown', amount: remaining, cargoSize, cargoVolume: remaining * cargoSize, starbase: delivery.starbase || 'unknown',
+				sectorX: delivery.sectorX, sectorY: delivery.sectorY, deliveredAt: Date.now(), loadedFuel: 0, loadedTxCostSol: 0, loadedTxFeeLamports: 0, loadedLegCount: 0 };
+			cycle.deliveries.push(row);
+		}
+		cycle.lots = cycle.lots.filter(lot => Number(lot.remainingAmount || 0) > 1e-9);
 		await saveFleetTelemetryCostCycle(fleet, cycle);
 		return cycle;
+	}
+
+	const fleetTelemetryFinalizeTimers = new Map();
+
+	function scheduleFleetTelemetryCostCycleFinalization(fleet, fleetParsedData, starbaseName) {
+		const key = fleet.publicKey.toString();
+		if(fleetTelemetryFinalizeTimers.has(key)) clearTimeout(fleetTelemetryFinalizeTimers.get(key));
+		fleetTelemetryFinalizeTimers.set(key, setTimeout(async () => {
+			fleetTelemetryFinalizeTimers.delete(key);
+			try { await maybeFinalizeFleetTelemetryCostCycle(fleet, fleetParsedData, starbaseName); }
+			catch(error) { cLog(1, `${FleetTimeStamp(fleet.label)} cargo telemetry finalization failed`, error); }
+		}, 60000));
 	}
 
 	async function maybeFinalizeFleetTelemetryCostCycle(fleet, fleetParsedData, starbaseName) {
@@ -4880,13 +5012,27 @@
 		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
 		const homeStarbase = cycle.homeStarbase || getFleetTelemetryHomeStarbaseName(fleet, fleetParsedData);
 		if(String(starbaseName || '') !== String(homeStarbase || '')) return;
-		const deliveries = Array.isArray(cycle.deliveries) ? cycle.deliveries.filter(item => Number(item?.cargoVolume || 0) > 0) : [];
+		const deliveries = cycle.deliveries.filter(item => Number(item?.cargoVolume || 0) > 0);
 		const totalVolume = deliveries.reduce((sum, item) => sum + Number(item.cargoVolume || 0), 0);
 		if(deliveries.length < 1 || totalVolume <= 0) return;
+		// Reconcile floating-point and partial-lot residue deterministically onto the
+		// final delivery so every completed cycle is allocated exactly once.
+		const finalDelivery = deliveries[deliveries.length - 1];
+		finalDelivery.loadedFuel = Number(finalDelivery.loadedFuel || 0) +
+			(Number(cycle.burnedFuel || 0) - Number(cycle.emptyBurnedFuel || 0) - deliveries.reduce((sum, item) => sum + Number(item.loadedFuel || 0), 0));
+		finalDelivery.loadedTxCostSol = Number(finalDelivery.loadedTxCostSol || 0) +
+			(Number(cycle.txCostSol || 0) - Number(cycle.emptyTxCostSol || 0) - deliveries.reduce((sum, item) => sum + Number(item.loadedTxCostSol || 0), 0));
+		finalDelivery.loadedTxFeeLamports = Number(finalDelivery.loadedTxFeeLamports || 0) +
+			(Number(cycle.txFeeLamports || 0) - Number(cycle.emptyTxFeeLamports || 0) - deliveries.reduce((sum, item) => sum + Number(item.loadedTxFeeLamports || 0), 0));
+		const loadedWeights = deliveries.map(item => Math.max(0, Number(item.loadedFuel || 0)) + Math.max(0, Number(item.loadedTxCostSol || 0)));
+		const weights = loadedWeights.some(value => value > 0) ? loadedWeights : deliveries.map(item => Number(item.cargoVolume || 0));
+		const overheadFuel = splitTelemetryCost(cycle.emptyBurnedFuel, weights);
+		const overheadTx = splitTelemetryCost(cycle.emptyTxCostSol, weights);
+		const overheadFees = splitTelemetryCost(cycle.emptyTxFeeLamports, weights);
 		const lines = deliveries.map((item, index) => {
-			const share = Number(item.cargoVolume || 0) / totalVolume;
-			return `cargo_cost_allocation,fleet=${influxEscape(fleet.label)},assignment=${influxEscape(fleetParsedData.assignment || 'unknown')},homeStarbase=${influxEscape(homeStarbase || 'unknown')},deliveryStarbase=${influxEscape(item.starbase || 'unknown')},rss=${influxEscape(item.rssName || 'unknown')},cycleId=${influxEscape(cycle.id || 'unknown')}` +
-				` amount=${Number(item.amount || 0)},cargoVolume=${Number(item.cargoVolume || 0)},assetMint=${influxFieldString(item.mint || '')},allocatedFuel=${Number(cycle.burnedFuel || 0) * share},allocatedTxCostSol=${Number(cycle.txCostSol || 0) * share},allocatedTxFeeLamports=${Math.round(Number(cycle.txFeeLamports || 0) * share)}i,cycleBurnedFuel=${Number(cycle.burnedFuel || 0)},cycleTxCostSol=${Number(cycle.txCostSol || 0)},cycleTxFeeLamports=${Math.round(Number(cycle.txFeeLamports || 0))}i,cycleMovementCount=${Math.round(Number(cycle.movementCount || 0))}i,cycleDeliveredVolume=${totalVolume},cycleDeliveryCount=${deliveries.length}i,deliveryIndex=${index}i`;
+			const loadedFuel = Number(item.loadedFuel || 0), loadedTx = Number(item.loadedTxCostSol || 0), loadedFees = Number(item.loadedTxFeeLamports || 0);
+			return `cargo_cost_allocation,fleet=${influxEscape(fleet.label)},assignment=${influxEscape(fleetParsedData.assignment || 'unknown')},homeStarbase=${influxEscape(homeStarbase || 'unknown')},originStarbase=${influxEscape(item.originStarbase || 'unknown')},deliveryStarbase=${influxEscape(item.starbase || 'unknown')},rss=${influxEscape(item.rssName || 'unknown')},cycleId=${influxEscape(cycle.id || 'unknown')}` +
+				` amount=${Number(item.amount || 0)},cargoVolume=${Number(item.cargoVolume || 0)},assetMint=${influxFieldString(item.mint || '')},loadedLegFuel=${loadedFuel},loadedLegTxCostSol=${loadedTx},loadedLegTxFeeLamports=${Math.round(loadedFees)}i,emptyLegFuelOverhead=${overheadFuel[index]},emptyLegTxCostSolOverhead=${overheadTx[index]},emptyLegTxFeeLamportsOverhead=${Math.round(overheadFees[index])}i,allocatedFuel=${loadedFuel + overheadFuel[index]},allocatedTxCostSol=${loadedTx + overheadTx[index]},allocatedTxFeeLamports=${Math.round(loadedFees + overheadFees[index])}i,loadedLegCount=${Math.round(Number(item.loadedLegCount || 0))}i,cycleBurnedFuel=${cycle.burnedFuel},cycleTxCostSol=${cycle.txCostSol},cycleTxFeeLamports=${Math.round(cycle.txFeeLamports)}i,cycleEmptyFuel=${cycle.emptyBurnedFuel},cycleEmptyTxCostSol=${cycle.emptyTxCostSol},cycleMovementCount=${cycle.movementCount}i,cycleDeliveredVolume=${totalVolume},cycleDeliveryCount=${deliveries.length}i,deliveryIndex=${index}i`;
 		}).join('\n');
 		if(lines) await sendToInflux(lines);
 		await clearFleetTelemetryCostCycle(fleet);
@@ -8400,7 +8546,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 							if(fleetCargoPod == fleet.fuelTank) loadType = 'fuel_out';
 							if(fleetCargoPod == fleet.ammoBank) loadType = 'ammo_out';
 							await sendToInflux(`fleetrss,fleet=${influxEscape(fleet.label)},starbase=${influxEscape(starbaseName)},sectorX=${starbaseX},sectorY=${starbaseY},rss=${influxEscape(rssName)},assignment=${influxEscape(assignment || 'unknown')},type=${loadType} amount=${amount}${buildSlyaTxCostInfluxFields(txResult)}`);
-							const deliveryCycle = await addFleetTelemetryCargoDelivery(fleet, fleetParsedData, {
+							const deliveryCycle = !returnTx ? await addFleetTelemetryCargoDelivery(fleet, fleetParsedData, {
 								loadType,
 								mint: tokenMint,
 								rssName,
@@ -8408,8 +8554,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 								starbase: starbaseName,
 								sectorX: starbaseX,
 								sectorY: starbaseY
-							});
-							if(deliveryCycle) await maybeFinalizeFleetTelemetryCostCycle(fleet, fleetParsedData, starbaseName);
+							}) : null;
+							if(deliveryCycle) scheduleFleetTelemetryCostCycleFinalization(fleet, fleetParsedData, starbaseName);
 						}
 
 				});
@@ -8552,6 +8698,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					if(cargoPodTo == fleet.fuelTank) loadType = 'fuel_in';
 					if(cargoPodTo == fleet.ammoBank) loadType = 'ammo_in';
 					await sendToInflux(`fleetrss,fleet=${influxEscape(fleet.label)},starbase=${influxEscape(starbaseName)},sectorX=${starbaseX},sectorY=${starbaseY},rss=${influxEscape(rssName)},assignment=${influxEscape(assignment || 'unknown')},type=${loadType} amount=${amount}${buildSlyaTxCostInfluxFields(txResult?.result || txResult)}`);
+					if(!returnTx) await addFleetTelemetryCargoLoad(fleet, fleetParsedData, { loadType, mint: tokenMint, rssName, amount, starbase: starbaseName, sectorX: starbaseX, sectorY: starbaseY });
 				}
 
 			});
@@ -12385,7 +12532,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 						const movementFactionTag = movementStarbaseContext.faction ? `,faction=${influxEscape(movementStarbaseContext.faction)}` : '';
 						const burnedFuel = moveDist*(userFleets[i].warpFuelConsumptionRate/100);
 						const movementTxResult = warpResult?.txResult || warpResult;
-						const costCycle = await addFleetTelemetryMovementCost(userFleets[i], fleetParsedData, { burnedFuel, txResult: movementTxResult });
+						const costCycle = await addFleetTelemetryMovementCost(userFleets[i], fleetParsedData, { burnedFuel, txResult: movementTxResult }, fleetCurrentCargo);
 						const movementCycleTag = costCycle?.id ? `,cycleId=${influxEscape(costCycle.id)}` : '';
 						const movementTags = `fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${influxEscape(assignment || 'unknown')},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag}${movementCycleTag}`;
 						const movementFields = `type="warp",burnedFuel=${burnedFuel},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(movementTxResult)}`;
@@ -12404,7 +12551,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 						const movementStarbaseContext = await getTelemetryStarbaseContextFromCoords(movementStarbaseCoords[0], movementStarbaseCoords[1]);
 						const movementFactionTag = movementStarbaseContext.faction ? `,faction=${influxEscape(movementStarbaseContext.faction)}` : '';
 						const burnedFuel = moveDist*(userFleets[i].subwarpFuelConsumptionRate/100);
-						const costCycle = await addFleetTelemetryMovementCost(userFleets[i], fleetParsedData, { burnedFuel, txResult: subwarpResult });
+						const costCycle = await addFleetTelemetryMovementCost(userFleets[i], fleetParsedData, { burnedFuel, txResult: subwarpResult }, fleetCurrentCargo);
 						const movementCycleTag = costCycle?.id ? `,cycleId=${influxEscape(costCycle.id)}` : '';
 						const movementTags = `fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${influxEscape(assignment || 'unknown')},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag}${movementCycleTag}`;
 						const movementFields = `type="subwarp",burnedFuel=${burnedFuel},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(subwarpResult)}`;
