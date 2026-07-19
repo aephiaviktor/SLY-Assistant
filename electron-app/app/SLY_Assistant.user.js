@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-143
+// @aephia-version 0.7.35-144
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-143'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-144'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -13896,6 +13896,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
                     //Refueling at Starbase
                     let refuelResp = await handleTransportRefueling(userFleets[i], userFleets[i].starbaseCoord, [starbaseX, starbaseY], [destX, destY], true, 0, targetLoadManifest, transportLoadUnloadSingleTx);
+                    const fuelLoadedThisStop = Math.max(0, Number(refuelResp.alreadyLoaded || 0));
                     if (refuelResp.status === 0) {
                         userFleets[i].state = refuelResp.detail;
                         return;
@@ -13924,7 +13925,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
                     //Loading at Starbase
                     if (hasTransportManifest(targetLoadManifest)) {
-                        const loadedCargoResult = await handleTransportLoading(i, userFleets[i].starbaseCoord, targetLoadManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
+                        const loadedCargoResult = await handleTransportLoading(i, userFleets[i].starbaseCoord, targetLoadManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0, fuelLoadedThisStop);
                         cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargoResult.success);
                         if(!loadedCargoResult.success) {
                             //const newFleetState = `ERROR: No more cargo to load`;
@@ -14059,6 +14060,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
                     //Refueling at Target
                     let refuelResp = await handleTransportRefueling(userFleets[i], userFleets[i].destCoord, [destX, destY], [starbaseX, starbaseY], false, fuelUnloadDeficit, starbaseLoadManifest, transportLoadUnloadSingleTx);
+                    const fuelLoadedThisStop = Math.max(0, Number(refuelResp.alreadyLoaded || 0));
                     if (refuelResp.status === 0) {
                         userFleets[i].state = refuelResp.detail;
                         return;
@@ -14085,7 +14087,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
                     //Loading at Target
                     if(hasTransportManifest(starbaseLoadManifest)) {
-                        const loadedCargoResult = await handleTransportLoading(i, userFleets[i].destCoord, starbaseLoadManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
+                        const loadedCargoResult = await handleTransportLoading(i, userFleets[i].destCoord, starbaseLoadManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0, fuelLoadedThisStop);
                         cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargoResult.success);
                         if(!loadedCargoResult.success) {
                             //const newFleetState = `ERROR: No more cargo to load`;
@@ -14315,6 +14317,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			} else cLog(1,`${FleetTimeStamp(userFleets[i].label)} Unloading skipped - No resources specified`);
 
 			let refuelResp = await handleTransportRefueling(userFleets[i], sourceCoord, sourceCoords, destCoords, roundTrip, roundTrip ? 0 : fuelUnloadDeficit, destinationCargoManifest, transportLoadUnloadSingleTx);
+			const fuelLoadedThisStop = Math.max(0, Number(refuelResp.alreadyLoaded || 0));
 			if (refuelResp.status === 0) {
 				userFleets[i].state = refuelResp.detail;
 				return false;
@@ -14341,7 +14344,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			}
 
 			if(hasDestinationManifest) {
-				const loadedCargoResult = await handleTransportLoading(i, sourceCoord, destinationCargoManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0);
+				const loadedCargoResult = await handleTransportLoading(i, sourceCoord, destinationCargoManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0, fuelLoadedThisStop);
 				cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargoResult.success);
 				if(!loadedCargoResult.success) {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} ERROR: Unexpected error on cargo load.`);
@@ -14768,7 +14771,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		return { fuelUnloadDeficit, transactions, unloadedAmount, unloadedResources: Array.from(new Set(unloadedResources)), error };
 	}
 
-	async function handleTransportLoading(i, starbaseCoords, transportManifest, returnTx, alreadyUnloadedInTransaction) {
+	async function handleTransportLoading(i, starbaseCoords, transportManifest, returnTx, alreadyUnloadedInTransaction, fuelLoadedThisStop = 0) {
 		cLog(1,`${FleetTimeStamp(userFleets[i].label)} 📦 Loading Transport`);
 		updateFleetState(userFleets[i], 'Loading');
 
@@ -14871,9 +14874,11 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 		//cLog(3,`${FleetTimeStamp(userFleets[i].label)} Loading finished with ${cargoCnt} total cargo loaded`);
 
-	        if (startingCargoSpace == cargoSpace && expectedCnt > 0) {
+		const cargoHoldLoadedThisStop = Math.max(0, startingCargoSpace - cargoSpace);
+		const totalLoadedThisStop = cargoHoldLoadedThisStop + Math.max(0, ammoLoadingIntoAmmoBank) + Math.max(0, Number(fuelLoadedThisStop || 0));
+	        if (totalLoadedThisStop <= 0 && expectedCnt > 0) {
 	            updateFleetState(userFleets[i], 'ERROR: No cargo loaded');
-	            cLog(2,`${FleetTimeStamp(userFleets[i].label)} ERROR: No cargo loaded`);
+	            cLog(2,`${FleetTimeStamp(userFleets[i].label)} ERROR: No cargo, ammo, or fuel loaded`);
 	            if(globalSettings.emailNoCargoLoaded) await sendEMail(userFleets[i].label + ' no cargo loaded', notEnoughInfo);
 	        }
 		return { success: !userFleets[i].state.includes('ERROR'), transactions: transactions, loadedCargo: loadedCargo};
