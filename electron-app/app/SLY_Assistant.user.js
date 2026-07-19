@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-144
+// @aephia-version 0.7.35-145
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-144'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-145'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4881,6 +4881,23 @@
 		}
 	}
 
+	async function applyConfirmedCargoTelemetry(ix, fleet) {
+		if(!globalSettings.influxURL.length || !fleet) return;
+		const instructions = Array.isArray(ix) ? ix : [ix];
+		const operations = instructions.map(item => item?.slyaCargoTelemetry).filter(Boolean);
+		if(!operations.length) return;
+		const fleetSavedData = await GM.getValue(fleet.publicKey.toString(), '{}');
+		const fleetParsedData = JSON.parse(fleetSavedData);
+		for(const operation of operations) {
+			if(operation.kind === 'load') {
+				await addFleetTelemetryCargoLoad(fleet, fleetParsedData, operation);
+			} else if(operation.kind === 'unload') {
+				const deliveryCycle = await addFleetTelemetryCargoDelivery(fleet, fleetParsedData, operation);
+				if(deliveryCycle) scheduleFleetTelemetryCostCycleFinalization(fleet, fleetParsedData, operation.starbase);
+			}
+		}
+	}
+
 	async function addFleetTelemetryCargoLoad(fleet, fleetParsedData, load) {
 		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return null;
 		if(!load || load.loadType !== 'cargo_in' || !(Number(load.amount || 0) > 0)) return null;
@@ -7897,6 +7914,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				await alterStats(statGroup,opName,fullMsTaken/1000,'Seconds',1); //statsadd
 				await alterFees(fullMsTaken/1000, opName); //autofee
 
+				if(!instructionError && !(txResult?.meta?.err)) {
+					try { await applyConfirmedCargoTelemetry(ix, fleet); }
+					catch(error) { cLog(1, `${FleetTimeStamp(fleetName)} <${opName}> confirmed cargo telemetry failed`, error); }
+				}
 				resolve(txResult);
 			}
 		});
@@ -8529,6 +8550,16 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					//let txResult = await txSignAndSend(tx, fleet, 'UNLOAD', 100);
 					let txResult;
 					if(returnTx) {
+						tx.slyaCargoTelemetry = {
+							kind: 'unload',
+							loadType: fleetCargoPod == fleet.fuelTank ? 'fuel_out' : fleetCargoPod == fleet.ammoBank ? 'ammo_out' : 'cargo_out',
+							mint: tokenMint,
+							rssName: cargoItems.find(r => r.token == tokenMint)?.name,
+							amount,
+							starbase: validTargets.find(target => (target.x + ',' + target.y) == (starbaseX + ',' + starbaseY))?.name,
+							sectorX: starbaseX,
+							sectorY: starbaseY
+						};
 						txResult = tx;
 					} else {
 						txResult = await txSignAndSend(tx, fleet, 'UNLOAD', 100);
@@ -8678,6 +8709,16 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				//Send tx
 				//txResult = {amount: amount, result: await txSignAndSend(tx, fleet, 'LOAD', 100)};
 				if(returnTx) {
+					tx.slyaCargoTelemetry = {
+						kind: 'load',
+						loadType: cargoPodTo == fleet.fuelTank ? 'fuel_in' : cargoPodTo == fleet.ammoBank ? 'ammo_in' : 'cargo_in',
+						mint: tokenMint,
+						rssName: cargoItems.find(r => r.token == tokenMint)?.name,
+						amount,
+						starbase: validTargets.find(target => (target.x + ',' + target.y) == (starbaseX + ',' + starbaseY))?.name,
+						sectorX: starbaseX,
+						sectorY: starbaseY
+					};
 					txResult = {amount: amount, tx: tx };
 				} else {
 					txResult = {amount: amount, result: await txSignAndSend(tx, fleet, 'LOAD', 100)};
