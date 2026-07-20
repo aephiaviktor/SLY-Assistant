@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-148
+// @aephia-version 0.7.35-149
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-148'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-149'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2851,12 +2851,11 @@
 			const srcCrew = Math.max(0, Math.floor(Number(src?.finalCrew || 0)));
 			const dstCrew = Math.max(0, Math.floor(Number(dst?.finalCrew || 0)));
 			if (srcCrew <= 0) return 0;
-			// Starting a stopped job is atomic: 0 -> minimum crew. If that transfer
-			// would strand the donor at 1..9, stop the donor completely instead.
+			// Starting a stopped job is atomic: 0 -> minimum crew. All other moves are 1 crew.
+			// The 1..9 illegal-allocations rule is enforced one level up by simulateRow, so any
+			// transfer that would strand the donor is rejected there rather than auto-expanded here.
 			let transferAmount = dstCrew === 0 ? UPGRADE_AUTOMATION_MIN_JOB_CREW : 1;
 			if (transferAmount > srcCrew) return 0;
-			const remainingSourceCrew = srcCrew - transferAmount;
-			if (remainingSourceCrew > 0 && remainingSourceCrew < UPGRADE_AUTOMATION_MIN_JOB_CREW) transferAmount = srcCrew;
 			return transferAmount;
 		};
 		const guardLimit = Math.max(1000, rows.length * Math.max(1, rows.reduce((sum, row) => sum + Math.max(0, Number(row.finalCrew || 0)), 0)) * 6);
