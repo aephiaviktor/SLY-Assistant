@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-155
+// @aephia-version 0.7.35-156
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-155'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-156'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4977,7 +4977,7 @@
 					clearTimeout(fleetTelemetryFinalizeTimers.get(timerKey));
 					fleetTelemetryFinalizeTimers.delete(timerKey);
 				}
-				await maybeFinalizeFleetTelemetryCostCycle(fleet, fleetParsedData, originStarbase);
+				await maybeFinalizeFleetTelemetryCostCycle(fleet, fleetParsedData, originStarbase, true);
 				cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
 			}
 		}
@@ -5067,7 +5067,7 @@
 		}, 60000));
 	}
 
-	async function maybeFinalizeFleetTelemetryCostCycle(fleet, fleetParsedData, starbaseName) {
+	async function maybeFinalizeFleetTelemetryCostCycle(fleet, fleetParsedData, starbaseName, confirmedOrigin = false) {
 		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return false;
 		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
 		const originStarbase = cycle.originStarbase;
@@ -5077,10 +5077,17 @@
 		// unblocks transport fleets (e.g. CF-05|Phantom) that deliver to a
 		// different starbase than their loading origin.
 		if(!originStarbase || !cycle.originCoord) return false;
-		const fleetCoords = ConvertCoords(fleet.coords || fleet.starbaseCoord || '');
 		const [originX, originY] = cycle.originCoord.split(',').map(part => Number(String(part).trim()));
 		if(!Number.isFinite(originX) || !Number.isFinite(originY)) return false;
-		if(fleetCoords[0] !== originX || fleetCoords[1] !== originY) return false;
+		// Skip the fleet.coords re-check when the movement caller has already
+		// verified arrival via movementCost.destX/Y (passed confirmedOrigin=true).
+		// fleet.coords is refreshed by a separate fetch that can lag the movement
+		// event, so on the arrival tick the outer destX/Y match passes but a stale
+		// fleet.coords would otherwise reject a valid arrival.
+		if(!confirmedOrigin) {
+			const fleetCoords = ConvertCoords(fleet.coords || fleet.starbaseCoord || '');
+			if(fleetCoords[0] !== originX || fleetCoords[1] !== originY) return false;
+		}
 		const deliveries = cycle.deliveries.filter(item => Number(item?.cargoVolume || 0) > 0);
 		const totalVolume = deliveries.reduce((sum, item) => sum + Number(item.cargoVolume || 0), 0);
 		if(deliveries.length < 1 || totalVolume <= 0) return false;
