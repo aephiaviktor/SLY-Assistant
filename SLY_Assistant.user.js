@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-153
+// @aephia-version 0.7.35-154
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-153'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-154'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -6139,9 +6139,13 @@ function renderAssistStats() {
 							const rows = persistedPlan?.rows || [];
 							const schedule = persistedPlan ? { targetFinishAtUtc: persistedPlan.targetFinishAtUtc } : {};
 							const receipt = persistedPlan ? await loadUpgradeAutomationSchedulerReceipt(globalSettings, now) : null;
-							const writeDue = persistedPlan ? isUpgradeAutomationSchedulerPlanWriteDue(persistedPlan, now) : false;
 							const writeAfterUtc = persistedPlan ? getUpgradeAutomationSchedulerWriteAfterUtc(persistedPlan) : '';
 							const writeDelayMs = writeAfterUtc ? Math.max(0, now.getTime() - new Date(writeAfterUtc).getTime()) : 0;
+							// Viktor: Rate limit - no more than once every 5 minutes (replaces write_not_due gate). Optimizer runs at UTC min 50, LP Control every 5 min, so 5 min is the natural cadence.
+							const schedulerRateLimitMs = 5 * 60 * 1000;
+							const schedulerLastWriteAt = Number(window.schedulerLastWriteAt || 0);
+							const schedulerRateLimited = schedulerLastWriteAt > 0 && (now.getTime() - schedulerLastWriteAt < schedulerRateLimitMs);
+							const schedulerRateLimitRemainingMs = schedulerRateLimited ? Math.max(0, schedulerRateLimitMs - (now.getTime() - schedulerLastWriteAt)) : 0;
 							if (!persistedPlan) {
 								if (currentMinute === 57) {
 									await logUpgradeAutomationSchedulerEvent('Write skipped', { utc: now.toISOString(), rows: 0, target: '', reason: 'no_persisted_plan', writeAfterUtc, writeDelayMs });
@@ -6166,9 +6170,9 @@ function renderAssistStats() {
 								if (currentMinute === 57) {
 									await logUpgradeAutomationSchedulerEvent('Write skipped', { utc: now.toISOString(), rows: rows.length, target: '', reason: 'missing_target', writeAfterUtc, writeDelayMs });
 								}
-							} else if (!writeDue) {
+							} else if (schedulerRateLimited) {
 								if (currentMinute === 57) {
-									await logUpgradeAutomationSchedulerEvent('Write skipped', { utc: now.toISOString(), rows: rows.length, target: schedule.targetFinishAtUtc || '', reason: 'write_not_due', writeAfterUtc, writeDelayMs });
+									await logUpgradeAutomationSchedulerEvent('Write skipped', { utc: now.toISOString(), rows: rows.length, target: schedule.targetFinishAtUtc || '', reason: 'rate_limited', writeAfterUtc, writeDelayMs, rateLimitRemainingMs: schedulerRateLimitRemainingMs });
 								}
 							} else {
 								window.schedulerPrimaryWriteInFlightCycleStamp = persistedPlan.cycleStamp;
@@ -6185,6 +6189,7 @@ function renderAssistStats() {
 									window.schedulerPendingPlanRows = null;
 									window.schedulerPendingCaptureHour = null;
 									window.schedulerLastPlanSchedule = null;
+									window.schedulerLastWriteAt = now.getTime();
 									await logUpgradeAutomationSchedulerEvent('WRITE complete', { utc: new Date().toISOString(), rows: rows.length, target: schedule.targetFinishAtUtc, writeDelayMs });
 									renderLpAutomationContent(); // Viktor: update the LP Automation panel UI with fresh debug info after write
 								} finally {
@@ -6199,12 +6204,6 @@ function renderAssistStats() {
 					const persistedPlan = await loadUpgradeAutomationSchedulerPlan(globalSettings, now);
 					if (!persistedPlan) {
 						await logUpgradeAutomationSchedulerEvent('Fallback skipped - no persisted plan', { utc: now.toISOString() });
-					} else if (!isUpgradeAutomationSchedulerPlanWriteDue(persistedPlan, now)) {
-						await logUpgradeAutomationSchedulerEvent('Fallback skipped - plan not due', {
-							utc: now.toISOString(),
-							target: persistedPlan.targetFinishAtUtc || '',
-							writeAfterUtc: getUpgradeAutomationSchedulerWriteAfterUtc(persistedPlan)
-						});
 					} else {
 						const receipt = await loadUpgradeAutomationSchedulerReceipt(globalSettings, now);
 						const verification = await verifyUpgradeAutomationSchedulerPlanWritten(persistedPlan);
