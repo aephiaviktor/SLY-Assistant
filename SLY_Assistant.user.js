@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-157
+// @aephia-version 0.7.35-158
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-157'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-158'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2607,7 +2607,8 @@
 				const currentNeutralDeficitDay = currentNeutralUpgradingDay - Number(row.craft24h || 0);
 				return Number(row.inventoryGlobal || 0) > 0 && getUpgradeAutomationEffectiveDrain(currentNeutralDeficitDay, row.observedDrain) <= 0;
 			};
-			const neutralCrewStep = row => Number(row.crew || 0) === 0 ? UPGRADE_AUTOMATION_MIN_JOB_CREW : 1;
+			// Viktor: v158 - step by 1 always. The floor (1..9 → 0) is enforced in simulateRow via effectiveProjectedCrew, so the optimizer naturally avoids wasted 1..9 allocations without an atomic jump.
+			const neutralCrewStep = row => 1;
 			for (const row of activeRows) {
 				while (usedCrew < totalCrew && isCurrentInfinity(row)) {
 					const crewStep = neutralCrewStep(row);
@@ -2712,7 +2713,8 @@
 			if (!row?.phantomUpgradeEligible || row.targetPhaseBlocked) return { legal: false };
 			if (!Number.isFinite(projectedCrew) || projectedCrew < 0) return { legal: false };
 			const normalizedProjectedCrew = Math.max(0, Math.floor(Number(projectedCrew || 0)));
-			if (normalizedProjectedCrew > 0 && normalizedProjectedCrew < UPGRADE_AUTOMATION_MIN_JOB_CREW) return { legal: false };
+			// Viktor: v158 - floor-aware search. 1..9 crew is wasted (floored to 0 in post-processing), so the effective crew for LP evaluation is 0 for that range. The optimizer naturally skips 1..9 because they contribute 0 LP, but is still allowed to consider them internally.
+			const effectiveProjectedCrew = (normalizedProjectedCrew > 0 && normalizedProjectedCrew < UPGRADE_AUTOMATION_MIN_JOB_CREW) ? 0 : normalizedProjectedCrew;
 			if (Number.isFinite(Number(row.specialRiskMaxCrew)) && normalizedProjectedCrew > Number(row.specialRiskMaxCrew)) return { legal: false };
 			if (row.specialRiskControlled && Number.isFinite(Number(row.specialRiskMaxCrew))) {
 				const projectedSpecialCrew = rows.reduce((sum, candidate) => {
@@ -2721,7 +2723,7 @@
 				}, 0);
 				if (projectedSpecialCrew > Number(row.specialRiskMaxCrew)) return { legal: false };
 			}
-			const projected = projectUpgradeAutomationFinalRow(row, projectedCrew, remainingHours);
+			const projected = projectUpgradeAutomationFinalRow(row, effectiveProjectedCrew, remainingHours);
 			const projectedHourly = Number(projected.finalUpgradingHour || 0);
 			const availableInventory = Number(row.inventoryGlobal || 0);
 			const inventoryFeasible = !Number.isFinite(projectedHourly) || projectedHourly <= availableInventory;
@@ -2857,7 +2859,8 @@
 			// Starting a stopped job is atomic: 0 -> minimum crew. All other moves are 1 crew.
 			// The 1..9 illegal-allocations rule is enforced one level up by simulateRow, so any
 			// transfer that would strand the donor is rejected there rather than auto-expanded here.
-			let transferAmount = dstCrew === 0 ? UPGRADE_AUTOMATION_MIN_JOB_CREW : 1;
+			// Viktor: v158 - transfer 1 crew at a time. The floor (1..9 → 0) in simulateRow prevents partial transfers that would strand the donor or receiver in 1..9.
+			let transferAmount = 1;
 			if (transferAmount > srcCrew) return 0;
 			return transferAmount;
 		};
@@ -2945,6 +2948,18 @@
 			row.optimizerDestination = destNames.has(optimizerKey);
 			row.actualOptimizerSource = actualSourceNames.has(optimizerKey);
 			row.actualOptimizerDestination = actualDestNames.has(optimizerKey);
+		}
+		// Viktor: v158 - post-processing floor. Any row with 0 < finalCrew < 10 is floored to 0. This is a safety net for any 1..9 allocations that slipped through the floor-aware search (e.g. direct assignments that bypassed simulateRow). Single-pass only; freed crew is NOT reallocated (deferred until we have production data on how much is actually wasted).
+		let v158FlooredCrewTotal = 0;
+		for (const row of rows) {
+			const fc = Math.max(0, Math.floor(Number(row.finalCrew || 0)));
+			if (fc > 0 && fc < UPGRADE_AUTOMATION_MIN_JOB_CREW) {
+				v158FlooredCrewTotal += fc;
+				row.finalCrew = 0;
+			}
+		}
+		if (v158FlooredCrewTotal > 0) {
+			try { cLog(1, `[UPGRADE-AUTO][V158-FLOOR] floored ${v158FlooredCrewTotal} crew (1..9 → 0) across ${rows.filter(r => Math.max(0, Math.floor(Number(r.finalCrew || 0))) === 0).length} rows; freed crew NOT reallocated in single-pass mode`); } catch (e) {}
 		}
 		return {
 			rows,
