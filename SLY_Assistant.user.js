@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-150
+// @aephia-version 0.7.35-151
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-150'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-151'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -16129,65 +16129,55 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
     }
 
 
+    const SLYA_STARBASE_COORDINATES_BY_FACTION = {
+        MUD: [
+            {name: 'MUD-PHANTOM', x: 0, y: -24},
+            {name: 'MUD-1', x: 0, y: -39},
+            {name: 'MUD-2', x: 2, y: -34},
+            {name: 'MUD-3', x: 10, y: -41},
+            {name: 'MUD-4', x: -2, y: -44},
+            {name: 'MUD-5', x: -10, y: -37},
+            {name: 'MRZ-1', x: -15, y: -33}, {name: 'MRZ-2', x: 12, y: -31},
+            {name: 'MRZ-3', x: -22, y: -25}, {name: 'MRZ-4', x: -8, y: -24},
+            {name: 'MRZ-5', x: 2, y: -23}, {name: 'MRZ-6', x: 11, y: -16},
+            {name: 'MRZ-7', x: 21, y: -26}, {name: 'MRZ-8', x: -30, y: -16},
+            {name: 'MRZ-9', x: -14, y: -16}, {name: 'MRZ-10', x: 23, y: -12},
+            {name: 'MRZ-11', x: 31, y: -19}, {name: 'MRZ-12', x: -16, y: 0}
+        ],
+        ONI: [
+            {name: 'ONI-PHANTOM', x: -28, y: 21},
+            {name: 'ONI-1', x: -40, y: 30}, {name: 'ONI-2', x: -42, y: 35},
+            {name: 'ONI-3', x: -30, y: 30}, {name: 'ONI-4', x: -38, y: 25},
+            {name: 'ONI-5', x: -47, y: 30},
+            {name: 'MRZ-13', x: -36, y: -7}, {name: 'MRZ-14', x: -23, y: 4},
+            {name: 'MRZ-18', x: -40, y: 3}, {name: 'MRZ-19', x: -35, y: 12},
+            {name: 'MRZ-20', x: -25, y: 15}, {name: 'MRZ-24', x: -45, y: 15},
+            {name: 'MRZ-25', x: -18, y: 23}, {name: 'MRZ-26', x: -9, y: 24},
+            {name: 'MRZ-29', x: -22, y: 32}, {name: 'MRZ-30', x: -19, y: 40},
+            {name: 'MRZ-31', x: -8, y: 35}, {name: 'MRZ-36', x: 0, y: 16}
+        ],
+        UST: [
+            {name: 'UST-PHANTOM', x: 28, y: 21},
+            {name: 'UST-1', x: 40, y: 30}, {name: 'UST-2', x: 42, y: 35},
+            {name: 'UST-3', x: 48, y: 32}, {name: 'UST-4', x: 38, y: 25},
+            {name: 'UST-5', x: 30, y: 28},
+            {name: 'MRZ-15', x: 22, y: 5}, {name: 'MRZ-16', x: 39, y: -1},
+            {name: 'MRZ-17', x: 16, y: -5}, {name: 'MRZ-21', x: 25, y: 14},
+            {name: 'MRZ-22', x: 35, y: 16}, {name: 'MRZ-23', x: 44, y: 10},
+            {name: 'MRZ-27', x: 2, y: 26}, {name: 'MRZ-28', x: 17, y: 21},
+            {name: 'MRZ-32', x: 5, y: 44}, {name: 'MRZ-33', x: 13, y: 37},
+            {name: 'MRZ-34', x: 22, y: 31}, {name: 'MRZ-35', x: 49, y: 20}
+        ]
+    };
+
     async function getAllStarbasesForFaction(faction) {
-        return new Promise(async resolve => {
-
-			cLog(1, 'Reading faction starbases');
-			let starbases = await sageProgram.account.starbase.all([
-				{
-					memcmp: {
-						offset: 201,
-						bytes: [faction]
-					}
-				}
-			]);
-			cLog(1, starbases.length, 'read');
-
-			cLog(1, 'Reading all planets');
-			let planets = await sageProgram.account.planet.all([]);
-			cLog(1, planets.length, 'read');
-
-			// first we group all planets of the same sector:
-			let planetSectors = [];
-			planets.forEach((planet) => {
-				let label = (new TextDecoder("utf-8").decode(new Uint8Array(planet.account.name))).replace(/\0/g, '');
-				let x=planet.account.sector[0].toNumber();
-				let y=planet.account.sector[1].toNumber();
-				if(typeof planetSectors[x] == 'undefined') {
-					planetSectors[x] = [];
-				}
-				if(typeof planetSectors[x][y] == 'undefined') {
-					planetSectors[x][y] = [];
-				}
-				planetSectors[x][y].push(planet);
-			});
-
-			// now we find out the system names by looking at the planet names
-			let validMainTargets = [];
-			let validMRZTargets = [];
-			starbases.forEach((starbase) => {
-				let x=starbase.account.sector[0].toNumber();
-				let y=starbase.account.sector[1].toNumber();
-				let planets=planetSectors[x][y];
-				let name = (new TextDecoder("utf-8").decode(new Uint8Array(planets[0].account.name))).replace(/\0/g, '').split('-');
-				let systemName = name[0] + '-' + name[1];
-				if(name[0] == 'MRZ') {
-					validMRZTargets.push({x, y, name: systemName});
-				} else {
-					validMainTargets.push({x, y, name: systemName});
-				}
-				planetData.push({coords: [x,y], lastUpdated: Date.now(), planets: planets});
-				starbaseData.push({coords: [x,y], lastUpdated: Date.now(), starbase: starbase});
-			});
-			validMainTargets.sort((a, b) => { if (a.name < b.name) { return -1; } if (a.name > b.name) { return 1; } return 0; });
-			//validMainTargets[0].name = (validMainTargets[0].name.includes('-1') ? validMainTargets[0].name.replace('-1','-CSS') : validMainTargets[0].name);
-			validMRZTargets.sort((a, b) => { if (a.name < b.name) { return -1; } if (a.name > b.name) { return 1; } return 0; });
-			validTargets = validMainTargets.concat(validMRZTargets);
-
-			console.log('validTargets:',validTargets);
-
-            resolve();
-        });
+        const factionName = faction === 1 ? 'MUD' : faction === 2 ? 'ONI' : faction === 3 ? 'UST' : 'MUD';
+        const targets = SLYA_STARBASE_COORDINATES_BY_FACTION[factionName] || [];
+        const sortByName = (a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+        const validMainTargets = targets.filter(t => !t.name.startsWith('MRZ-')).sort(sortByName).map(t => ({x: t.x, y: t.y, name: t.name}));
+        const validMRZTargets  = targets.filter(t =>  t.name.startsWith('MRZ-')).sort(sortByName).map(t => ({x: t.x, y: t.y, name: t.name}));
+        validTargets = validMainTargets.concat(validMRZTargets);
+        cLog(1, 'validTargets:', validTargets);
     }
 
 
