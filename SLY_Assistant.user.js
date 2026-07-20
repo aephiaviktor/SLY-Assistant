@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-154
+// @aephia-version 0.7.35-155
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-154'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-155'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4815,6 +4815,20 @@
 		// maybeFinalizeFleetTelemetryCostCycle).
 		cycle.originStarbase = String(cycle.originStarbase || '');
 		cycle.originCoord = String(cycle.originCoord || '');
+		// Migration: 0.7.35-153 saved in-flight cycles with homeStarbase (fleet's home
+		// name) but no originStarbase / originCoord, so the new position gate
+		// (if(!originStarbase || !cycle.originCoord) return false) rejected every
+		// finalize attempt and writes to cargo_cost_allocation stopped. Backfill from
+		// the legacy homeStarbase and the fleet's current home coord so stuck cycles
+		// can finalize on the next round-trip close. Only fills empty fields, so new
+		// cycles stamped by addFleetTelemetryCargoLoad in 153+ are not overwritten.
+		if(!cycle.originStarbase && cycle.homeStarbase) {
+			cycle.originStarbase = String(cycle.homeStarbase);
+		}
+		if(!cycle.originCoord) {
+			const homeCoord = String(fleet?.starbaseCoord || '').trim().replace(/\s+/g, '');
+			if(/^-?\d+\s*,\s*-?\d+$/.test(homeCoord)) cycle.originCoord = homeCoord;
+		}
 		cycle.startedAt = Number(cycle.startedAt || Date.now());
 		cycle.movementCount = Math.max(0, Number(cycle.movementCount || 0));
 		cycle.burnedFuel = Math.max(0, Number(cycle.burnedFuel || 0));
