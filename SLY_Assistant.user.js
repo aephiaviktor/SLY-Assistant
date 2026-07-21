@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-163
+// @aephia-version 0.7.35-164
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-163'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-164'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2447,12 +2447,33 @@
 	}
 
 	let lastUpgradeAutomationLpPerProfileCycleMs = 0;
+	let lastUpgradeAutomationLpPerProfileSkipLogMs = 0;
 
 	async function runUpgradeAutomationLpPerProfileCycle(now = new Date()) {
 		try {
 			if (now.getTime() - lastUpgradeAutomationLpPerProfileCycleMs < UPGRADE_AUTOMATION_LP_PER_PROFILE_CYCLE_MIN_MS) return;
-			if (typeof userProfileAcct === 'undefined' || !userProfileAcct) return;
+			if (typeof userProfileAcct === 'undefined' || !userProfileAcct) {
+				// Throttled diagnostic log: previously this was a silent return, which
+				// made the "no data in InfluxDB" symptom impossible to distinguish from
+				// "no in-flight processes". The cycle now writes a single line per minute
+				// when it bails on an undefined wallet profile.
+				const nowMs = now.getTime();
+				if (nowMs - lastUpgradeAutomationLpPerProfileSkipLogMs > 60000) {
+					lastUpgradeAutomationLpPerProfileSkipLogMs = nowMs;
+					try { await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] skip: userProfileAcct undefined`); } catch (_) {}
+				}
+				return;
+			}
 			const userProfilePubkey = userProfileAcct.toBase58();
+			// Throttled diagnostic log: record the active profile pubkey at cycle start
+			// so we can see whether the wrong profile is active for the current faction
+			// (e.g. UST profile on a MUD instance → queries MUD starbase with UST pubkey
+			// → no player → empty aggregate). One line per minute is enough.
+			const nowMs2 = now.getTime();
+			if (nowMs2 - lastUpgradeAutomationLpPerProfileSkipLogMs > 60000) {
+				lastUpgradeAutomationLpPerProfileSkipLogMs = nowMs2;
+				try { await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] cycle start userProfile=${userProfilePubkey}`); } catch (_) {}
+			}
 			const factions = getUpgradeAutomationLpPerProfileFactions();
 			for (const { faction, lpInstance, starbaseCoords } of factions) {
 				try {
