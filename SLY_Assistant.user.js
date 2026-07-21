@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-168
+// @aephia-version 0.7.35-169
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-168'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-169'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2428,6 +2428,10 @@
 	let upgradeAutomationLpPerProfileCycleInFlight = false;
 
 	async function runUpgradeAutomationLpPerProfileCycle(now = new Date()) {
+		if (!globalSettings.upgradeAutomationInfluxTracking) {
+			await appendUpgradeAutomationLog('[UPGRADE-AUTO][LP-PER-PROFILE] skip: InfluxDB Performance Tracking disabled');
+			return;
+		}
 		if (upgradeAutomationLpPerProfileCycleInFlight || now.getTime() - lastUpgradeAutomationLpPerProfileCycleMs < UPGRADE_AUTOMATION_LP_PER_PROFILE_CYCLE_MIN_MS) return;
 		upgradeAutomationLpPerProfileCycleInFlight = true;
 		lastUpgradeAutomationLpPerProfileCycleMs = now.getTime();
