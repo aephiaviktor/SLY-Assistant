@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-165
+// @aephia-version 0.7.35-166
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-165'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-166'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2237,300 +2237,212 @@
 		return '';
 	}
 
-	// ===== Per-profile LP tracking (SLY_17, added 2026-07-21) =====
-	// Aggregates upgrade-recipe crafting processes by player profile, across
-	// all starbases per faction. Writes one row per (faction, instance,
-	// starbase, profile, component, source) to the `lp_per_profile` InfluxDB
-	// measurement.
-	//   source='active'   = processes whose endTime > now (LP not yet earned)
-	//   source='redeemed' = processes whose endTime <= now (LP already earned
-	//                       or about to be claimed; covers status 0..3 of
-	//                       currently-visible processes)
-	// NOTE: 'redeemed' relies on current state. Processes that have been
-	// fully closed (rent reclaimed, account deleted) are NOT captured here.
-	// To cover closed processes we'd need to parse historical
-	// `depositCraftingIngredient` / `createStarbaseUpgradeResourceProcess`
-	// txs via getSignaturesForAddress — TODO for a follow-up iteration.
-	const UPGRADE_AUTOMATION_LP_PER_PROFILE_CACHE_KEY = 'slyaUpgradeLpPerProfile_v1';
-	const UPGRADE_AUTOMATION_LP_PER_PROFILE_BACKFILL_DAYS = 14;
-	const UPGRADE_AUTOMATION_LP_PER_PROFILE_CYCLE_MIN_MS = 60000; // 60s
+	// ===== Per-profile LP tracking (SLY_19, rewritten 2026-07-21) =====
+	// Discovers every StarbasePlayer at each configured faction upgrade starbase,
+	// resolves its exact playerProfile, then aggregates live upgrade processes by
+	// player profile across all configured starbases. The active snapshot is
+	// independent of the wallet/profile loaded in this SLYA instance.
+	const UPGRADE_AUTOMATION_LP_PER_PROFILE_CYCLE_MIN_MS = 60000; // in-run guard only
+	const UPGRADE_AUTOMATION_STARBASE_PLAYER_STARBASE_OFFSET = 73;
 
 	function getUpgradeAutomationLpPerProfileFactions() {
 		const out = [];
 		try {
-			// Filter to only the faction matching the current SLYA instance.
-			// The full UPGRADE_AUTOMATION_FACTION_CONFIG has MUD/ONI/UST, but
-			// each SLYA instance is bound to one faction (MUD instance → MUD
-			// faction, USTUR1/USTUR2 → UST). Iterating all factions made the
-			// cycle query the MUD user's profile against ONI/UST starbases
-			// where they have no player, producing an empty aggregate for
-			// the wrong reasons and overwriting the cache with the last
-			// (wrong) faction processed.
 			const currentInstance = String((typeof globalSettings !== 'undefined' && globalSettings && (globalSettings.slyInstanceName || globalSettings.fleetFaction)) || '').toUpperCase();
 			const instanceToLp = currentInstance.startsWith('MUD') ? 1
 				: currentInstance.startsWith('ONI') ? 2
 				: currentInstance.startsWith('UST') ? 3
 				: 0;
-			const entries = Object.entries(UPGRADE_AUTOMATION_FACTION_CONFIG || {});
-			for (const [faction, cfg] of entries) {
-				if (!cfg || !Array.isArray(cfg.upgradeStarbaseCoords) || cfg.upgradeStarbaseCoords.length === 0) continue;
+			for (const [faction, cfg] of Object.entries(UPGRADE_AUTOMATION_FACTION_CONFIG || {})) {
+				if (!cfg || !Array.isArray(cfg.upgradeStarbaseCoords) || !cfg.upgradeStarbaseCoords.length) continue;
 				const lpInstance = Number(cfg.lpInstance || 0);
-				if (instanceToLp) {
-					if (lpInstance !== instanceToLp) continue;
-				} else {
-					// Fallback: substring match on the faction key.
-					if (!currentInstance || !currentInstance.includes(String(faction).toUpperCase())) continue;
-				}
+				if (instanceToLp ? lpInstance !== instanceToLp : (!currentInstance || !currentInstance.includes(String(faction).toUpperCase()))) continue;
 				out.push({
 					faction: String(faction),
-					lpInstance: Number(cfg.lpInstance || 0),
+					lpInstance,
 					starbaseCoords: cfg.upgradeStarbaseCoords.map(c => String(c))
 				});
 			}
-		} catch (e) { /* swallow */ }
+		} catch (e) { /* caller logs empty configuration */ }
 		return out;
 	}
 
-	function resolveUpgradeAutomationLpStarbasePlayerProfile(starbasePlayer) {
+	function getUpgradeAutomationLpProcessQuantity(craftingProcess) {
 		try {
-			if (!starbasePlayer || !starbasePlayer.account) return null;
-			const acc = starbasePlayer.account;
-			const candidates = ['profile', 'playerProfile', 'ownerProfile', 'profilePubkey', 'profileKey', 'owner'];
-			for (const field of candidates) {
-				const val = acc[field];
-				if (!val) continue;
-				if (typeof val.toBase58 === 'function') return val.toBase58();
-				if (typeof val === 'string' && val.length > 0) return val;
-				if (val && typeof val === 'object' && typeof val.toString === 'function') {
-					const s = String(val);
-					if (s && s.length >= 32) return s;
-				}
-			}
-		} catch (e) { /* swallow */ }
-		return null;
+			const raw = craftingProcess?.account?.quantity;
+			const quantity = raw && typeof raw.toNumber === 'function' ? raw.toNumber() : Number(raw || 0);
+			return Number.isSafeInteger(quantity) && quantity > 0 ? quantity : 0;
+		} catch (e) { return 0; }
 	}
 
-	async function getUpgradeAutomationLpPerProfileProcessesForStarbase(coords, userProfileAcct, now) {
+	async function getUpgradeAutomationLpPerProfileProcessesForStarbase(coords, now, accountSnapshot) {
 		const out = [];
-		// Diagnostic counters: previously every filter step was a silent
-		// continue / return with no log, so when the aggregate came back
-		// empty there was no way to know which gate was dropping the rows.
-		// The lp_per_profile cycle runs every hour and we have 0/14 days of
-		// rows in InfluxDB, so we need the per-filter breakdown to find
-		// the actual silent drop. Counters are written to a single summary
-		// line at the end (try/finally) so we get one line per starbase
-		// per cycle, no matter which gate bails.
-		let dbgCraftingInstances = 0;
-		let dbgCraftingProcesses = 0;
-		let dbgDroppedRecipe = 0;
-		let dbgDroppedCraftingId = 0;
-		let dbgDroppedStatus = 0;
-		let dbgDroppedEndTime = 0;
-		let dbgDroppedComponent = 0;
-		let dbgBailReason = '';
+		const seenProcesses = new Set();
+		const dbg = { starbasePlayers: 0, craftingInstances: 0, craftingProcesses: 0, droppedRecipe: 0, droppedQuantity: 0, droppedTime: 0, pushed: 0, bail: '' };
 		try {
 			const coordParts = String(coords || '').split(',').map(v => parseInt(String(v).trim(), 10));
-			if (coordParts.length !== 2 || !coordParts.every(Number.isFinite)) { dbgBailReason = 'invalid_coords'; return out; }
+			if (coordParts.length !== 2 || !coordParts.every(Number.isFinite)) { dbg.bail = 'invalid_coords'; return out; }
 			const starbase = await getStarbaseFromCoords(coordParts[0], coordParts[1], true);
-			if (!starbase || !starbase.publicKey) { dbgBailReason = 'no_starbase'; return out; }
-			const starbasePlayerAcct = userProfileAcct ? await getStarbasePlayer(userProfileAcct, starbase.publicKey) : null;
-			if (!starbasePlayerAcct) { dbgBailReason = 'no_starbase_player'; return out; }
-			const starbasePlayerPubkey = starbasePlayerAcct.publicKey || starbasePlayerAcct;
-			if (!starbasePlayerPubkey || typeof starbasePlayerPubkey.toBase58 !== 'function') { dbgBailReason = 'no_player_pubkey'; return out; }
-			const profilePubkey = resolveUpgradeAutomationLpStarbasePlayerProfile(starbasePlayerAcct);
-			if (!profilePubkey) { dbgBailReason = 'no_profile_pubkey'; return out; }
+			if (!starbase?.publicKey) { dbg.bail = 'no_starbase'; return out; }
+
 			let upgradeTime = null;
 			try { upgradeTime = await getStarbaseTime(starbase, 'Upgrade'); } catch (e) { upgradeTime = null; }
-			const starbaseTime = (upgradeTime && Number.isFinite(Number(upgradeTime.starbaseTime)))
+			const starbaseTime = Number.isFinite(Number(upgradeTime?.starbaseTime))
 				? Number(upgradeTime.starbaseTime)
 				: Math.floor(now.getTime() / 1000);
-			const craftingInstances = await sageProgram.account.craftingInstance.all([{
-				memcmp: { offset: 11, bytes: starbasePlayerPubkey.toBase58() }
+			const secondsUntilUtcEod = Math.max(0, Math.floor((Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1) - now.getTime()) / 1000));
+
+			// StarbasePlayer layout: discriminator(8), version(1), playerProfile(32),
+			// gameId(32), starbase(32). Therefore starbase starts at byte 73.
+			const starbasePlayers = await sageProgram.account.starbasePlayer.all([{
+				memcmp: { offset: UPGRADE_AUTOMATION_STARBASE_PLAYER_STARBASE_OFFSET, bytes: starbase.publicKey.toBase58() }
 			}]);
-			dbgCraftingInstances = (craftingInstances || []).length;
+			dbg.starbasePlayers = (starbasePlayers || []).length;
 			const recipeNames = getUpgradeAutomationLpUpgradeRecipeNames();
-			for (const craftingInstance of (craftingInstances || [])) {
-				const craftingProcesses = await craftingProgram.account.craftingProcess.all([{
-					memcmp: { offset: 17, bytes: craftingInstance.publicKey.toBase58() }
-				}]);
-				for (const craftingProcess of (craftingProcesses || [])) {
-					dbgCraftingProcesses++;
-					try {
-						const recipe = upgradeRecipes.find(item => item.publicKey.toString() === craftingProcess.account.recipe.toString());
-						if (!recipe || !recipeNames.has(recipe.name)) { dbgDroppedRecipe++; continue; }
-						const craftingId = craftingProcess.account.craftingId ? craftingProcess.account.craftingId.toNumber() : 0;
-						if (!craftingId) { dbgDroppedCraftingId++; continue; }
-						const status = maybeBnToNumber(craftingProcess.account.status, craftingProcess.account.status);
-						if (![0, 1, 2, 3].includes(status)) { dbgDroppedStatus++; continue; }
-						const endTime = craftingProcess.account.endTime ? craftingProcess.account.endTime.toNumber() : 0;
-						if (!endTime) { dbgDroppedEndTime++; continue; }
-						const component = getUpgradeAutomationUpgradeRecipeComponentName(recipe.name);
-						const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[component] || 0);
-						if (!lpPerUnit) { dbgDroppedComponent++; continue; }
-						// quantity=1 per process (one upgrade-recipe batch per
-						// craftingProcess). Recipes typically produce 1 component
-						// per process; refine if a recipe produces more.
-						const quantity = 1;
-						const lp = lpPerUnit * quantity;
-						out.push({
-							profile: profilePubkey,
-							starbaseCoords: coords,
-							starbase: starbase.publicKey.toBase58(),
-							craftingProcess: craftingProcess.publicKey.toBase58(),
-							component,
-							recipeName: recipe.name,
-							status,
-							endTime,
-							starbaseTime,
-							remainingSeconds: Math.max(endTime - starbaseTime, 0),
-							completed: endTime <= starbaseTime,
-							quantity,
-							lp,
-							lpPerUnit
-						});
-					} catch (e) { /* skip this process */ }
+
+			const allCraftingInstances = accountSnapshot?.craftingInstances || [];
+			const allCraftingProcesses = accountSnapshot?.craftingProcesses || [];
+			const instancesByAuthority = new Map();
+			for (const craftingInstance of allCraftingInstances) {
+				const authority = craftingInstance?.account?.authority?.toBase58?.() || '';
+				if (!authority) continue;
+				if (!instancesByAuthority.has(authority)) instancesByAuthority.set(authority, []);
+				instancesByAuthority.get(authority).push(craftingInstance);
+			}
+			const processesByAuthority = new Map();
+			for (const craftingProcess of allCraftingProcesses) {
+				const authority = craftingProcess?.account?.authority?.toBase58?.() || '';
+				if (!authority) continue;
+				if (!processesByAuthority.has(authority)) processesByAuthority.set(authority, []);
+				processesByAuthority.get(authority).push(craftingProcess);
+			}
+
+			for (const starbasePlayer of (starbasePlayers || [])) {
+				const profileKey = starbasePlayer?.account?.playerProfile;
+				const profile = profileKey && typeof profileKey.toBase58 === 'function' ? profileKey.toBase58() : '';
+				const starbasePlayerKey = starbasePlayer?.publicKey;
+				if (!profile || !starbasePlayerKey) continue;
+				const craftingInstances = instancesByAuthority.get(starbasePlayerKey.toBase58()) || [];
+				dbg.craftingInstances += craftingInstances.length;
+
+				for (const craftingInstance of craftingInstances) {
+					const craftingProcesses = processesByAuthority.get(craftingInstance.publicKey.toBase58()) || [];
+					dbg.craftingProcesses += craftingProcesses.length;
+					for (const craftingProcess of (craftingProcesses || [])) {
+						try {
+							const processKey = craftingProcess.publicKey.toBase58();
+							if (seenProcesses.has(processKey)) continue;
+							seenProcesses.add(processKey);
+							const recipe = upgradeRecipes.find(item => item.publicKey.toString() === craftingProcess.account.recipe.toString());
+							if (!recipe || !recipeNames.has(recipe.name)) { dbg.droppedRecipe++; continue; }
+							const quantity = getUpgradeAutomationLpProcessQuantity(craftingProcess);
+							if (!quantity) { dbg.droppedQuantity++; continue; }
+							const endTime = craftingProcess.account.endTime?.toNumber ? craftingProcess.account.endTime.toNumber() : Number(craftingProcess.account.endTime || 0);
+							if (!Number.isFinite(endTime) || endTime <= starbaseTime) { dbg.droppedTime++; continue; }
+							const component = getUpgradeAutomationUpgradeRecipeComponentName(recipe.name);
+							const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[component] || 0);
+							if (!component || !lpPerUnit) { dbg.droppedRecipe++; continue; }
+							const remainingSeconds = Math.max(endTime - starbaseTime, 0);
+							out.push({
+								profile,
+								craftingProcess: processKey,
+								component,
+								quantity,
+								lp: lpPerUnit * quantity,
+								lpPerUnit,
+								endTime,
+								remainingSeconds,
+								completesByEod: remainingSeconds <= secondsUntilUtcEod
+							});
+							dbg.pushed++;
+						} catch (e) { dbg.droppedRecipe++; }
+					}
 				}
 			}
 		} catch (e) {
-			dbgBailReason = dbgBailReason || `starbase_error:${String(e?.message || e).slice(0, 80)}`;
+			dbg.bail = `starbase_error:${String(e?.message || e).slice(0, 120)}`;
 		} finally {
 			try {
-				await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] starbase=${coords} bail=${dbgBailReason || 'none'} ci=${dbgCraftingInstances} cp=${dbgCraftingProcesses} dr=${dbgDroppedRecipe} dci=${dbgDroppedCraftingId} ds=${dbgDroppedStatus} de=${dbgDroppedEndTime} dc=${dbgDroppedComponent} pushed=${out.length}`);
-			} catch (_) { /* swallow */ }
+				await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] starbase=${coords} bail=${dbg.bail || 'none'} sp=${dbg.starbasePlayers} ci=${dbg.craftingInstances} cp=${dbg.craftingProcesses} dr=${dbg.droppedRecipe} dq=${dbg.droppedQuantity} dt=${dbg.droppedTime} pushed=${dbg.pushed}`);
+			} catch (_) {}
 		}
 		return out;
 	}
 
-	function aggregateUpgradeAutomationLpPerProfile(processes, now) {
+	function aggregateUpgradeAutomationLpPerProfile(processes) {
 		const out = {};
-		try {
-			const cutoff = Math.floor(now.getTime() / 1000) - (UPGRADE_AUTOMATION_LP_PER_PROFILE_BACKFILL_DAYS * 86400);
-			for (const p of (processes || [])) {
-				if (!p || p.endTime < cutoff) continue;
-				const source = p.completed ? 'redeemed' : 'active';
-				if (!out[p.profile]) out[p.profile] = {};
-				if (!out[p.profile][p.starbaseCoords]) out[p.profile][p.starbaseCoords] = {};
-				if (!out[p.profile][p.starbaseCoords][p.component]) {
-					out[p.profile][p.starbaseCoords][p.component] = {
-						active: { lp: 0, quantity: 0, count: 0 },
-						redeemed: { lp: 0, quantity: 0, count: 0 }
-					};
-				}
-				const slot = out[p.profile][p.starbaseCoords][p.component][source];
-				slot.lp += Number(p.lp || 0);
-				slot.quantity += Number(p.quantity || 0);
-				slot.count += 1;
+		const seenProcesses = new Set();
+		for (const p of (processes || [])) {
+			if (!p?.profile || !p?.component || !p?.craftingProcess || seenProcesses.has(p.craftingProcess)) continue;
+			seenProcesses.add(p.craftingProcess);
+			if (!out[p.profile]) out[p.profile] = {};
+			if (!out[p.profile][p.component]) {
+				out[p.profile][p.component] = { lp: 0, quantity: 0, processCount: 0, lpByEod: 0, quantityByEod: 0, lpPerUnit: Number(p.lpPerUnit || 0) };
 			}
-		} catch (e) { /* swallow */ }
+			const slot = out[p.profile][p.component];
+			slot.lp += Number(p.lp || 0);
+			slot.quantity += Number(p.quantity || 0);
+			slot.processCount += 1;
+			if (p.completesByEod) {
+				slot.lpByEod += Number(p.lp || 0);
+				slot.quantityByEod += Number(p.quantity || 0);
+			}
+		}
 		return out;
 	}
 
-	function formatUpgradeAutomationLpPerProfileInfluxLine(aggregated, faction, lpInstance, now) {
+	function formatUpgradeAutomationLpPerProfileInfluxLine(aggregated, faction, now) {
 		const lines = [];
-		try {
-			const factionTag = String(faction || '').replace(/"/g, '');
-			const ts = Math.floor(now.getTime() * 1e6); // nanoseconds
-			for (const profile of Object.keys(aggregated || {})) {
-				for (const starbaseCoords of Object.keys(aggregated[profile] || {})) {
-					for (const component of Object.keys(aggregated[profile][starbaseCoords] || {})) {
-						for (const source of ['active', 'redeemed']) {
-							const slot = aggregated[profile][starbaseCoords][component]?.[source];
-							if (!slot || !slot.count) continue;
-							const tags = `faction=${influxEscape(factionTag)},instance=${influxEscape(String(lpInstance))},starbase=${influxEscape(starbaseCoords)},profile=${influxEscape(profile)},component=${influxEscape(component)},source=${influxEscape(source)}`;
-							const fields = `lp=${Math.round(slot.lp)},quantity=${Math.round(slot.quantity)}i,count=${Math.round(slot.count)}i,lpPerUnit=${Math.round(slot.lp / Math.max(slot.quantity, 1))}i`;
-							lines.push(`lp_per_profile,${tags} ${fields} ${ts}`);
-						}
-					}
-				}
+		const factionTag = String(faction || '').replace(/"/g, '');
+		const instanceTag = getSlyaInfluxInstanceTag();
+		const ts = Math.floor(now.getTime() * 1e6);
+		for (const profile of Object.keys(aggregated || {})) {
+			for (const component of Object.keys(aggregated[profile] || {})) {
+				const slot = aggregated[profile][component];
+				if (!slot?.processCount) continue;
+				const tags = `faction=${influxEscape(factionTag)},instance=${influxEscape(String(instanceTag))},profile=${influxEscape(profile)},component=${influxEscape(component)},source=active`;
+				const fields = `lp=${Math.round(slot.lp)},quantity=${Math.round(slot.quantity)}i,processCount=${Math.round(slot.processCount)}i,lpPerUnit=${Math.round(slot.lpPerUnit)}i,lpByEod=${Math.round(slot.lpByEod)},quantityByEod=${Math.round(slot.quantityByEod)}i`;
+				lines.push(`lp_per_profile,${tags} ${fields} ${ts}`);
 			}
-		} catch (e) { /* swallow */ }
+		}
 		return lines.join('\n');
 	}
 
-	async function sendUpgradeAutomationLpPerProfileToInflux(aggregated, faction, lpInstance, now) {
-		try {
-			const line = formatUpgradeAutomationLpPerProfileInfluxLine(aggregated, faction, lpInstance, now);
-			if (line) await sendToInflux(line);
-		} catch (e) { /* swallow */ }
-	}
-
-	async function loadUpgradeAutomationLpPerProfileCache() {
-		try {
-			const raw = await GM.getValue(UPGRADE_AUTOMATION_LP_PER_PROFILE_CACHE_KEY, null);
-			if (!raw) return null;
-			const parsed = JSON.parse(raw);
-			if (!parsed || !parsed.faction) return null;
-			return parsed;
-		} catch (e) { return null; }
-	}
-
-	async function saveUpgradeAutomationLpPerProfileCache(data) {
-		try {
-			await GM.setValue(UPGRADE_AUTOMATION_LP_PER_PROFILE_CACHE_KEY, JSON.stringify(data || {}));
-		} catch (e) { /* swallow */ }
+	async function sendUpgradeAutomationLpPerProfileToInflux(aggregated, faction, now) {
+		const line = formatUpgradeAutomationLpPerProfileInfluxLine(aggregated, faction, now);
+		if (!line) return { sent: false, rows: 0 };
+		const sent = await sendToInflux(line);
+		return { sent: sent === true, rows: line.split('\n').length };
 	}
 
 	let lastUpgradeAutomationLpPerProfileCycleMs = 0;
-	let lastUpgradeAutomationLpPerProfileSkipLogMs = 0;
 
 	async function runUpgradeAutomationLpPerProfileCycle(now = new Date()) {
-		try {
-			if (now.getTime() - lastUpgradeAutomationLpPerProfileCycleMs < UPGRADE_AUTOMATION_LP_PER_PROFILE_CYCLE_MIN_MS) return;
-			if (typeof userProfileAcct === 'undefined' || !userProfileAcct) {
-				// Throttled diagnostic log: previously this was a silent return, which
-				// made the "no data in InfluxDB" symptom impossible to distinguish from
-				// "no in-flight processes". The cycle now writes a single line per minute
-				// when it bails on an undefined wallet profile.
-				const nowMs = now.getTime();
-				if (nowMs - lastUpgradeAutomationLpPerProfileSkipLogMs > 60000) {
-					lastUpgradeAutomationLpPerProfileSkipLogMs = nowMs;
-					try { await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] skip: userProfileAcct undefined`); } catch (_) {}
-				}
-				return;
-			}
-			const userProfilePubkey = userProfileAcct.toBase58();
-			// Throttled diagnostic log: record the active profile pubkey at cycle start
-			// so we can see whether the wrong profile is active for the current faction
-			// (e.g. UST profile on a MUD instance → queries MUD starbase with UST pubkey
-			// → no player → empty aggregate). One line per minute is enough.
-			const nowMs2 = now.getTime();
-			if (nowMs2 - lastUpgradeAutomationLpPerProfileSkipLogMs > 60000) {
-				lastUpgradeAutomationLpPerProfileSkipLogMs = nowMs2;
-				try { await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] cycle start userProfile=${userProfilePubkey}`); } catch (_) {}
-			}
-			const factions = getUpgradeAutomationLpPerProfileFactions();
-			for (const { faction, lpInstance, starbaseCoords } of factions) {
-				try {
-					const cache = await loadUpgradeAutomationLpPerProfileCache();
-					const cacheValid = cache && cache.faction === faction && cache.userProfile === userProfilePubkey && cache.aggregated;
-					if (cacheValid) {
-						// Cache hit: re-emit cached lines (InfluxDB write is idempotent per row)
-						await sendUpgradeAutomationLpPerProfileToInflux(cache.aggregated, faction, lpInstance, now);
-						continue;
-					}
-					const allProcesses = [];
-					for (const coords of starbaseCoords) {
-						try {
-							const procs = await getUpgradeAutomationLpPerProfileProcessesForStarbase(coords, userProfileAcct, now);
-							allProcesses.push(...procs);
-						} catch (e) { /* skip this starbase */ }
-					}
-					const aggregated = aggregateUpgradeAutomationLpPerProfile(allProcesses, now);
-					await sendUpgradeAutomationLpPerProfileToInflux(aggregated, faction, lpInstance, now);
-					await saveUpgradeAutomationLpPerProfileCache({
-						faction,
-						userProfile: userProfilePubkey,
-						aggregated,
-						updatedAt: now.toISOString()
-					});
-				} catch (e) {
-					try { await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] faction=${faction} error: ${String(e?.message || e)}`); } catch (_) {}
-				}
-			}
-			lastUpgradeAutomationLpPerProfileCycleMs = now.getTime();
-		} catch (e) {
-			try { await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] cycle error: ${String(e?.message || e)}`); } catch (_) {}
+		if (now.getTime() - lastUpgradeAutomationLpPerProfileCycleMs < UPGRADE_AUTOMATION_LP_PER_PROFILE_CYCLE_MIN_MS) return;
+		if (!sageProgram?.account?.starbasePlayer || !sageProgram?.account?.craftingInstance || !craftingProgram?.account?.craftingProcess || !Array.isArray(upgradeRecipes) || !upgradeRecipes.length) {
+			await appendUpgradeAutomationLog('[UPGRADE-AUTO][LP-PER-PROFILE] skip: chain programs or upgrade recipes not ready');
+			return;
 		}
+		const factions = getUpgradeAutomationLpPerProfileFactions();
+		if (!factions.length) {
+			await appendUpgradeAutomationLog('[UPGRADE-AUTO][LP-PER-PROFILE] skip: no faction configuration for this instance');
+			return;
+		}
+		// Fetch each account type once per cycle. Filtering 1,788 decoded accounts
+		// in memory is substantially cheaper than issuing one RPC query for every
+		// StarbasePlayer (192 at MUD Phantom in the validation probe).
+		const accountSnapshot = {
+			craftingInstances: await sageProgram.account.craftingInstance.all(),
+			craftingProcesses: await craftingProgram.account.craftingProcess.all()
+		};
+		for (const { faction, starbaseCoords } of factions) {
+			const allProcesses = [];
+			for (const coords of starbaseCoords) allProcesses.push(...await getUpgradeAutomationLpPerProfileProcessesForStarbase(coords, now, accountSnapshot));
+			const aggregated = aggregateUpgradeAutomationLpPerProfile(allProcesses);
+			const result = await sendUpgradeAutomationLpPerProfileToInflux(aggregated, faction, now);
+			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] faction=${faction} profiles=${Object.keys(aggregated).length} processes=${allProcesses.length} rows=${result.rows} sent=${result.sent}`);
+		}
+		lastUpgradeAutomationLpPerProfileCycleMs = now.getTime();
 	}
 
 	async function reconcileUpgradeAutomationLpProcesses(settings = {}, reason = 'scheduler') {
@@ -13250,8 +13162,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	}
 
 	async function sendToInflux(msg) {
-		if(!globalSettings.influxURL.length) return;
+		if(!globalSettings.influxURL.length) return false;
 		let message = '';
+		let sent = false;
 		try {
 			cLog(2, 'Sending message to influx:', msg);
 			const influxWriteUrl = buildInfluxWriteUrl();
@@ -13270,12 +13183,14 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			} else {
 				message = 'Influx: Request was successful.';
 				upgradeAutomationInfluxDebugStatus = 'http ' + response.status + ' ' + response.statusText;
+				sent = true;
 			}
 		} catch(error) {
 			message = 'Error while sending a request to influx: ' + error.message;
 			upgradeAutomationInfluxDebugStatus = 'fetch error: ' + error.message;
 		}
 		cLog(2, message);
+		return sent;
 	}
 
 	async function handleResupply(i, fleetCoords) {
