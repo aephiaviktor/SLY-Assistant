@@ -234,10 +234,26 @@ async function fetchText(sourceUrl)
 		})
 		if (!response.ok) throw new Error(`Failed to fetch AEP ${relativePath} via Contents API (${response.status})`)
 		const payload = await response.json()
-		if (!payload || typeof payload.content !== 'string' || !payload.sha) {
-			throw new Error(`AEP Contents API returned no content for ${relativePath}`)
+		if (!payload || !payload.sha) {
+			throw new Error(`AEP Contents API returned no metadata for ${relativePath}`)
 		}
-		return Buffer.from(payload.content, 'base64').toString('utf8')
+		// Files ≤1MB return content inline; larger files omit it (encoding='none').
+		// For large files, fall back to the Git Blob API by SHA — content-addressed,
+		// fresh on first request, no raw-CDN dependency.
+		if (typeof payload.content === 'string' && payload.content.length > 0) {
+			return Buffer.from(payload.content, 'base64').toString('utf8')
+		}
+		const blobUrl = `https://api.github.com/repos/aephiaviktor/SLY-Assistant/git/blobs/${payload.sha}`
+		const blobResponse = await fetch(blobUrl, {
+			cache: 'no-store',
+			headers: { 'Cache-Control': 'no-cache', Accept: 'application/vnd.github+json' }
+		})
+		if (!blobResponse.ok) throw new Error(`Failed to fetch AEP ${relativePath} blob (${blobResponse.status})`)
+		const blobPayload = await blobResponse.json()
+		if (!blobPayload || typeof blobPayload.content !== 'string' || blobPayload.content.length === 0) {
+			throw new Error(`AEP Blob API returned no content for ${relativePath}`)
+		}
+		return Buffer.from(blobPayload.content, 'base64').toString('utf8')
 	}
 	const response = await fetch(sourceUrl, {
 		cache: 'no-store',
