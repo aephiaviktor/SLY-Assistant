@@ -218,31 +218,28 @@ function readInstalledSLYAMeta()
 	}
 }
 
-let resolvedAepCommit = { sha: '', checkedAt: 0 }
-
-async function resolveFreshSourceUrl(sourceUrl)
+async function fetchText(sourceUrl)
 {
-	if (!sourceUrl.startsWith(AEP_UPDATE_BASE_URL)) return sourceUrl
-	if (!resolvedAepCommit.sha || Date.now() - resolvedAepCommit.checkedAt > 30000) {
-		const refUrl = new URL('https://api.github.com/repos/aephiaviktor/SLY-Assistant/git/ref/heads/aep-release')
-		refUrl.searchParams.set('_slyaUpdateCheck', Date.now().toString())
-		const response = await fetch(refUrl, {
+	// AEP files go through the GitHub Contents API (base64, blob-SHA-keyed cache)
+	// to bypass the raw.githubusercontent.com CDN staleness on force-push. The
+	// upstream Swift42 URL still uses raw (we don't own that repo).
+	if (sourceUrl.startsWith(AEP_UPDATE_BASE_URL)) {
+		const relativePath = sourceUrl.slice(AEP_UPDATE_BASE_URL.length + 1)
+		const apiUrl = new URL(`https://api.github.com/repos/aephiaviktor/SLY-Assistant/contents/${relativePath}`)
+		apiUrl.searchParams.set('ref', 'aep-release')
+		apiUrl.searchParams.set('_slyaUpdateCheck', Date.now().toString())
+		const response = await fetch(apiUrl, {
 			cache: 'no-store',
 			headers: { 'Cache-Control': 'no-cache', Accept: 'application/vnd.github+json' }
 		})
-		if (!response.ok) throw new Error(`Failed to resolve AEP update commit (${response.status})`)
-		const ref = await response.json()
-		const sha = String(ref?.object?.sha || '')
-		if (!sha) throw new Error('AEP update branch returned no commit SHA')
-		resolvedAepCommit = { sha, checkedAt: Date.now() }
+		if (!response.ok) throw new Error(`Failed to fetch AEP ${relativePath} via Contents API (${response.status})`)
+		const payload = await response.json()
+		if (!payload || typeof payload.content !== 'string' || !payload.sha) {
+			throw new Error(`AEP Contents API returned no content for ${relativePath}`)
+		}
+		return Buffer.from(payload.content, 'base64').toString('utf8')
 	}
-	return sourceUrl.replace('/refs/heads/aep-release', `/${resolvedAepCommit.sha}`)
-}
-
-async function fetchText(sourceUrl)
-{
-	const resolvedUrl = await resolveFreshSourceUrl(sourceUrl)
-	const response = await fetch(resolvedUrl, {
+	const response = await fetch(sourceUrl, {
 		cache: 'no-store',
 		headers: { 'Cache-Control': 'no-cache' }
 	})
