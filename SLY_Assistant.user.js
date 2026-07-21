@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-166
+// @aephia-version 0.7.35-167
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-166'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-167'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2411,38 +2411,50 @@
 	async function sendUpgradeAutomationLpPerProfileToInflux(aggregated, faction, now) {
 		const line = formatUpgradeAutomationLpPerProfileInfluxLine(aggregated, faction, now);
 		if (!line) return { sent: false, rows: 0 };
+		const rows = line.split('\n').length;
+		const sample = line.split('\n', 1)[0].slice(0, 500);
+		await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] write start faction=${faction} rows=${rows} bytes=${line.length} sample=${sample}`);
 		const sent = await sendToInflux(line);
-		return { sent: sent === true, rows: line.split('\n').length };
+		if (sent !== true) {
+			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] write failed faction=${faction} rows=${rows} detail=${String(upgradeAutomationInfluxDebugStatus || 'unknown').slice(0, 500)}`);
+		}
+		return { sent: sent === true, rows };
 	}
 
 	let lastUpgradeAutomationLpPerProfileCycleMs = 0;
+	let upgradeAutomationLpPerProfileCycleInFlight = false;
 
 	async function runUpgradeAutomationLpPerProfileCycle(now = new Date()) {
-		if (now.getTime() - lastUpgradeAutomationLpPerProfileCycleMs < UPGRADE_AUTOMATION_LP_PER_PROFILE_CYCLE_MIN_MS) return;
-		if (!sageProgram?.account?.starbasePlayer || !sageProgram?.account?.craftingInstance || !craftingProgram?.account?.craftingProcess || !Array.isArray(upgradeRecipes) || !upgradeRecipes.length) {
-			await appendUpgradeAutomationLog('[UPGRADE-AUTO][LP-PER-PROFILE] skip: chain programs or upgrade recipes not ready');
-			return;
-		}
-		const factions = getUpgradeAutomationLpPerProfileFactions();
-		if (!factions.length) {
-			await appendUpgradeAutomationLog('[UPGRADE-AUTO][LP-PER-PROFILE] skip: no faction configuration for this instance');
-			return;
-		}
-		// Fetch each account type once per cycle. Filtering 1,788 decoded accounts
-		// in memory is substantially cheaper than issuing one RPC query for every
-		// StarbasePlayer (192 at MUD Phantom in the validation probe).
-		const accountSnapshot = {
-			craftingInstances: await sageProgram.account.craftingInstance.all(),
-			craftingProcesses: await craftingProgram.account.craftingProcess.all()
-		};
-		for (const { faction, starbaseCoords } of factions) {
-			const allProcesses = [];
-			for (const coords of starbaseCoords) allProcesses.push(...await getUpgradeAutomationLpPerProfileProcessesForStarbase(coords, now, accountSnapshot));
-			const aggregated = aggregateUpgradeAutomationLpPerProfile(allProcesses);
-			const result = await sendUpgradeAutomationLpPerProfileToInflux(aggregated, faction, now);
-			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] faction=${faction} profiles=${Object.keys(aggregated).length} processes=${allProcesses.length} rows=${result.rows} sent=${result.sent}`);
-		}
+		if (upgradeAutomationLpPerProfileCycleInFlight || now.getTime() - lastUpgradeAutomationLpPerProfileCycleMs < UPGRADE_AUTOMATION_LP_PER_PROFILE_CYCLE_MIN_MS) return;
+		upgradeAutomationLpPerProfileCycleInFlight = true;
 		lastUpgradeAutomationLpPerProfileCycleMs = now.getTime();
+		try {
+			if (!sageProgram?.account?.starbasePlayer || !sageProgram?.account?.craftingInstance || !craftingProgram?.account?.craftingProcess || !Array.isArray(upgradeRecipes) || !upgradeRecipes.length) {
+				await appendUpgradeAutomationLog('[UPGRADE-AUTO][LP-PER-PROFILE] skip: chain programs or upgrade recipes not ready');
+				return;
+			}
+			const factions = getUpgradeAutomationLpPerProfileFactions();
+			if (!factions.length) {
+				await appendUpgradeAutomationLog('[UPGRADE-AUTO][LP-PER-PROFILE] skip: no faction configuration for this instance');
+				return;
+			}
+			// Fetch each account type once per cycle. Filtering 1,788 decoded accounts
+			// in memory is substantially cheaper than issuing one RPC query for every
+			// StarbasePlayer (192 at MUD Phantom in the validation probe).
+			const accountSnapshot = {
+				craftingInstances: await sageProgram.account.craftingInstance.all(),
+				craftingProcesses: await craftingProgram.account.craftingProcess.all()
+			};
+			for (const { faction, starbaseCoords } of factions) {
+				const allProcesses = [];
+				for (const coords of starbaseCoords) allProcesses.push(...await getUpgradeAutomationLpPerProfileProcessesForStarbase(coords, now, accountSnapshot));
+				const aggregated = aggregateUpgradeAutomationLpPerProfile(allProcesses);
+				const result = await sendUpgradeAutomationLpPerProfileToInflux(aggregated, faction, now);
+				await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] faction=${faction} profiles=${Object.keys(aggregated).length} processes=${allProcesses.length} rows=${result.rows} sent=${result.sent}`);
+			}
+		} finally {
+			upgradeAutomationLpPerProfileCycleInFlight = false;
+		}
 	}
 
 	async function reconcileUpgradeAutomationLpProcesses(settings = {}, reason = 'scheduler') {
