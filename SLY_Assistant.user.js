@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-159
+// @aephia-version 0.7.35-162
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-159'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-162'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4914,6 +4914,17 @@
 			cLog(1, logLine);
 			await appendUpgradeAutomationLog(logLine);
 		}
+		// Per-profile LP tracking (SLY_17, 2026-07-21). Runs BEFORE the second
+		// readiness check so it still fires when the snapshot summary is
+		// deferred (the previous placement made it unreachable if readiness
+		// failed, since `isUpgradeAutomationReady()` early-returns the function).
+		// Throttled to ~60s inside the cycle function. Wrapped in its own
+		// try/catch so a failure here never breaks the main snapshot.
+		try {
+			await runUpgradeAutomationLpPerProfileCycle(now);
+		} catch (e) {
+			try { await appendUpgradeAutomationLog(`[UPGRADE-AUTO][${trigger}] lp_per_profile cycle failed err=${String(e?.message || e)}`); } catch (_) {}
+		}
 		if (!isUpgradeAutomationReady()) {
 			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][${trigger}] startup summary deferred waiting for readiness`);
 			return;
@@ -4930,15 +4941,6 @@
 			else await appendUpgradeAutomationLog(`[UPGRADE-AUTO][${trigger}] summary deferred lpControl=${lastLpControlSummary ? 'yes' : 'no'} execution=${lastExecutionSummary ? 'yes' : 'no'}`);
 		} catch (e) {
 			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][${trigger}] influx lp_auto snapshot failed err=${String(e?.message || e)}`);
-		}
-		// Per-profile LP tracking (SLY_17, 2026-07-21). Writes to the
-		// `lp_per_profile` InfluxDB measurement. Throttled to ~60s inside
-		// the cycle function. Wrapped in its own try/catch so a failure
-		// here never breaks the main snapshot.
-		try {
-			await runUpgradeAutomationLpPerProfileCycle(now);
-		} catch (e) {
-			try { await appendUpgradeAutomationLog(`[UPGRADE-AUTO][${trigger}] lp_per_profile cycle failed err=${String(e?.message || e)}`); } catch (_) {}
 		}
 	}
 
