@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-169
+// @aephia-version 0.7.35-170
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-169'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-170'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -1208,6 +1208,46 @@
 		return { map: computeWeightedInventoryDrainFromRows(rows) };
 	}
 
+	async function fetchUpgradeAutomationGuaranteedLpByEod(now = new Date()) {
+		const empty = { value: null, snapshotTime: '', ageMs: null, stale: true, rows: 0, profiles: 0, processes: 0, error: '' };
+		if (!globalSettings.influxURL || !globalSettings.influxAuth || !globalSettings.influxDB) return { ...empty, error: 'missing_influx_config' };
+		try {
+			const faction = String(getUpgradeAutomationInfluxFactionTag()).replace(/"/g, '');
+			const instance = String(getSlyaInfluxInstanceTag()).replace(/"/g, '');
+			const flux = `from(bucket: "${sanitizeInfluxBucketName(globalSettings.influxDB)}")
+  |> range(start: -2h, stop: ${now.toISOString()})
+  |> filter(fn: (r) => r._measurement == "lp_per_profile")
+  |> filter(fn: (r) => exists r.faction and r.faction == "${faction}")
+  |> filter(fn: (r) => exists r.instance and r.instance == "${instance}")
+  |> filter(fn: (r) => exists r.source and r.source == "active")
+  |> filter(fn: (r) => r._field == "lpByEod")
+  |> keep(columns: ["_time", "_value", "profile", "component"])
+  |> group()
+  |> sort(columns: ["_time"])`;
+			const rows = parseInfluxCsv(await queryInfluxFlux(flux));
+			if (!rows.length) return { ...empty, error: 'no_lp_per_profile_rows' };
+			const snapshotTime = rows.reduce((latest, row) => String(row?._time || '') > latest ? String(row._time) : latest, '');
+			const snapshotRows = rows.filter(row => String(row?._time || '') === snapshotTime);
+			const snapshotMs = Date.parse(snapshotTime);
+			const ageMs = Number.isFinite(snapshotMs) ? Math.max(0, now.getTime() - snapshotMs) : null;
+			const stale = !Number.isFinite(ageMs) || ageMs > 90 * 60 * 1000;
+			const value = snapshotRows.reduce((sum, row) => sum + Math.max(0, parseInfluxNumber(row?._value)), 0);
+			return {
+				value: stale ? null : value,
+				snapshotTime,
+				ageMs,
+				stale,
+				rows: snapshotRows.length,
+				profiles: new Set(snapshotRows.map(row => String(row?.profile || '')).filter(Boolean)).size,
+				processes: null,
+				error: stale ? 'stale_lp_per_profile_snapshot' : '',
+				query: flux
+			};
+		} catch (e) {
+			return { ...empty, error: String(e?.message || e || 'lp_per_profile_query_failed') };
+		}
+	}
+
 	async function fetchUpgradeAutomationLpControl() {
 		const now = new Date();
 		const lpInstanceKey = normalizeUpgradeAutomationLpInstance(globalSettings?.upgradeAutomationLpInstance);
@@ -1234,6 +1274,7 @@
 		const ag = computeAggressivenessFromControl(control, cumErr, influxTarget, now);
 		const aggressivenessActive = isUpgradeAutomationAggressivenessActive(now);
 		const projectedLpToday = computeUpgradeAutomationProjectedLpToday(control, influxTarget, now);
+		const guaranteedLpByEod = await fetchUpgradeAutomationGuaranteedLpByEod(now);
 		if (![control.progress, control.avg7Weighted, control.targetNow, control.todayTotal, ag.aggr].every(Number.isFinite)) {
 			throw new Error('lp_control_invalid_values');
 		}
@@ -1269,7 +1310,14 @@
 			aggrAbsolute: ag.aggrAbs,
 			userScale: ag.userScale,
 			absAdjustment: ag.absAdjustment || 0,
-			projectedLpToday
+			projectedLpToday,
+			guaranteedLpByEod: guaranteedLpByEod.value,
+			guaranteedLpByEodSnapshotTime: guaranteedLpByEod.snapshotTime,
+			guaranteedLpByEodAgeMs: guaranteedLpByEod.ageMs,
+			guaranteedLpByEodRows: guaranteedLpByEod.rows,
+			guaranteedLpByEodProfiles: guaranteedLpByEod.profiles,
+			guaranteedLpByEodStale: guaranteedLpByEod.stale,
+			guaranteedLpByEodError: guaranteedLpByEod.error
 		};
 	}
 
@@ -6020,9 +6068,16 @@
 				const phantomCrewDisplay = effectivePhantomCrew && effectivePhantomCrew !== rawPhantomCrew ? effectivePhantomCrew + ' / ' + rawPhantomCrew : String(phantomCrew);
 				content += '<tr><td>Time (UTC)</td><td align="right">' + (executionTime || lpControlTime) + '</td><td>Remaining Hours</td><td align="right">' + remainingHours.toLocaleString() + '</td><td>Phantom Crew</td><td align="right">' + phantomCrewDisplay + '</td></tr>';
 				const projectedLpToday = Number.isFinite(upgradeAutomationLpControl?.projectedLpToday) ? upgradeAutomationLpControl.projectedLpToday : null;
+				const guaranteedLpByEod = Number.isFinite(upgradeAutomationLpControl?.guaranteedLpByEod) ? upgradeAutomationLpControl.guaranteedLpByEod : null;
+				const guaranteedLpSnapshotTime = String(upgradeAutomationLpControl?.guaranteedLpByEodSnapshotTime || '');
+				const guaranteedLpProfiles = Number(upgradeAutomationLpControl?.guaranteedLpByEodProfiles || 0);
+				const guaranteedLpRows = Number(upgradeAutomationLpControl?.guaranteedLpByEodRows || 0);
+				const guaranteedLpTitle = guaranteedLpByEod !== null
+					? `Additional LP from active upgrade jobs completing by 00:00 UTC. Latest snapshot: ${guaranteedLpSnapshotTime || 'unknown'}; profiles: ${guaranteedLpProfiles}; rows: ${guaranteedLpRows}.`
+					: `Unavailable${upgradeAutomationLpControl?.guaranteedLpByEodError ? ': ' + String(upgradeAutomationLpControl.guaranteedLpByEodError) : ''}`;
 				const absAdjustment = Number.isFinite(upgradeAutomationLpControl?.absAdjustment) ? upgradeAutomationLpControl.absAdjustment : 0;
-				content += '<tr><td>LP Target Now Hourly</td><td align="right">' + Math.round(lpTargetNowInflux).toLocaleString() + '</td><td>LP Today</td><td align="right">' + Math.round(lpToday).toLocaleString() + '</td><td>Projected LP Today</td><td align="right">' + (projectedLpToday !== null ? Math.round(projectedLpToday).toLocaleString() : '-') + '</td></tr>';
-				content += '<tr><td>LP Faction yday</td><td align="right">' + (lpFactionYesterdayRaw != null && Number.isFinite(lpFactionYesterday) ? Math.round(lpFactionYesterday).toLocaleString() : '-') + '</td><td>LP Installed yday</td><td align="right">' + (lpInstalledYesterdayRaw != null && Number.isFinite(lpInstalledYesterday) ? Math.round(lpInstalledYesterday).toLocaleString() : '-') + '</td><td></td><td></td></tr>';
+				content += '<tr><td>LP Today</td><td align="right">' + Math.round(lpToday).toLocaleString() + '</td><td>Projected LP Today</td><td align="right">' + (projectedLpToday !== null ? Math.round(projectedLpToday).toLocaleString() : '-') + '</td><td title="' + guaranteedLpTitle.replace(/["<>]/g, '') + '">Guaranteed LP by EOD</td><td align="right" title="' + guaranteedLpTitle.replace(/["<>]/g, '') + '">' + (guaranteedLpByEod !== null ? Math.round(guaranteedLpByEod).toLocaleString() : '-') + '</td></tr>';
+				content += '<tr><td>LP Target Now Hourly</td><td align="right">' + Math.round(lpTargetNowInflux).toLocaleString() + '</td><td>LP Faction yday</td><td align="right">' + (lpFactionYesterdayRaw != null && Number.isFinite(lpFactionYesterday) ? Math.round(lpFactionYesterday).toLocaleString() : '-') + '</td><td>LP Installed yday</td><td align="right">' + (lpInstalledYesterdayRaw != null && Number.isFinite(lpInstalledYesterday) ? Math.round(lpInstalledYesterday).toLocaleString() : '-') + '</td></tr>';
 				content += '<tr><td>' + lpAggPreLabel + '</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrRelative ?? upgradeAutomationLpControl?.rawAggressiveness ?? upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td><td>Aggr. (abs.)</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrAbsolute ?? (1 + absAdjustment)).toFixed(3) + '</td><td style="color:' + lpAggColor + '">Aggr.</td><td align="right" style="color:' + lpAggColor + '">' + Number(upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td></tr>';
 				content += '<tr><td colspan="6">&nbsp;</td></tr>';
 				content += '<tr><td>Installed LP Today</td><td align="right">' + Math.round(installedToday).toLocaleString() + '</td><td></td><td></td><td></td><td></td></tr>';
