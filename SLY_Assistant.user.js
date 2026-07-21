@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-164
+// @aephia-version 0.7.35-165
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-164'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-165'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2312,17 +2312,33 @@
 
 	async function getUpgradeAutomationLpPerProfileProcessesForStarbase(coords, userProfileAcct, now) {
 		const out = [];
+		// Diagnostic counters: previously every filter step was a silent
+		// continue / return with no log, so when the aggregate came back
+		// empty there was no way to know which gate was dropping the rows.
+		// The lp_per_profile cycle runs every hour and we have 0/14 days of
+		// rows in InfluxDB, so we need the per-filter breakdown to find
+		// the actual silent drop. Counters are written to a single summary
+		// line at the end (try/finally) so we get one line per starbase
+		// per cycle, no matter which gate bails.
+		let dbgCraftingInstances = 0;
+		let dbgCraftingProcesses = 0;
+		let dbgDroppedRecipe = 0;
+		let dbgDroppedCraftingId = 0;
+		let dbgDroppedStatus = 0;
+		let dbgDroppedEndTime = 0;
+		let dbgDroppedComponent = 0;
+		let dbgBailReason = '';
 		try {
 			const coordParts = String(coords || '').split(',').map(v => parseInt(String(v).trim(), 10));
-			if (coordParts.length !== 2 || !coordParts.every(Number.isFinite)) return out;
+			if (coordParts.length !== 2 || !coordParts.every(Number.isFinite)) { dbgBailReason = 'invalid_coords'; return out; }
 			const starbase = await getStarbaseFromCoords(coordParts[0], coordParts[1], true);
-			if (!starbase || !starbase.publicKey) return out;
+			if (!starbase || !starbase.publicKey) { dbgBailReason = 'no_starbase'; return out; }
 			const starbasePlayerAcct = userProfileAcct ? await getStarbasePlayer(userProfileAcct, starbase.publicKey) : null;
-			if (!starbasePlayerAcct) return out;
+			if (!starbasePlayerAcct) { dbgBailReason = 'no_starbase_player'; return out; }
 			const starbasePlayerPubkey = starbasePlayerAcct.publicKey || starbasePlayerAcct;
-			if (!starbasePlayerPubkey || typeof starbasePlayerPubkey.toBase58 !== 'function') return out;
+			if (!starbasePlayerPubkey || typeof starbasePlayerPubkey.toBase58 !== 'function') { dbgBailReason = 'no_player_pubkey'; return out; }
 			const profilePubkey = resolveUpgradeAutomationLpStarbasePlayerProfile(starbasePlayerAcct);
-			if (!profilePubkey) return out;
+			if (!profilePubkey) { dbgBailReason = 'no_profile_pubkey'; return out; }
 			let upgradeTime = null;
 			try { upgradeTime = await getStarbaseTime(starbase, 'Upgrade'); } catch (e) { upgradeTime = null; }
 			const starbaseTime = (upgradeTime && Number.isFinite(Number(upgradeTime.starbaseTime)))
@@ -2331,24 +2347,26 @@
 			const craftingInstances = await sageProgram.account.craftingInstance.all([{
 				memcmp: { offset: 11, bytes: starbasePlayerPubkey.toBase58() }
 			}]);
+			dbgCraftingInstances = (craftingInstances || []).length;
 			const recipeNames = getUpgradeAutomationLpUpgradeRecipeNames();
 			for (const craftingInstance of (craftingInstances || [])) {
 				const craftingProcesses = await craftingProgram.account.craftingProcess.all([{
 					memcmp: { offset: 17, bytes: craftingInstance.publicKey.toBase58() }
 				}]);
 				for (const craftingProcess of (craftingProcesses || [])) {
+					dbgCraftingProcesses++;
 					try {
 						const recipe = upgradeRecipes.find(item => item.publicKey.toString() === craftingProcess.account.recipe.toString());
-						if (!recipe || !recipeNames.has(recipe.name)) continue;
+						if (!recipe || !recipeNames.has(recipe.name)) { dbgDroppedRecipe++; continue; }
 						const craftingId = craftingProcess.account.craftingId ? craftingProcess.account.craftingId.toNumber() : 0;
-						if (!craftingId) continue;
+						if (!craftingId) { dbgDroppedCraftingId++; continue; }
 						const status = maybeBnToNumber(craftingProcess.account.status, craftingProcess.account.status);
-						if (![0, 1, 2, 3].includes(status)) continue;
+						if (![0, 1, 2, 3].includes(status)) { dbgDroppedStatus++; continue; }
 						const endTime = craftingProcess.account.endTime ? craftingProcess.account.endTime.toNumber() : 0;
-						if (!endTime) continue;
+						if (!endTime) { dbgDroppedEndTime++; continue; }
 						const component = getUpgradeAutomationUpgradeRecipeComponentName(recipe.name);
 						const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[component] || 0);
-						if (!lpPerUnit) continue;
+						if (!lpPerUnit) { dbgDroppedComponent++; continue; }
 						// quantity=1 per process (one upgrade-recipe batch per
 						// craftingProcess). Recipes typically produce 1 component
 						// per process; refine if a recipe produces more.
@@ -2373,7 +2391,13 @@
 					} catch (e) { /* skip this process */ }
 				}
 			}
-		} catch (e) { /* swallow starbase-level errors */ }
+		} catch (e) {
+			dbgBailReason = dbgBailReason || `starbase_error:${String(e?.message || e).slice(0, 80)}`;
+		} finally {
+			try {
+				await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] starbase=${coords} bail=${dbgBailReason || 'none'} ci=${dbgCraftingInstances} cp=${dbgCraftingProcesses} dr=${dbgDroppedRecipe} dci=${dbgDroppedCraftingId} ds=${dbgDroppedStatus} de=${dbgDroppedEndTime} dc=${dbgDroppedComponent} pushed=${out.length}`);
+			} catch (_) { /* swallow */ }
+		}
 		return out;
 	}
 
