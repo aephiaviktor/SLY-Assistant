@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-162
+// @aephia-version 0.7.35-163
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-162'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-163'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2258,9 +2258,29 @@
 	function getUpgradeAutomationLpPerProfileFactions() {
 		const out = [];
 		try {
+			// Filter to only the faction matching the current SLYA instance.
+			// The full UPGRADE_AUTOMATION_FACTION_CONFIG has MUD/ONI/UST, but
+			// each SLYA instance is bound to one faction (MUD instance → MUD
+			// faction, USTUR1/USTUR2 → UST). Iterating all factions made the
+			// cycle query the MUD user's profile against ONI/UST starbases
+			// where they have no player, producing an empty aggregate for
+			// the wrong reasons and overwriting the cache with the last
+			// (wrong) faction processed.
+			const currentInstance = String((typeof globalSettings !== 'undefined' && globalSettings && (globalSettings.slyInstanceName || globalSettings.fleetFaction)) || '').toUpperCase();
+			const instanceToLp = currentInstance.startsWith('MUD') ? 1
+				: currentInstance.startsWith('ONI') ? 2
+				: currentInstance.startsWith('UST') ? 3
+				: 0;
 			const entries = Object.entries(UPGRADE_AUTOMATION_FACTION_CONFIG || {});
 			for (const [faction, cfg] of entries) {
 				if (!cfg || !Array.isArray(cfg.upgradeStarbaseCoords) || cfg.upgradeStarbaseCoords.length === 0) continue;
+				const lpInstance = Number(cfg.lpInstance || 0);
+				if (instanceToLp) {
+					if (lpInstance !== instanceToLp) continue;
+				} else {
+					// Fallback: substring match on the faction key.
+					if (!currentInstance || !currentInstance.includes(String(faction).toUpperCase())) continue;
+				}
 				out.push({
 					faction: String(faction),
 					lpInstance: Number(cfg.lpInstance || 0),
