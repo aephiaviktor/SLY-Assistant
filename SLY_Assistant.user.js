@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-174
+// @aephia-version 0.7.35-175
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-174'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-175'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2492,6 +2492,21 @@
 		return { profiles };
 	}
 
+	function buildUpgradeAutomationLpPerProfileTransactionQueue(profiles, limit) {
+		const entries = Object.entries(profiles || {}).map(([profile, entry]) => ({ profile, pending: Array.isArray(entry?.pending) ? entry.pending : [], index: 0 }));
+		const queue = [];
+		while (queue.length < Math.max(0, Number(limit || 0))) {
+			let added = false;
+			for (const entry of entries) {
+				if (queue.length >= limit || entry.index >= entry.pending.length) continue;
+				queue.push({ profile: entry.profile, item: entry.pending[entry.index++] });
+				added = true;
+			}
+			if (!added) break;
+		}
+		return queue;
+	}
+
 	function extractUpgradeAutomationLpPerProfileRedemptions(tx, signature, isSubmitInstruction) {
 		if (!tx || tx?.meta?.err || !Number.isFinite(Number(tx.blockTime))) return [];
 		const message = tx?.transaction?.message || {};
@@ -2579,43 +2594,60 @@
 		let discoveredCount = 0;
 		for (const [profile, entry] of Object.entries(state.profiles)) {
 			const signatures = [];
-			let before;
-			for (let page = 0; page < 5; page++) {
-				const options = { limit: 100 };
-				if (before) options.before = before;
-				if (entry.cursor && !before) options.until = entry.cursor;
-				const rows = await solanaReadConnection.getSignaturesForAddress(new solanaWeb3.PublicKey(profile), options, 'finalized');
-				signatures.push(...rows.filter(row => !Number.isFinite(Number(row.blockTime)) || Number(row.blockTime) >= Number(entry.firstSeenAt || nowSeconds)));
-				if (rows.length < 100 || rows.some(row => Number(row.blockTime || 0) < Number(entry.firstSeenAt || nowSeconds))) break;
-				before = rows.at(-1)?.signature;
-				if (!before) break;
-			}
+			const options = { limit: 100 };
+			if (entry.cursor) options.until = entry.cursor;
+			const rows = await solanaReadConnection.getSignaturesForAddress(new solanaWeb3.PublicKey(profile), options, 'finalized');
+			signatures.push(...rows.filter(row => !Number.isFinite(Number(row.blockTime)) || Number(row.blockTime) >= Number(entry.firstSeenAt || nowSeconds)));
 			discoveredCount += signatures.length;
 			state.profiles[profile] = { ...entry, ...mergeUpgradeAutomationLpPerProfileSignatureState(entry, signatures) };
 		}
 		await saveUpgradeAutomationLpPerProfileHistory(faction, state);
 		const processedByProfile = new Map();
 		const redeemed = [];
+		const diagnostics = { queued: 0, fetched: 0, unavailable: 0, failedTx: 0, instructions: 0, wrongProgram: 0, decodeFailed: 0, wrongInstruction: 0, submitMatched: 0, noRedemptionRow: 0, profileMismatch: 0, beforeWatch: 0, recipeMissing: 0, accepted: 0 };
 		const recipeByKey = new Map(upgradeRecipes.map(recipe => [recipe.publicKey.toBase58(), recipe]));
-		for (const [profile, entry] of Object.entries(state.profiles)) {
-			const processed = new Set();
-			for (const item of entry.pending.slice(0, 100)) {
-				const tx = await solanaReadConnection.getTransaction(item.signature, { commitment: 'finalized', maxSupportedTransactionVersion: 0 });
-				if (!tx) continue;
+		const queue = buildUpgradeAutomationLpPerProfileTransactionQueue(state.profiles, 250);
+		diagnostics.queued = queue.length;
+		for (let offset = 0; offset < queue.length; offset += 8) {
+			const batch = queue.slice(offset, offset + 8);
+			const txs = await Promise.all(batch.map(({ item }) => solanaReadConnection.getTransaction(item.signature, { commitment: 'finalized', maxSupportedTransactionVersion: 0 }).catch(() => null)));
+			for (let i = 0; i < batch.length; i++) {
+				const { profile, item } = batch[i];
+				const entry = state.profiles[profile];
+				const tx = txs[i];
+				if (!tx) { diagnostics.unavailable++; continue; }
+				diagnostics.fetched++;
+				if (tx.meta?.err) diagnostics.failedTx++;
+				const message = tx?.transaction?.message || {};
+				const loaded = tx?.meta?.loadedAddresses || { writable: [], readonly: [] };
+				const keys = [...(message.accountKeys || message.staticAccountKeys || []), ...(loaded.writable || []), ...(loaded.readonly || [])].map(key => key?.pubkey?.toBase58?.() || key?.toBase58?.() || String(key));
+				for (const ix of (message.instructions || message.compiledInstructions || [])) {
+					diagnostics.instructions++;
+					if (keys[Number(ix.programIdIndex)] !== sageProgram.programId.toBase58()) { diagnostics.wrongProgram++; continue; }
+					let decoded;
+					try { decoded = sageProgram.coder.instruction.decode(ix.data, typeof ix.data === 'string' ? 'base58' : undefined); } catch (_) {}
+					if (!decoded?.name) diagnostics.decodeFailed++;
+					else if (decoded.name === 'submitStarbaseUpgradeResource') diagnostics.submitMatched++;
+					else diagnostics.wrongInstruction++;
+				}
 				const rows = extractUpgradeAutomationLpPerProfileRedemptions(tx, item.signature, (data, programId) => {
 					if (String(programId) !== sageProgram.programId.toBase58()) return false;
 					try { return sageProgram.coder.instruction.decode(data, typeof data === 'string' ? 'base58' : undefined)?.name === 'submitStarbaseUpgradeResource'; } catch (_) { return false; }
 				});
+				if (!rows.length && !tx.meta?.err) diagnostics.noRedemptionRow++;
 				for (const row of rows) {
-					if (row.profile !== profile || Number(row.blockTime) < Number(entry.firstSeenAt || 0)) continue;
+					if (row.profile !== profile) { diagnostics.profileMismatch++; continue; }
+					if (Number(row.blockTime) < Number(entry.firstSeenAt || 0)) { diagnostics.beforeWatch++; continue; }
 					const recipe = recipeByKey.get(row.resourceRecipe);
 					const component = recipe ? getUpgradeAutomationUpgradeRecipeComponentName(recipe.name) : '';
 					const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[component] || 0);
-					if (component && lpPerUnit) redeemed.push({ ...row, component, lpPerUnit, lp: lpPerUnit * row.quantity });
+					if (!component || !lpPerUnit) { diagnostics.recipeMissing++; continue; }
+					redeemed.push({ ...row, component, lpPerUnit, lp: lpPerUnit * row.quantity });
+					diagnostics.accepted++;
 				}
-				processed.add(item.signature);
+				if (!processedByProfile.has(profile)) processedByProfile.set(profile, new Set());
+				processedByProfile.get(profile).add(item.signature);
 			}
-			processedByProfile.set(profile, processed);
 		}
 		const result = await recordUpgradeAutomationLpPerProfileCompletions(redeemed, faction);
 		if (result.sent) {
@@ -2624,6 +2656,7 @@
 		}
 		const backlog = Object.values(state.profiles).reduce((sum, entry) => sum + entry.pending.length, 0);
 		const processed = Array.from(processedByProfile.values()).reduce((sum, set) => sum + set.size, 0);
+		await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE][HISTORY-DIAG] faction=${faction} ${Object.entries(diagnostics).map(([key, value]) => `${key}=${value}`).join(' ')}`);
 		return { discovered: discoveredCount, processed, rows: result.rows, backlog, profiles: Object.keys(state.profiles).length };
 	}
 

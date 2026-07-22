@@ -33,10 +33,12 @@ vm.runInContext(`
   ${extractFunction('buildUpgradeAutomationLpPerProfileRpcPlan')}
   ${extractFunction('mergeUpgradeAutomationLpPerProfileSignatureState')}
   ${extractFunction('updateUpgradeAutomationLpPerProfileWatchCohort')}
+  ${extractFunction('buildUpgradeAutomationLpPerProfileTransactionQueue')}
   ${extractFunction('extractUpgradeAutomationLpPerProfileRedemptions')}
   this.buildPlan = buildUpgradeAutomationLpPerProfileRpcPlan;
   this.mergeState = mergeUpgradeAutomationLpPerProfileSignatureState;
   this.updateCohort = updateUpgradeAutomationLpPerProfileWatchCohort;
+  this.buildQueue = buildUpgradeAutomationLpPerProfileTransactionQueue;
   this.extractRedemptions = extractUpgradeAutomationLpPerProfileRedemptions;
 `, context);
 
@@ -72,7 +74,20 @@ assert.equal(cohort.profiles['profile-new'].expiresAt, (Math.floor(now / 86400) 
 const historyRunner = extractFunction('runUpgradeAutomationLpPerProfileRedemptionHistory');
 assert.match(historyRunner, /getSignaturesForAddress\(new solanaWeb3\.PublicKey\(profile\)/, 'history queries watched profile addresses directly');
 assert.doesNotMatch(historyRunner, /starbaseKeys|getSignaturesForAddress\(starbase/, 'history no longer scans the high-volume starbase address');
+assert.match(historyRunner, /buildUpgradeAutomationLpPerProfileTransactionQueue\(state\.profiles, 250\)/, 'transaction inspection has one global per-cycle cap');
+assert.match(historyRunner, /offset \+= 8/, 'transaction RPCs use bounded concurrency');
+assert.match(historyRunner, /\[HISTORY-DIAG\]/, 'history cycle logs categorized rejection counters');
 assert.match(source, /lp_redemption_total,[^`]*totalLp=/, 'authoritative cumulative LP total is recorded for hourly deltas');
+
+const queue = context.buildQueue({
+  alpha: { pending: [{ signature: 'a1' }, { signature: 'a2' }] },
+  beta: { pending: [{ signature: 'b1' }, { signature: 'b2' }] }
+}, 3);
+assert.deepEqual(JSON.parse(JSON.stringify(queue)), [
+  { profile: 'alpha', item: { signature: 'a1' } },
+  { profile: 'beta', item: { signature: 'b1' } },
+  { profile: 'alpha', item: { signature: 'a2' } }
+], 'transaction queue is globally capped and round-robins watched profiles');
 
 const tx = {
   blockTime: 1_725_000_000,
