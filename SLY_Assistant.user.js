@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-175
+// @aephia-version 0.7.35-176
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-175'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-176'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -1208,7 +1208,7 @@
 		return { map: computeWeightedInventoryDrainFromRows(rows) };
 	}
 
-	async function fetchUpgradeAutomationGuaranteedLpByEod(now = new Date()) {
+	async function fetchUpgradeAutomationExpectedLpByEod(now = new Date()) {
 		const empty = { value: null, snapshotTime: '', ageMs: null, stale: true, rows: 0, profiles: 0, processes: 0, error: '' };
 		if (!globalSettings.influxURL || !globalSettings.influxAuth || !globalSettings.influxDB) return { ...empty, error: 'missing_influx_config' };
 		try {
@@ -1220,7 +1220,7 @@
   |> filter(fn: (r) => exists r.faction and r.faction == "${faction}")
   |> filter(fn: (r) => exists r.instance and r.instance == "${instance}")
   |> filter(fn: (r) => exists r.source and r.source == "active")
-  |> filter(fn: (r) => r._field == "lpByEod")
+  |> filter(fn: (r) => r._field == "expectedLpByEod")
   |> keep(columns: ["_time", "_value", "profile", "component"])
   |> group()
   |> sort(columns: ["_time"])`;
@@ -1274,7 +1274,7 @@
 		const ag = computeAggressivenessFromControl(control, cumErr, influxTarget, now);
 		const aggressivenessActive = isUpgradeAutomationAggressivenessActive(now);
 		const projectedLpToday = computeUpgradeAutomationProjectedLpToday(control, influxTarget, now);
-		const guaranteedLpByEod = await fetchUpgradeAutomationGuaranteedLpByEod(now);
+		const expectedLpByEod = await fetchUpgradeAutomationExpectedLpByEod(now);
 		if (![control.progress, control.avg7Weighted, control.targetNow, control.todayTotal, ag.aggr].every(Number.isFinite)) {
 			throw new Error('lp_control_invalid_values');
 		}
@@ -1311,13 +1311,13 @@
 			userScale: ag.userScale,
 			absAdjustment: ag.absAdjustment || 0,
 			projectedLpToday,
-			guaranteedLpByEod: guaranteedLpByEod.value,
-			guaranteedLpByEodSnapshotTime: guaranteedLpByEod.snapshotTime,
-			guaranteedLpByEodAgeMs: guaranteedLpByEod.ageMs,
-			guaranteedLpByEodRows: guaranteedLpByEod.rows,
-			guaranteedLpByEodProfiles: guaranteedLpByEod.profiles,
-			guaranteedLpByEodStale: guaranteedLpByEod.stale,
-			guaranteedLpByEodError: guaranteedLpByEod.error
+			expectedLpByEod: expectedLpByEod.value,
+			expectedLpByEodSnapshotTime: expectedLpByEod.snapshotTime,
+			expectedLpByEodAgeMs: expectedLpByEod.ageMs,
+			expectedLpByEodRows: expectedLpByEod.rows,
+			expectedLpByEodProfiles: expectedLpByEod.profiles,
+			expectedLpByEodStale: expectedLpByEod.stale,
+			expectedLpByEodError: expectedLpByEod.error
 		};
 	}
 
@@ -2323,6 +2323,30 @@
 		} catch (e) { return 0; }
 	}
 
+	function computeUpgradeAutomationLpProcessEodProjection(startTime, endTime, nowSeconds, eodSeconds, lp, quantity) {
+		const start = Number(startTime || 0);
+		const end = Number(endTime || 0);
+		const now = Number(nowSeconds || 0);
+		const eod = Number(eodSeconds || 0);
+		const durationSeconds = Number.isFinite(start) && Number.isFinite(end) && end > start ? end - start : 0;
+		const inFlightCompletionsByEod = end > now && end <= eod ? 1 : 0;
+		const expectedCompletionsByEod = inFlightCompletionsByEod && durationSeconds > 0
+			? 1 + Math.floor(Math.max(0, eod - end) / durationSeconds)
+			: inFlightCompletionsByEod;
+		const unitLp = Math.max(0, Number(lp || 0));
+		const unitQuantity = Math.max(0, Number(quantity || 0));
+		return {
+			durationSeconds,
+			inFlightCompletionsByEod,
+			expectedCompletionsByEod,
+			inFlightLpByEod: unitLp * inFlightCompletionsByEod,
+			expectedLpByEod: unitLp * expectedCompletionsByEod,
+			repeatLpByEod: unitLp * Math.max(0, expectedCompletionsByEod - inFlightCompletionsByEod),
+			inFlightQuantityByEod: unitQuantity * inFlightCompletionsByEod,
+			expectedQuantityByEod: unitQuantity * expectedCompletionsByEod
+		};
+	}
+
 	async function getUpgradeAutomationLpPerProfileProcessesForStarbase(coords, now, accountSnapshot) {
 		const out = [];
 		const seenProcesses = new Set();
@@ -2338,7 +2362,7 @@
 			const starbaseTime = Number.isFinite(Number(upgradeTime?.starbaseTime))
 				? Number(upgradeTime.starbaseTime)
 				: Math.floor(now.getTime() / 1000);
-			const secondsUntilUtcEod = Math.max(0, Math.floor((Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1) - now.getTime()) / 1000));
+			const utcEodSeconds = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1) / 1000);
 
 			const starbaseKey = starbase.publicKey.toBase58();
 			const starbasePlayers = (accountSnapshot?.starbasePlayers || []).filter(row => row?.account?.starbase?.toBase58?.() === starbaseKey);
@@ -2382,12 +2406,14 @@
 							if (!recipe || !recipeNames.has(recipe.name)) { dbg.droppedRecipe++; continue; }
 							const quantity = getUpgradeAutomationLpProcessQuantity(craftingProcess);
 							if (!quantity) { dbg.droppedQuantity++; continue; }
+							const startTime = craftingProcess.account.startTime?.toNumber ? craftingProcess.account.startTime.toNumber() : Number(craftingProcess.account.startTime || 0);
 							const endTime = craftingProcess.account.endTime?.toNumber ? craftingProcess.account.endTime.toNumber() : Number(craftingProcess.account.endTime || 0);
 							if (!Number.isFinite(endTime) || endTime <= 0) { dbg.droppedTime++; continue; }
 							const component = getUpgradeAutomationUpgradeRecipeComponentName(recipe.name);
 							const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[component] || 0);
 							if (!component || !lpPerUnit) { dbg.droppedRecipe++; continue; }
 							const remainingSeconds = Math.max(endTime - starbaseTime, 0);
+							const projection = computeUpgradeAutomationLpProcessEodProjection(startTime, endTime, starbaseTime, utcEodSeconds, lpPerUnit * quantity, quantity);
 							out.push({
 								profile,
 								craftingProcess: processKey,
@@ -2395,10 +2421,12 @@
 								quantity,
 								lp: lpPerUnit * quantity,
 								lpPerUnit,
+								startTime,
 								endTime,
 								active: endTime > starbaseTime,
 								remainingSeconds,
-								completesByEod: endTime > starbaseTime && remainingSeconds <= secondsUntilUtcEod
+								completesByEod: projection.inFlightCompletionsByEod > 0,
+								...projection
 							});
 							dbg.pushed++;
 						} catch (e) { dbg.droppedRecipe++; }
@@ -2424,16 +2452,20 @@
 			seenProcesses.add(p.craftingProcess);
 			if (!out[p.profile]) out[p.profile] = {};
 			if (!out[p.profile][p.component]) {
-				out[p.profile][p.component] = { lp: 0, quantity: 0, processCount: 0, lpByEod: 0, quantityByEod: 0, lpPerUnit: Number(p.lpPerUnit || 0) };
+				out[p.profile][p.component] = { lp: 0, quantity: 0, processCount: 0, lpByEod: 0, quantityByEod: 0, durationSeconds: 0, inFlightCompletionsByEod: 0, expectedCompletionsByEod: 0, expectedLpByEod: 0, repeatLpByEod: 0, expectedQuantityByEod: 0, lpPerUnit: Number(p.lpPerUnit || 0) };
 			}
 			const slot = out[p.profile][p.component];
 			slot.lp += Number(p.lp || 0);
 			slot.quantity += Number(p.quantity || 0);
 			slot.processCount += 1;
-			if (p.completesByEod) {
-				slot.lpByEod += Number(p.lp || 0);
-				slot.quantityByEod += Number(p.quantity || 0);
-			}
+			slot.lpByEod += Number(p.inFlightLpByEod || 0);
+			slot.quantityByEod += Number(p.inFlightQuantityByEod || 0);
+			slot.durationSeconds += Number(p.durationSeconds || 0);
+			slot.inFlightCompletionsByEod += Number(p.inFlightCompletionsByEod || 0);
+			slot.expectedCompletionsByEod += Number(p.expectedCompletionsByEod || 0);
+			slot.expectedLpByEod += Number(p.expectedLpByEod || 0);
+			slot.repeatLpByEod += Number(p.repeatLpByEod || 0);
+			slot.expectedQuantityByEod += Number(p.expectedQuantityByEod || 0);
 		}
 		return out;
 	}
@@ -2483,7 +2515,7 @@
 		}
 		const expiresAt = (Math.floor(nowSeconds / 86400) + 1) * 86400 + 7200;
 		for (const row of (processes || [])) {
-			if (!row?.profile || !row?.active || !row?.completesByEod) continue;
+			if (!row?.profile || !row?.active || Number(row?.expectedCompletionsByEod || 0) <= 0) continue;
 			const prior = profiles[row.profile];
 			profiles[row.profile] = prior
 				? { ...prior, expiresAt: Math.max(Number(prior.expiresAt || 0), expiresAt) }
@@ -2673,7 +2705,7 @@
 				const slot = aggregated[profile][component];
 				if (!slot?.processCount) continue;
 				const tags = `faction=${influxEscape(factionTag)},instance=${influxEscape(String(instanceTag))},profile=${influxEscape(profile)},component=${influxEscape(component)},source=active`;
-				const fields = `lp=${Math.round(slot.lp)},quantity=${Math.round(slot.quantity)}i,processCount=${Math.round(slot.processCount)}i,lpPerUnit=${Math.round(slot.lpPerUnit)}i,lpByEod=${Math.round(slot.lpByEod)},quantityByEod=${Math.round(slot.quantityByEod)}i`;
+				const fields = `lp=${Math.round(slot.lp)},quantity=${Math.round(slot.quantity)}i,processCount=${Math.round(slot.processCount)}i,lpPerUnit=${Math.round(slot.lpPerUnit)}i,lpByEod=${Math.round(slot.lpByEod)},quantityByEod=${Math.round(slot.quantityByEod)}i,durationSeconds=${Math.round(slot.durationSeconds)}i,inFlightCompletionsByEod=${Math.round(slot.inFlightCompletionsByEod)}i,expectedCompletionsByEod=${Math.round(slot.expectedCompletionsByEod)}i,expectedLpByEod=${Math.round(slot.expectedLpByEod)},repeatLpByEod=${Math.round(slot.repeatLpByEod)},expectedQuantityByEod=${Math.round(slot.expectedQuantityByEod)}i`;
 				lines.push(`lp_per_profile,${tags} ${fields} ${ts}`);
 			}
 		}
@@ -6293,15 +6325,15 @@
 				const phantomCrewDisplay = effectivePhantomCrew && effectivePhantomCrew !== rawPhantomCrew ? effectivePhantomCrew + ' / ' + rawPhantomCrew : String(phantomCrew);
 				content += '<tr><td>Time (UTC)</td><td align="right">' + (executionTime || lpControlTime) + '</td><td>Remaining Hours</td><td align="right">' + remainingHours.toLocaleString() + '</td><td>Phantom Crew</td><td align="right">' + phantomCrewDisplay + '</td></tr>';
 				const projectedLpToday = Number.isFinite(upgradeAutomationLpControl?.projectedLpToday) ? upgradeAutomationLpControl.projectedLpToday : null;
-				const guaranteedLpByEod = Number.isFinite(upgradeAutomationLpControl?.guaranteedLpByEod) ? upgradeAutomationLpControl.guaranteedLpByEod : null;
-				const guaranteedLpSnapshotTime = String(upgradeAutomationLpControl?.guaranteedLpByEodSnapshotTime || '');
-				const guaranteedLpProfiles = Number(upgradeAutomationLpControl?.guaranteedLpByEodProfiles || 0);
-				const guaranteedLpRows = Number(upgradeAutomationLpControl?.guaranteedLpByEodRows || 0);
-				const guaranteedLpTitle = guaranteedLpByEod !== null
-					? `Additional LP from active upgrade jobs completing by 00:00 UTC. Latest snapshot: ${guaranteedLpSnapshotTime || 'unknown'}; profiles: ${guaranteedLpProfiles}; rows: ${guaranteedLpRows}.`
-					: `Unavailable${upgradeAutomationLpControl?.guaranteedLpByEodError ? ': ' + String(upgradeAutomationLpControl.guaranteedLpByEodError) : ''}`;
+				const expectedLpByEod = Number.isFinite(upgradeAutomationLpControl?.expectedLpByEod) ? upgradeAutomationLpControl.expectedLpByEod : null;
+				const expectedLpSnapshotTime = String(upgradeAutomationLpControl?.expectedLpByEodSnapshotTime || '');
+				const expectedLpProfiles = Number(upgradeAutomationLpControl?.expectedLpByEodProfiles || 0);
+				const expectedLpRows = Number(upgradeAutomationLpControl?.expectedLpByEodRows || 0);
+				const expectedLpTitle = expectedLpByEod !== null
+					? `Expected additional LP by 00:00 UTC from active upgrade jobs plus complete same-duration automation repeats. Latest snapshot: ${expectedLpSnapshotTime || 'unknown'}; profiles: ${expectedLpProfiles}; rows: ${expectedLpRows}.`
+					: `Unavailable${upgradeAutomationLpControl?.expectedLpByEodError ? ': ' + String(upgradeAutomationLpControl.expectedLpByEodError) : ''}`;
 				const absAdjustment = Number.isFinite(upgradeAutomationLpControl?.absAdjustment) ? upgradeAutomationLpControl.absAdjustment : 0;
-				content += '<tr><td>LP Today</td><td align="right">' + Math.round(lpToday).toLocaleString() + '</td><td>Projected LP Today</td><td align="right">' + (projectedLpToday !== null ? Math.round(projectedLpToday).toLocaleString() : '-') + '</td><td title="' + guaranteedLpTitle.replace(/["<>]/g, '') + '">Guaranteed LP by EOD</td><td align="right" title="' + guaranteedLpTitle.replace(/["<>]/g, '') + '">' + (guaranteedLpByEod !== null ? Math.round(guaranteedLpByEod).toLocaleString() : '-') + '</td></tr>';
+				content += '<tr><td>LP Today</td><td align="right">' + Math.round(lpToday).toLocaleString() + '</td><td>Projected LP Today</td><td align="right">' + (projectedLpToday !== null ? Math.round(projectedLpToday).toLocaleString() : '-') + '</td><td title="' + expectedLpTitle.replace(/["<>]/g, '') + '">Expected LP by EOD</td><td align="right" title="' + expectedLpTitle.replace(/["<>]/g, '') + '">' + (expectedLpByEod !== null ? Math.round(expectedLpByEod).toLocaleString() : '-') + '</td></tr>';
 				content += '<tr><td>LP Target Now Hourly</td><td align="right">' + Math.round(lpTargetNowInflux).toLocaleString() + '</td><td>LP Faction yday</td><td align="right">' + (lpFactionYesterdayRaw != null && Number.isFinite(lpFactionYesterday) ? Math.round(lpFactionYesterday).toLocaleString() : '-') + '</td><td>LP Installed yday</td><td align="right">' + (lpInstalledYesterdayRaw != null && Number.isFinite(lpInstalledYesterday) ? Math.round(lpInstalledYesterday).toLocaleString() : '-') + '</td></tr>';
 				content += '<tr><td>' + lpAggPreLabel + '</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrRelative ?? upgradeAutomationLpControl?.rawAggressiveness ?? upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td><td>Aggr. (abs.)</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrAbsolute ?? (1 + absAdjustment)).toFixed(3) + '</td><td style="color:' + lpAggColor + '">Aggr.</td><td align="right" style="color:' + lpAggColor + '">' + Number(upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td></tr>';
 				content += '<tr><td colspan="6">&nbsp;</td></tr>';

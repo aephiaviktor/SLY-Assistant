@@ -33,11 +33,13 @@ vm.runInContext(`
   ${extractFunction('buildUpgradeAutomationLpPerProfileRpcPlan')}
   ${extractFunction('mergeUpgradeAutomationLpPerProfileSignatureState')}
   ${extractFunction('updateUpgradeAutomationLpPerProfileWatchCohort')}
+  ${extractFunction('computeUpgradeAutomationLpProcessEodProjection')}
   ${extractFunction('buildUpgradeAutomationLpPerProfileTransactionQueue')}
   ${extractFunction('extractUpgradeAutomationLpPerProfileRedemptions')}
   this.buildPlan = buildUpgradeAutomationLpPerProfileRpcPlan;
   this.mergeState = mergeUpgradeAutomationLpPerProfileSignatureState;
   this.updateCohort = updateUpgradeAutomationLpPerProfileWatchCohort;
+  this.projectEod = computeUpgradeAutomationLpProcessEodProjection;
   this.buildQueue = buildUpgradeAutomationLpPerProfileTransactionQueue;
   this.extractRedemptions = extractUpgradeAutomationLpPerProfileRedemptions;
 `, context);
@@ -63,13 +65,27 @@ const cohort = context.updateCohort({ profiles: {
   'profile-old': { firstSeenAt: now - 500, expiresAt: now + 100, cursor: 'old-cursor', pending: [] },
   'profile-expired': { firstSeenAt: now - 90000, expiresAt: now - 1, cursor: 'gone', pending: [] }
 }}, [
-  { profile: 'profile-new', active: true, completesByEod: true },
-  { profile: 'profile-later', active: true, completesByEod: false }
+  { profile: 'profile-new', active: true, expectedCompletionsByEod: 3 },
+  { profile: 'profile-later', active: true, expectedCompletionsByEod: 0 }
 ], now);
 assert.deepEqual(Object.keys(cohort.profiles).sort(), ['profile-new', 'profile-old'], 'cohort adds only EoD profiles, retains watched profiles through grace, and removes expired profiles');
 assert.equal(cohort.profiles['profile-new'].firstSeenAt, now, 'new profile backfill starts when it enters the cohort');
 assert.equal(cohort.profiles['profile-old'].cursor, 'old-cursor', 'restart cursor survives cohort refresh');
 assert.equal(cohort.profiles['profile-new'].expiresAt, (Math.floor(now / 86400) + 1) * 86400 + 7200, 'watched profile remains through EoD plus two-hour grace');
+
+assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 150, 750, 60, 3))), {
+  durationSeconds: 100,
+  inFlightCompletionsByEod: 1,
+  expectedCompletionsByEod: 6,
+  inFlightLpByEod: 60,
+  expectedLpByEod: 360,
+  repeatLpByEod: 300,
+  inFlightQuantityByEod: 3,
+  expectedQuantityByEod: 18
+}, 'EoD projection includes every complete same-duration automation repeat');
+assert.equal(context.projectEod(100, 800, 150, 750, 60, 3).expectedCompletionsByEod, 0, 'a process ending after EoD contributes no completed LP');
+assert.equal(context.projectEod(200, 200, 150, 750, 60, 3).expectedCompletionsByEod, 1, 'invalid duration retains the conservative in-flight completion without extrapolation');
+assert.equal(context.projectEod(100, 750, 150, 750, 60, 3).expectedCompletionsByEod, 1, 'a process ending exactly at EoD counts once');
 
 const historyRunner = extractFunction('runUpgradeAutomationLpPerProfileRedemptionHistory');
 assert.match(historyRunner, /getSignaturesForAddress\(new solanaWeb3\.PublicKey\(profile\)/, 'history queries watched profile addresses directly');
@@ -78,6 +94,9 @@ assert.match(historyRunner, /buildUpgradeAutomationLpPerProfileTransactionQueue\
 assert.match(historyRunner, /offset \+= 8/, 'transaction RPCs use bounded concurrency');
 assert.match(historyRunner, /\[HISTORY-DIAG\]/, 'history cycle logs categorized rejection counters');
 assert.match(source, /lp_redemption_total,[^`]*totalLp=/, 'authoritative cumulative LP total is recorded for hourly deltas');
+assert.match(source, /_field == "expectedLpByEod"/, 'LP panel reads the expected automation-repeat projection');
+assert.match(source, />Expected LP by EOD</, 'panel labels the projection as Expected LP by EOD');
+assert.match(source, /lpByEod=.*quantityByEod=/, 'conservative in-flight EoD fields remain in telemetry');
 
 const queue = context.buildQueue({
   alpha: { pending: [{ signature: 'a1' }, { signature: 'a2' }] },
