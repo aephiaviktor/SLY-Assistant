@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-172
+// @aephia-version 0.7.35-173
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-172'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-173'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2340,11 +2340,8 @@
 				: Math.floor(now.getTime() / 1000);
 			const secondsUntilUtcEod = Math.max(0, Math.floor((Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1) - now.getTime()) / 1000));
 
-			// StarbasePlayer layout: discriminator(8), version(1), playerProfile(32),
-			// gameId(32), starbase(32). Therefore starbase starts at byte 73.
-			const starbasePlayers = await sageProgram.account.starbasePlayer.all([{
-				memcmp: { offset: UPGRADE_AUTOMATION_STARBASE_PLAYER_STARBASE_OFFSET, bytes: starbase.publicKey.toBase58() }
-			}]);
+			const starbaseKey = starbase.publicKey.toBase58();
+			const starbasePlayers = (accountSnapshot?.starbasePlayers || []).filter(row => row?.account?.starbase?.toBase58?.() === starbaseKey);
 			dbg.starbasePlayers = (starbasePlayers || []).length;
 			const recipeNames = getUpgradeAutomationLpUpgradeRecipeNames();
 
@@ -2441,40 +2438,84 @@
 		return out;
 	}
 
-	function reconcileUpgradeAutomationLpPerProfileHistory(priorPending, currentProcesses, nowSeconds) {
-		const currentByProcess = new Map();
-		for (const row of (currentProcesses || [])) {
-			if (!row?.craftingProcess || currentByProcess.has(row.craftingProcess)) continue;
-			currentByProcess.set(row.craftingProcess, { ...row });
-		}
-		const pendingByProcess = new Map(currentByProcess);
-		const completed = [];
-		for (const row of (priorPending || [])) {
-			if (!row?.craftingProcess || currentByProcess.has(row.craftingProcess)) continue;
-			const endTime = Number(row.endTime || 0);
-			if (Number.isFinite(endTime) && endTime > 0 && endTime <= nowSeconds) {
-				completed.push({ ...row, completedAt: nowSeconds });
-			} else {
-				pendingByProcess.set(row.craftingProcess, { ...row });
+	function buildUpgradeAutomationLpPerProfileRpcPlan(recipeKeys) {
+		return Array.from(new Set((recipeKeys || []).map(String).filter(Boolean)))
+			.map(bytes => [{ memcmp: { offset: 49, bytes } }]);
+	}
+
+	async function fetchUpgradeAutomationDecodedAccounts(publicKeys, accountName) {
+		const unique = Array.from(new Map((publicKeys || []).filter(Boolean).map(pk => [pk.toBase58(), pk])).values());
+		const out = [];
+		for (let i = 0; i < unique.length; i += 100) {
+			const keys = unique.slice(i, i + 100);
+			const infos = await solanaReadConnection.getMultipleAccountsInfo(keys, { commitment: 'confirmed' });
+			for (let j = 0; j < keys.length; j++) {
+				if (!infos[j]?.data) continue;
+				try { out.push({ publicKey: keys[j], account: sageProgram.coder.accounts.decode(accountName, infos[j].data) }); } catch (_) {}
 			}
 		}
-		return { completed, pending: Array.from(pendingByProcess.values()) };
+		return out;
+	}
+
+	async function fetchUpgradeAutomationLpPerProfileAccountSnapshot() {
+		const recipeKeys = upgradeRecipes.filter(recipe => getUpgradeAutomationLpUpgradeRecipeNames().has(recipe.name)).map(recipe => recipe.publicKey.toBase58());
+		const craftingProcesses = [];
+		for (const filters of buildUpgradeAutomationLpPerProfileRpcPlan(recipeKeys)) craftingProcesses.push(...await craftingProgram.account.craftingProcess.all(filters));
+		const dedupedProcesses = Array.from(new Map(craftingProcesses.map(row => [row.publicKey.toBase58(), row])).values());
+		const craftingInstances = await fetchUpgradeAutomationDecodedAccounts(dedupedProcesses.map(row => row.account.authority), 'craftingInstance');
+		const starbasePlayers = await fetchUpgradeAutomationDecodedAccounts(craftingInstances.map(row => row.account.authority), 'starbasePlayer');
+		return { craftingProcesses: dedupedProcesses, craftingInstances, starbasePlayers };
+	}
+
+	function mergeUpgradeAutomationLpPerProfileSignatureState(state, signatures) {
+		const pending = new Map((state?.pending || []).filter(x => x?.signature).map(x => [x.signature, x]));
+		for (const row of (signatures || []).slice().reverse()) {
+			if (row?.signature && row.err == null && !pending.has(row.signature)) pending.set(row.signature, { signature: row.signature, blockTime: row.blockTime ?? null });
+		}
+		const newest = (signatures || []).find(x => x?.signature)?.signature || state?.cursor || '';
+		return { cursor: newest, pending: Array.from(pending.values()) };
+	}
+
+	function extractUpgradeAutomationLpPerProfileRedemptions(tx, signature, isSubmitInstruction) {
+		if (!tx || tx?.meta?.err || !Number.isFinite(Number(tx.blockTime))) return [];
+		const message = tx?.transaction?.message || {};
+		const loaded = tx?.meta?.loadedAddresses || { writable: [], readonly: [] };
+		const keys = [...(message.accountKeys || message.staticAccountKeys || []), ...(loaded.writable || []), ...(loaded.readonly || [])].map(k => k?.pubkey?.toBase58?.() || k?.toBase58?.() || String(k));
+		const instructions = message.instructions || message.compiledInstructions || [];
+		const pre = new Map((tx.meta.preTokenBalances || []).map(x => [Number(x.accountIndex), BigInt(x?.uiTokenAmount?.amount || 0)]));
+		const post = new Map((tx.meta.postTokenBalances || []).map(x => [Number(x.accountIndex), BigInt(x?.uiTokenAmount?.amount || 0)]));
+		const out = [];
+		for (let instructionIndex = 0; instructionIndex < instructions.length; instructionIndex++) {
+			const ix = instructions[instructionIndex];
+			const programId = keys[Number(ix.programIdIndex)];
+			if (!isSubmitInstruction(ix.data, programId)) continue;
+			const accounts = ix.accounts || ix.accountKeyIndexes || [];
+			if (accounts.length < 17) continue;
+			const tokenFromIndex = Number(accounts[12]);
+			const quantity = (pre.get(tokenFromIndex) || 0n) - (post.get(tokenFromIndex) || 0n);
+			if (quantity <= 0n || quantity > BigInt(Number.MAX_SAFE_INTEGER)) continue;
+			out.push({ signature, instructionIndex, blockTime: Number(tx.blockTime), starbase: keys[Number(accounts[1])], profile: keys[Number(accounts[16])], craftingProcess: keys[Number(accounts[4])], resourceRecipe: keys[Number(accounts[8])], quantity: Number(quantity) });
+		}
+		return out;
 	}
 
 	function getUpgradeAutomationLpPerProfileHistoryCacheKey(faction) {
-		return `slyaUpgradeLpPerProfileHistory_v1_${String(faction || '')}_${String(getSlyaInfluxInstanceTag() || '')}`;
+		return `slyaUpgradeLpPerProfileHistory_v2_${String(faction || '')}_${String(getSlyaInfluxInstanceTag() || '')}`;
 	}
 
 	async function loadUpgradeAutomationLpPerProfileHistory(faction) {
+		const fallback = { cursor: '', pending: [] };
 		try {
-			const raw = await GM.getValue(getUpgradeAutomationLpPerProfileHistoryCacheKey(faction), '[]');
-			const rows = JSON.parse(String(raw || '[]'));
-			return Array.isArray(rows) ? rows : [];
-		} catch (_) { return []; }
+			const parsed = JSON.parse(String(await GM.getValue(getUpgradeAutomationLpPerProfileHistoryCacheKey(faction), JSON.stringify(fallback))));
+			return parsed && Array.isArray(parsed.pending) ? parsed : fallback;
+		} catch (e) {
+			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] history cache invalid faction=${faction} err=${String(e?.message || e)}`);
+			return fallback;
+		}
 	}
 
-	async function saveUpgradeAutomationLpPerProfileHistory(faction, rows) {
-		await GM.setValue(getUpgradeAutomationLpPerProfileHistoryCacheKey(faction), JSON.stringify(rows || []));
+	async function saveUpgradeAutomationLpPerProfileHistory(faction, state) {
+		await GM.setValue(getUpgradeAutomationLpPerProfileHistoryCacheKey(faction), JSON.stringify(state || { cursor: '', pending: [] }));
 	}
 
 	function formatUpgradeAutomationLpPerProfileCompletedInfluxLine(rows, faction) {
@@ -2482,10 +2523,10 @@
 		const factionTag = String(faction || '').replace(/"/g, '');
 		const instanceTag = getSlyaInfluxInstanceTag();
 		for (const row of (rows || [])) {
-			if (!row?.profile || !row?.craftingProcess || !row?.component || !Number.isFinite(Number(row.completedAt))) continue;
-			const tags = `faction=${influxEscape(factionTag)},instance=${influxEscape(String(instanceTag))},profile=${influxEscape(row.profile)},component=${influxEscape(row.component)},process=${influxEscape(row.craftingProcess)},source=redeemed`;
-			const fields = `lp=${Math.round(Number(row.lp || 0))},quantity=${Math.round(Number(row.quantity || 0))}i,lpPerUnit=${Math.round(Number(row.lpPerUnit || 0))}i,scheduledEndTime=${Math.round(Number(row.endTime || 0))}i`;
-			lines.push(`lp_per_profile,${tags} ${fields} ${Math.floor(Number(row.completedAt) * 1000)}`);
+			if (!row?.profile || !row?.craftingProcess || !row?.component || !row?.signature || !Number.isFinite(Number(row.blockTime))) continue;
+			const tags = `faction=${influxEscape(factionTag)},instance=${influxEscape(String(instanceTag))},profile=${influxEscape(row.profile)},component=${influxEscape(row.component)},process=${influxEscape(row.craftingProcess)},signature=${influxEscape(row.signature)},instruction=${Math.round(Number(row.instructionIndex || 0))},source=redeemed`;
+			const fields = `lp=${Math.round(Number(row.lp || 0))},quantity=${Math.round(Number(row.quantity || 0))}i,lpPerUnit=${Math.round(Number(row.lpPerUnit || 0))}i`;
+			lines.push(`lp_per_profile,${tags} ${fields} ${Math.floor(Number(row.blockTime) * 1000)}`);
 		}
 		return lines.join('\n');
 	}
@@ -2498,6 +2539,62 @@
 		const sent = await sendToInflux(line);
 		if (sent !== true) await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] redeemed write failed faction=${faction} rows=${count} detail=${String(upgradeAutomationInfluxDebugStatus || 'unknown').slice(0, 500)}`);
 		return { sent: sent === true, rows: count };
+	}
+
+	async function discoverUpgradeAutomationLpPerProfileSignatures(starbaseKeys, state, now) {
+		const discovered = [];
+		const cutoff = Math.floor(now.getTime() / 1000) - (14 * 86400);
+		for (const starbaseKey of (starbaseKeys || [])) {
+			let before;
+			for (let page = 0; page < 10; page++) {
+				const options = { limit: 1000 };
+				if (before) options.before = before;
+				if (state?.cursor && !before) options.until = state.cursor;
+				const rows = await solanaReadConnection.getSignaturesForAddress(starbaseKey, options, 'finalized');
+				discovered.push(...rows);
+				if (rows.length < 1000 || rows.some(row => Number(row.blockTime || 0) < cutoff)) break;
+				before = rows.at(-1)?.signature;
+				if (!before) break;
+			}
+		}
+		return discovered.filter(row => !Number.isFinite(Number(row.blockTime)) || Number(row.blockTime) >= cutoff);
+	}
+
+	async function runUpgradeAutomationLpPerProfileRedemptionHistory(faction, starbaseCoords, now) {
+		let state = await loadUpgradeAutomationLpPerProfileHistory(faction);
+		const starbaseKeys = [];
+		for (const coords of (starbaseCoords || [])) {
+			const parts = String(coords).split(',').map(x => parseInt(x.trim(), 10));
+			const starbase = parts.length === 2 ? await getStarbaseFromCoords(parts[0], parts[1], true) : null;
+			if (starbase?.publicKey) starbaseKeys.push(starbase.publicKey);
+		}
+		const signatures = await discoverUpgradeAutomationLpPerProfileSignatures(starbaseKeys, state, now);
+		state = mergeUpgradeAutomationLpPerProfileSignatureState(state, signatures);
+		await saveUpgradeAutomationLpPerProfileHistory(faction, state);
+		const processed = new Set();
+		const redeemed = [];
+		const recipeByKey = new Map(upgradeRecipes.map(recipe => [recipe.publicKey.toBase58(), recipe]));
+		for (const item of state.pending.slice(0, 25)) {
+			const tx = await solanaReadConnection.getTransaction(item.signature, { commitment: 'finalized', maxSupportedTransactionVersion: 0 });
+			if (!tx) continue;
+			const rows = extractUpgradeAutomationLpPerProfileRedemptions(tx, item.signature, (data, programId) => {
+				if (String(programId) !== sageProgram.programId.toBase58()) return false;
+				try { return sageProgram.coder.instruction.decode(data, typeof data === 'string' ? 'base58' : undefined)?.name === 'submitStarbaseUpgradeResource'; } catch (_) { return false; }
+			});
+			for (const row of rows) {
+				const recipe = recipeByKey.get(row.resourceRecipe);
+				const component = recipe ? getUpgradeAutomationUpgradeRecipeComponentName(recipe.name) : '';
+				const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[component] || 0);
+				if (component && lpPerUnit) redeemed.push({ ...row, component, lpPerUnit, lp: lpPerUnit * row.quantity });
+			}
+			processed.add(item.signature);
+		}
+		const result = await recordUpgradeAutomationLpPerProfileCompletions(redeemed, faction);
+		if (result.sent) {
+			state.pending = state.pending.filter(row => !processed.has(row.signature));
+			await saveUpgradeAutomationLpPerProfileHistory(faction, state);
+		}
+		return { discovered: signatures.length, processed: processed.size, rows: result.rows, backlog: state.pending.length };
 	}
 
 	function formatUpgradeAutomationLpPerProfileInfluxLine(aggregated, faction, now) {
@@ -2557,10 +2654,7 @@
 			// Fetch each account type once per cycle. Filtering 1,788 decoded accounts
 			// in memory is substantially cheaper than issuing one RPC query for every
 			// StarbasePlayer (192 at MUD Phantom in the validation probe).
-			const accountSnapshot = {
-				craftingInstances: await sageProgram.account.craftingInstance.all(),
-				craftingProcesses: await craftingProgram.account.craftingProcess.all()
-			};
+			const accountSnapshot = await fetchUpgradeAutomationLpPerProfileAccountSnapshot();
 			for (const { faction, starbaseCoords } of factions) {
 				const allProcesses = [];
 				let scansOk = true;
@@ -2571,17 +2665,8 @@
 				}
 				const aggregated = aggregateUpgradeAutomationLpPerProfile(allProcesses);
 				const result = await sendUpgradeAutomationLpPerProfileToInflux(aggregated, faction, now);
-				let redeemedRows = 0;
-				if (scansOk) {
-					const priorPending = await loadUpgradeAutomationLpPerProfileHistory(faction);
-					const history = reconcileUpgradeAutomationLpPerProfileHistory(priorPending, allProcesses, Math.floor(now.getTime() / 1000));
-					const redeemedResult = await recordUpgradeAutomationLpPerProfileCompletions(history.completed, faction);
-					redeemedRows = redeemedResult.rows;
-					if (redeemedResult.sent) await saveUpgradeAutomationLpPerProfileHistory(faction, history.pending);
-				} else {
-					await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] redeemed reconciliation skipped faction=${faction} reason=incomplete_scan`);
-				}
-				await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] faction=${faction} profiles=${Object.keys(aggregated).length} processes=${allProcesses.length} rows=${result.rows} sent=${result.sent} redeemedRows=${redeemedRows}`);
+				const history = await runUpgradeAutomationLpPerProfileRedemptionHistory(faction, starbaseCoords, now);
+				await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] faction=${faction} profiles=${Object.keys(aggregated).length} processes=${allProcesses.length} rows=${result.rows} sent=${result.sent} redeemedRows=${history.rows} historyProcessed=${history.processed} historyBacklog=${history.backlog}`);
 			}
 		} finally {
 			upgradeAutomationLpPerProfileCycleInFlight = false;
