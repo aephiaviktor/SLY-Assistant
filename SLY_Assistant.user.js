@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-171
+// @aephia-version 0.7.35-172
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-171'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-172'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2386,7 +2386,7 @@
 							const quantity = getUpgradeAutomationLpProcessQuantity(craftingProcess);
 							if (!quantity) { dbg.droppedQuantity++; continue; }
 							const endTime = craftingProcess.account.endTime?.toNumber ? craftingProcess.account.endTime.toNumber() : Number(craftingProcess.account.endTime || 0);
-							if (!Number.isFinite(endTime) || endTime <= starbaseTime) { dbg.droppedTime++; continue; }
+							if (!Number.isFinite(endTime) || endTime <= 0) { dbg.droppedTime++; continue; }
 							const component = getUpgradeAutomationUpgradeRecipeComponentName(recipe.name);
 							const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[component] || 0);
 							if (!component || !lpPerUnit) { dbg.droppedRecipe++; continue; }
@@ -2399,8 +2399,9 @@
 								lp: lpPerUnit * quantity,
 								lpPerUnit,
 								endTime,
+								active: endTime > starbaseTime,
 								remainingSeconds,
-								completesByEod: remainingSeconds <= secondsUntilUtcEod
+								completesByEod: endTime > starbaseTime && remainingSeconds <= secondsUntilUtcEod
 							});
 							dbg.pushed++;
 						} catch (e) { dbg.droppedRecipe++; }
@@ -2410,6 +2411,7 @@
 		} catch (e) {
 			dbg.bail = `starbase_error:${String(e?.message || e).slice(0, 120)}`;
 		} finally {
+			out.scanOk = !dbg.bail;
 			try {
 				await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] starbase=${coords} bail=${dbg.bail || 'none'} sp=${dbg.starbasePlayers} ci=${dbg.craftingInstances} cp=${dbg.craftingProcesses} dr=${dbg.droppedRecipe} dq=${dbg.droppedQuantity} dt=${dbg.droppedTime} pushed=${dbg.pushed}`);
 			} catch (_) {}
@@ -2421,7 +2423,7 @@
 		const out = {};
 		const seenProcesses = new Set();
 		for (const p of (processes || [])) {
-			if (!p?.profile || !p?.component || !p?.craftingProcess || seenProcesses.has(p.craftingProcess)) continue;
+			if (!p?.active || !p?.profile || !p?.component || !p?.craftingProcess || seenProcesses.has(p.craftingProcess)) continue;
 			seenProcesses.add(p.craftingProcess);
 			if (!out[p.profile]) out[p.profile] = {};
 			if (!out[p.profile][p.component]) {
@@ -2437,6 +2439,65 @@
 			}
 		}
 		return out;
+	}
+
+	function reconcileUpgradeAutomationLpPerProfileHistory(priorPending, currentProcesses, nowSeconds) {
+		const currentByProcess = new Map();
+		for (const row of (currentProcesses || [])) {
+			if (!row?.craftingProcess || currentByProcess.has(row.craftingProcess)) continue;
+			currentByProcess.set(row.craftingProcess, { ...row });
+		}
+		const pendingByProcess = new Map(currentByProcess);
+		const completed = [];
+		for (const row of (priorPending || [])) {
+			if (!row?.craftingProcess || currentByProcess.has(row.craftingProcess)) continue;
+			const endTime = Number(row.endTime || 0);
+			if (Number.isFinite(endTime) && endTime > 0 && endTime <= nowSeconds) {
+				completed.push({ ...row, completedAt: nowSeconds });
+			} else {
+				pendingByProcess.set(row.craftingProcess, { ...row });
+			}
+		}
+		return { completed, pending: Array.from(pendingByProcess.values()) };
+	}
+
+	function getUpgradeAutomationLpPerProfileHistoryCacheKey(faction) {
+		return `slyaUpgradeLpPerProfileHistory_v1_${String(faction || '')}_${String(getSlyaInfluxInstanceTag() || '')}`;
+	}
+
+	async function loadUpgradeAutomationLpPerProfileHistory(faction) {
+		try {
+			const raw = await GM.getValue(getUpgradeAutomationLpPerProfileHistoryCacheKey(faction), '[]');
+			const rows = JSON.parse(String(raw || '[]'));
+			return Array.isArray(rows) ? rows : [];
+		} catch (_) { return []; }
+	}
+
+	async function saveUpgradeAutomationLpPerProfileHistory(faction, rows) {
+		await GM.setValue(getUpgradeAutomationLpPerProfileHistoryCacheKey(faction), JSON.stringify(rows || []));
+	}
+
+	function formatUpgradeAutomationLpPerProfileCompletedInfluxLine(rows, faction) {
+		const lines = [];
+		const factionTag = String(faction || '').replace(/"/g, '');
+		const instanceTag = getSlyaInfluxInstanceTag();
+		for (const row of (rows || [])) {
+			if (!row?.profile || !row?.craftingProcess || !row?.component || !Number.isFinite(Number(row.completedAt))) continue;
+			const tags = `faction=${influxEscape(factionTag)},instance=${influxEscape(String(instanceTag))},profile=${influxEscape(row.profile)},component=${influxEscape(row.component)},process=${influxEscape(row.craftingProcess)},source=redeemed`;
+			const fields = `lp=${Math.round(Number(row.lp || 0))},quantity=${Math.round(Number(row.quantity || 0))}i,lpPerUnit=${Math.round(Number(row.lpPerUnit || 0))}i,scheduledEndTime=${Math.round(Number(row.endTime || 0))}i`;
+			lines.push(`lp_per_profile,${tags} ${fields} ${Math.floor(Number(row.completedAt) * 1000)}`);
+		}
+		return lines.join('\n');
+	}
+
+	async function recordUpgradeAutomationLpPerProfileCompletions(rows, faction) {
+		const line = formatUpgradeAutomationLpPerProfileCompletedInfluxLine(rows, faction);
+		if (!line) return { sent: true, rows: 0 };
+		const count = line.split('\n').length;
+		await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] redeemed write start faction=${faction} rows=${count}`);
+		const sent = await sendToInflux(line);
+		if (sent !== true) await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] redeemed write failed faction=${faction} rows=${count} detail=${String(upgradeAutomationInfluxDebugStatus || 'unknown').slice(0, 500)}`);
+		return { sent: sent === true, rows: count };
 	}
 
 	function formatUpgradeAutomationLpPerProfileInfluxLine(aggregated, faction, now) {
@@ -2502,10 +2563,25 @@
 			};
 			for (const { faction, starbaseCoords } of factions) {
 				const allProcesses = [];
-				for (const coords of starbaseCoords) allProcesses.push(...await getUpgradeAutomationLpPerProfileProcessesForStarbase(coords, now, accountSnapshot));
+				let scansOk = true;
+				for (const coords of starbaseCoords) {
+					const rows = await getUpgradeAutomationLpPerProfileProcessesForStarbase(coords, now, accountSnapshot);
+					if (rows.scanOk !== true) scansOk = false;
+					allProcesses.push(...rows);
+				}
 				const aggregated = aggregateUpgradeAutomationLpPerProfile(allProcesses);
 				const result = await sendUpgradeAutomationLpPerProfileToInflux(aggregated, faction, now);
-				await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] faction=${faction} profiles=${Object.keys(aggregated).length} processes=${allProcesses.length} rows=${result.rows} sent=${result.sent}`);
+				let redeemedRows = 0;
+				if (scansOk) {
+					const priorPending = await loadUpgradeAutomationLpPerProfileHistory(faction);
+					const history = reconcileUpgradeAutomationLpPerProfileHistory(priorPending, allProcesses, Math.floor(now.getTime() / 1000));
+					const redeemedResult = await recordUpgradeAutomationLpPerProfileCompletions(history.completed, faction);
+					redeemedRows = redeemedResult.rows;
+					if (redeemedResult.sent) await saveUpgradeAutomationLpPerProfileHistory(faction, history.pending);
+				} else {
+					await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] redeemed reconciliation skipped faction=${faction} reason=incomplete_scan`);
+				}
+				await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] faction=${faction} profiles=${Object.keys(aggregated).length} processes=${allProcesses.length} rows=${result.rows} sent=${result.sent} redeemedRows=${redeemedRows}`);
 			}
 		} finally {
 			upgradeAutomationLpPerProfileCycleInFlight = false;
