@@ -32,9 +32,11 @@ vm.createContext(context);
 vm.runInContext(`
   ${extractFunction('buildUpgradeAutomationLpPerProfileRpcPlan')}
   ${extractFunction('mergeUpgradeAutomationLpPerProfileSignatureState')}
+  ${extractFunction('updateUpgradeAutomationLpPerProfileWatchCohort')}
   ${extractFunction('extractUpgradeAutomationLpPerProfileRedemptions')}
   this.buildPlan = buildUpgradeAutomationLpPerProfileRpcPlan;
   this.mergeState = mergeUpgradeAutomationLpPerProfileSignatureState;
+  this.updateCohort = updateUpgradeAutomationLpPerProfileWatchCohort;
   this.extractRedemptions = extractUpgradeAutomationLpPerProfileRedemptions;
 `, context);
 
@@ -53,6 +55,24 @@ const merged = context.mergeState(
 );
 assert.equal(merged.cursor, 'sig-new');
 assert.deepEqual(merged.pending.map(row => row.signature), ['sig-pending', 'sig-new'], 'pending signatures survive restart, deduplicate, and exclude failed transactions');
+
+const now = 1_725_000_000;
+const cohort = context.updateCohort({ profiles: {
+  'profile-old': { firstSeenAt: now - 500, expiresAt: now + 100, cursor: 'old-cursor', pending: [] },
+  'profile-expired': { firstSeenAt: now - 90000, expiresAt: now - 1, cursor: 'gone', pending: [] }
+}}, [
+  { profile: 'profile-new', active: true, completesByEod: true },
+  { profile: 'profile-later', active: true, completesByEod: false }
+], now);
+assert.deepEqual(Object.keys(cohort.profiles).sort(), ['profile-new', 'profile-old'], 'cohort adds only EoD profiles, retains watched profiles through grace, and removes expired profiles');
+assert.equal(cohort.profiles['profile-new'].firstSeenAt, now, 'new profile backfill starts when it enters the cohort');
+assert.equal(cohort.profiles['profile-old'].cursor, 'old-cursor', 'restart cursor survives cohort refresh');
+assert.equal(cohort.profiles['profile-new'].expiresAt, (Math.floor(now / 86400) + 1) * 86400 + 7200, 'watched profile remains through EoD plus two-hour grace');
+
+const historyRunner = extractFunction('runUpgradeAutomationLpPerProfileRedemptionHistory');
+assert.match(historyRunner, /getSignaturesForAddress\(new solanaWeb3\.PublicKey\(profile\)/, 'history queries watched profile addresses directly');
+assert.doesNotMatch(historyRunner, /starbaseKeys|getSignaturesForAddress\(starbase/, 'history no longer scans the high-volume starbase address');
+assert.match(source, /lp_redemption_total,[^`]*totalLp=/, 'authoritative cumulative LP total is recorded for hourly deltas');
 
 const tx = {
   blockTime: 1_725_000_000,

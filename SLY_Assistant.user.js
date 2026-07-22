@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-173
+// @aephia-version 0.7.35-174
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-173'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-174'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2476,6 +2476,22 @@
 		return { cursor: newest, pending: Array.from(pending.values()) };
 	}
 
+	function updateUpgradeAutomationLpPerProfileWatchCohort(state, processes, nowSeconds) {
+		const profiles = {};
+		for (const [profile, entry] of Object.entries(state?.profiles || {})) {
+			if (profile && Number(entry?.expiresAt || 0) > nowSeconds) profiles[profile] = { ...entry, pending: Array.isArray(entry?.pending) ? entry.pending : [] };
+		}
+		const expiresAt = (Math.floor(nowSeconds / 86400) + 1) * 86400 + 7200;
+		for (const row of (processes || [])) {
+			if (!row?.profile || !row?.active || !row?.completesByEod) continue;
+			const prior = profiles[row.profile];
+			profiles[row.profile] = prior
+				? { ...prior, expiresAt: Math.max(Number(prior.expiresAt || 0), expiresAt) }
+				: { firstSeenAt: nowSeconds, expiresAt, cursor: '', pending: [] };
+		}
+		return { profiles };
+	}
+
 	function extractUpgradeAutomationLpPerProfileRedemptions(tx, signature, isSubmitInstruction) {
 		if (!tx || tx?.meta?.err || !Number.isFinite(Number(tx.blockTime))) return [];
 		const message = tx?.transaction?.message || {};
@@ -2500,14 +2516,14 @@
 	}
 
 	function getUpgradeAutomationLpPerProfileHistoryCacheKey(faction) {
-		return `slyaUpgradeLpPerProfileHistory_v2_${String(faction || '')}_${String(getSlyaInfluxInstanceTag() || '')}`;
+		return `slyaUpgradeLpPerProfileHistory_v3_${String(faction || '')}_${String(getSlyaInfluxInstanceTag() || '')}`;
 	}
 
 	async function loadUpgradeAutomationLpPerProfileHistory(faction) {
-		const fallback = { cursor: '', pending: [] };
+		const fallback = { profiles: {} };
 		try {
 			const parsed = JSON.parse(String(await GM.getValue(getUpgradeAutomationLpPerProfileHistoryCacheKey(faction), JSON.stringify(fallback))));
-			return parsed && Array.isArray(parsed.pending) ? parsed : fallback;
+			return parsed && parsed.profiles && typeof parsed.profiles === 'object' ? parsed : fallback;
 		} catch (e) {
 			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] history cache invalid faction=${faction} err=${String(e?.message || e)}`);
 			return fallback;
@@ -2515,7 +2531,7 @@
 	}
 
 	async function saveUpgradeAutomationLpPerProfileHistory(faction, state) {
-		await GM.setValue(getUpgradeAutomationLpPerProfileHistoryCacheKey(faction), JSON.stringify(state || { cursor: '', pending: [] }));
+		await GM.setValue(getUpgradeAutomationLpPerProfileHistoryCacheKey(faction), JSON.stringify(state || { profiles: {} }));
 	}
 
 	function formatUpgradeAutomationLpPerProfileCompletedInfluxLine(rows, faction) {
@@ -2541,60 +2557,74 @@
 		return { sent: sent === true, rows: count };
 	}
 
-	async function discoverUpgradeAutomationLpPerProfileSignatures(starbaseKeys, state, now) {
-		const discovered = [];
-		const cutoff = Math.floor(now.getTime() / 1000) - (14 * 86400);
-		for (const starbaseKey of (starbaseKeys || [])) {
+	async function recordUpgradeAutomationLpRedemptionTotal(faction, now) {
+		try {
+			const factionCfg = UPGRADE_AUTOMATION_FACTION_CONFIG[normalizeUpgradeAutomationLpInstance(faction)];
+			if (!factionCfg?.lpInstance) return { sent: false, totalLp: null, error: 'lp_instance_missing' };
+			const dayIndex = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 86400000);
+			const row = (await fetchUpgradeAutomationEpochSeries(factionCfg.lpInstance)).find(item => Number(item.dayIndex) === dayIndex);
+			const totalLp = Number(row?.totalPoints);
+			if (!Number.isSafeInteger(totalLp) || totalLp < 0) return { sent: false, totalLp: null, error: 'current_epoch_total_missing' };
+			const tags = `faction=${influxEscape(faction)},instance=${influxEscape(String(getSlyaInfluxInstanceTag()))},source=authoritative`;
+			const line = `lp_redemption_total,${tags} totalLp=${totalLp}i ${Math.floor(now.getTime())}`;
+			return { sent: await sendToInflux(line) === true, totalLp, error: '' };
+		} catch (e) {
+			return { sent: false, totalLp: null, error: String(e?.message || e || 'total_lp_failed') };
+		}
+	}
+
+	async function runUpgradeAutomationLpPerProfileRedemptionHistory(faction, processes, now) {
+		const nowSeconds = Math.floor(now.getTime() / 1000);
+		let state = updateUpgradeAutomationLpPerProfileWatchCohort(await loadUpgradeAutomationLpPerProfileHistory(faction), processes, nowSeconds);
+		let discoveredCount = 0;
+		for (const [profile, entry] of Object.entries(state.profiles)) {
+			const signatures = [];
 			let before;
-			for (let page = 0; page < 10; page++) {
-				const options = { limit: 1000 };
+			for (let page = 0; page < 5; page++) {
+				const options = { limit: 100 };
 				if (before) options.before = before;
-				if (state?.cursor && !before) options.until = state.cursor;
-				const rows = await solanaReadConnection.getSignaturesForAddress(starbaseKey, options, 'finalized');
-				discovered.push(...rows);
-				if (rows.length < 1000 || rows.some(row => Number(row.blockTime || 0) < cutoff)) break;
+				if (entry.cursor && !before) options.until = entry.cursor;
+				const rows = await solanaReadConnection.getSignaturesForAddress(new solanaWeb3.PublicKey(profile), options, 'finalized');
+				signatures.push(...rows.filter(row => !Number.isFinite(Number(row.blockTime)) || Number(row.blockTime) >= Number(entry.firstSeenAt || nowSeconds)));
+				if (rows.length < 100 || rows.some(row => Number(row.blockTime || 0) < Number(entry.firstSeenAt || nowSeconds))) break;
 				before = rows.at(-1)?.signature;
 				if (!before) break;
 			}
+			discoveredCount += signatures.length;
+			state.profiles[profile] = { ...entry, ...mergeUpgradeAutomationLpPerProfileSignatureState(entry, signatures) };
 		}
-		return discovered.filter(row => !Number.isFinite(Number(row.blockTime)) || Number(row.blockTime) >= cutoff);
-	}
-
-	async function runUpgradeAutomationLpPerProfileRedemptionHistory(faction, starbaseCoords, now) {
-		let state = await loadUpgradeAutomationLpPerProfileHistory(faction);
-		const starbaseKeys = [];
-		for (const coords of (starbaseCoords || [])) {
-			const parts = String(coords).split(',').map(x => parseInt(x.trim(), 10));
-			const starbase = parts.length === 2 ? await getStarbaseFromCoords(parts[0], parts[1], true) : null;
-			if (starbase?.publicKey) starbaseKeys.push(starbase.publicKey);
-		}
-		const signatures = await discoverUpgradeAutomationLpPerProfileSignatures(starbaseKeys, state, now);
-		state = mergeUpgradeAutomationLpPerProfileSignatureState(state, signatures);
 		await saveUpgradeAutomationLpPerProfileHistory(faction, state);
-		const processed = new Set();
+		const processedByProfile = new Map();
 		const redeemed = [];
 		const recipeByKey = new Map(upgradeRecipes.map(recipe => [recipe.publicKey.toBase58(), recipe]));
-		for (const item of state.pending.slice(0, 25)) {
-			const tx = await solanaReadConnection.getTransaction(item.signature, { commitment: 'finalized', maxSupportedTransactionVersion: 0 });
-			if (!tx) continue;
-			const rows = extractUpgradeAutomationLpPerProfileRedemptions(tx, item.signature, (data, programId) => {
-				if (String(programId) !== sageProgram.programId.toBase58()) return false;
-				try { return sageProgram.coder.instruction.decode(data, typeof data === 'string' ? 'base58' : undefined)?.name === 'submitStarbaseUpgradeResource'; } catch (_) { return false; }
-			});
-			for (const row of rows) {
-				const recipe = recipeByKey.get(row.resourceRecipe);
-				const component = recipe ? getUpgradeAutomationUpgradeRecipeComponentName(recipe.name) : '';
-				const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[component] || 0);
-				if (component && lpPerUnit) redeemed.push({ ...row, component, lpPerUnit, lp: lpPerUnit * row.quantity });
+		for (const [profile, entry] of Object.entries(state.profiles)) {
+			const processed = new Set();
+			for (const item of entry.pending.slice(0, 100)) {
+				const tx = await solanaReadConnection.getTransaction(item.signature, { commitment: 'finalized', maxSupportedTransactionVersion: 0 });
+				if (!tx) continue;
+				const rows = extractUpgradeAutomationLpPerProfileRedemptions(tx, item.signature, (data, programId) => {
+					if (String(programId) !== sageProgram.programId.toBase58()) return false;
+					try { return sageProgram.coder.instruction.decode(data, typeof data === 'string' ? 'base58' : undefined)?.name === 'submitStarbaseUpgradeResource'; } catch (_) { return false; }
+				});
+				for (const row of rows) {
+					if (row.profile !== profile || Number(row.blockTime) < Number(entry.firstSeenAt || 0)) continue;
+					const recipe = recipeByKey.get(row.resourceRecipe);
+					const component = recipe ? getUpgradeAutomationUpgradeRecipeComponentName(recipe.name) : '';
+					const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[component] || 0);
+					if (component && lpPerUnit) redeemed.push({ ...row, component, lpPerUnit, lp: lpPerUnit * row.quantity });
+				}
+				processed.add(item.signature);
 			}
-			processed.add(item.signature);
+			processedByProfile.set(profile, processed);
 		}
 		const result = await recordUpgradeAutomationLpPerProfileCompletions(redeemed, faction);
 		if (result.sent) {
-			state.pending = state.pending.filter(row => !processed.has(row.signature));
+			for (const [profile, processed] of processedByProfile) state.profiles[profile].pending = state.profiles[profile].pending.filter(row => !processed.has(row.signature));
 			await saveUpgradeAutomationLpPerProfileHistory(faction, state);
 		}
-		return { discovered: signatures.length, processed: processed.size, rows: result.rows, backlog: state.pending.length };
+		const backlog = Object.values(state.profiles).reduce((sum, entry) => sum + entry.pending.length, 0);
+		const processed = Array.from(processedByProfile.values()).reduce((sum, set) => sum + set.size, 0);
+		return { discovered: discoveredCount, processed, rows: result.rows, backlog, profiles: Object.keys(state.profiles).length };
 	}
 
 	function formatUpgradeAutomationLpPerProfileInfluxLine(aggregated, faction, now) {
@@ -2665,8 +2695,9 @@
 				}
 				const aggregated = aggregateUpgradeAutomationLpPerProfile(allProcesses);
 				const result = await sendUpgradeAutomationLpPerProfileToInflux(aggregated, faction, now);
-				const history = await runUpgradeAutomationLpPerProfileRedemptionHistory(faction, starbaseCoords, now);
-				await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] faction=${faction} profiles=${Object.keys(aggregated).length} processes=${allProcesses.length} rows=${result.rows} sent=${result.sent} redeemedRows=${history.rows} historyProcessed=${history.processed} historyBacklog=${history.backlog}`);
+				const history = await runUpgradeAutomationLpPerProfileRedemptionHistory(faction, allProcesses, now);
+				const total = await recordUpgradeAutomationLpRedemptionTotal(faction, now);
+				await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] faction=${faction} profiles=${Object.keys(aggregated).length} processes=${allProcesses.length} rows=${result.rows} sent=${result.sent} redeemedRows=${history.rows} watchedProfiles=${history.profiles} historyProcessed=${history.processed} historyBacklog=${history.backlog} totalLp=${total.totalLp ?? 'missing'} totalSent=${total.sent} totalErr=${total.error || 'none'}`);
 			}
 		} finally {
 			upgradeAutomationLpPerProfileCycleInFlight = false;
