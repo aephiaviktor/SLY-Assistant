@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-179
+// @aephia-version 0.7.35-180
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-179'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-180'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2675,6 +2675,20 @@
 		return cleanedRows;
 	}
 
+	function computeUpgradeAutomationRequestedLpTargetFullDay(pastRequestedLp = 0, rows = [], aggressiveness = 1, remainingNeutralHours = 0, remainingTargetHours = 0) {
+		const useExecutableTargetBaseline = rows.some(row => row.targetPhaseBlocked);
+		return Number(pastRequestedLp || 0) + rows.reduce((sum, row) => {
+			const neutralHourly = Number(row.neutralUpgradingHour || 0);
+			const targetBaselineHourly = useExecutableTargetBaseline
+				? neutralHourly
+				: Number(row.targetBaselineUpgradingHour ?? row.neutralUpgradingHour ?? 0);
+			return sum + (
+				neutralHourly * Number(remainingNeutralHours || 0)
+				+ targetBaselineHourly * Number(aggressiveness || 0) * Number(remainingTargetHours || 0)
+			) * Number(row.lpPerUnit || 0);
+		}, 0);
+	}
+
 	function computeUpgradeAutomationFinalPlan(neutralRows = [], aggressiveness = 1, now = new Date()) {
 		const rows = neutralRows.map(row => ({ ...row }));
 		const planning = getUpgradeAutomationPlanningHorizon(now);
@@ -3187,7 +3201,13 @@
 		const effectiveRemainingNeutral = Math.max(0, Math.min(effectiveRemaining, aggrStartHour - currentUtcHour));
 		const effectiveRemainingTarget = effectiveRemaining - effectiveRemainingNeutral;
 		const neutralLpTargetFullDay = pastHoursLp.neutralLpPast + finalPlan.rows.reduce((sum, row) => sum + Number(row.neutralUpgradingHour || 0) * effectiveRemaining * Number(row.lpPerUnit || 0), 0);
-		const requestedLpTargetFullDay = pastHoursLp.requestedLpPast + finalPlan.rows.reduce((sum, row) => sum + Number(row.neutralUpgradingHour || 0) * Number(ag.aggr || 0) * effectiveRemaining * Number(row.lpPerUnit || 0), 0);
+		const requestedLpTargetFullDay = computeUpgradeAutomationRequestedLpTargetFullDay(
+			pastHoursLp.requestedLpPast,
+			finalPlan.rows,
+			ag.aggr,
+			effectiveRemainingNeutral,
+			effectiveRemainingTarget
+		);
 		const achievableLpTargetFullDay = pastHoursLp.achievableLpPast + finalPlan.rows.reduce((sum, row) => sum + (Number(row.neutralUpgradingHour || 0) * effectiveRemainingNeutral + Number(row.finalUpgradingHour || 0) * effectiveRemainingTarget) * Number(row.lpPerUnit || 0), 0);
 		const installedTargetNow = finalPlan.targetFinalLp;
 		const installedGap = installedTargetNow - installedToday;
