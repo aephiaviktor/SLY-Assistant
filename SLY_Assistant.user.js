@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-176
+// @aephia-version 0.7.35-177
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-176'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-177'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -398,6 +398,7 @@
 	let upgradeAutomationInfluxInventoryDrainError = '';
 	let upgradeAutomationLpControl = null;
 	let upgradeAutomationLpControlError = '';
+	let upgradeAutomationLpPerProfileDebug = '';
 	let upgradeAutomationExecutionSummary = null;
 	let upgradeAutomationExecutionSummaryError = '';
 	let upgradeAutomationExecutionCrewDebug = '';
@@ -2323,6 +2324,25 @@
 		} catch (e) { return 0; }
 	}
 
+	function formatUpgradeAutomationLpProcessDebugLines(faction, processes, now = new Date()) {
+		const header = `${String(faction || 'unknown')} LP process diagnosis @ ${now.toISOString()}`;
+		const rows = (processes || []).slice().sort((a, b) => Number(b?.expectedLpByEod || 0) - Number(a?.expectedLpByEod || 0));
+		if (!rows.length) return `${header}\n(no active upgrade processes)`;
+		return [header, ...rows.map(p => [
+			String(p?.profile || 'unknown'),
+			String(p?.component || 'unknown'),
+			String(p?.craftingProcess || 'unknown'),
+			`qty=${Math.round(Number(p?.quantity || 0)).toLocaleString('en-US')}`,
+			`lp=${Math.round(Number(p?.lp || 0)).toLocaleString('en-US')}`,
+			`start=${Math.round(Number(p?.startTime || 0))}`,
+			`end=${Math.round(Number(p?.endTime || 0))}`,
+			`duration=${Math.round(Number(p?.durationSeconds || 0))}s`,
+			`remaining=${Math.round(Number(p?.remainingSeconds || 0))}s`,
+			`completions=${Math.round(Number(p?.expectedCompletionsByEod || 0))}`,
+			`expectedLP=${Math.round(Number(p?.expectedLpByEod || 0)).toLocaleString('en-US')}`
+		].join(' | '))].join('\n');
+	}
+
 	function computeUpgradeAutomationLpProcessEodProjection(startTime, endTime, nowSeconds, eodSeconds, lp, quantity) {
 		const start = Number(startTime || 0);
 		const end = Number(endTime || 0);
@@ -2759,6 +2779,7 @@
 					allProcesses.push(...rows);
 				}
 				const aggregated = aggregateUpgradeAutomationLpPerProfile(allProcesses);
+				upgradeAutomationLpPerProfileDebug = formatUpgradeAutomationLpProcessDebugLines(faction, allProcesses.filter(p => p?.active), now);
 				const result = await sendUpgradeAutomationLpPerProfileToInflux(aggregated, faction, now);
 				const history = await runUpgradeAutomationLpPerProfileRedemptionHistory(faction, allProcesses, now);
 				const total = await recordUpgradeAutomationLpRedemptionTotal(faction, now);
@@ -6334,6 +6355,7 @@
 					: `Unavailable${upgradeAutomationLpControl?.expectedLpByEodError ? ': ' + String(upgradeAutomationLpControl.expectedLpByEodError) : ''}`;
 				const absAdjustment = Number.isFinite(upgradeAutomationLpControl?.absAdjustment) ? upgradeAutomationLpControl.absAdjustment : 0;
 				content += '<tr><td>LP Today</td><td align="right">' + Math.round(lpToday).toLocaleString() + '</td><td>Projected LP Today</td><td align="right">' + (projectedLpToday !== null ? Math.round(projectedLpToday).toLocaleString() : '-') + '</td><td title="' + expectedLpTitle.replace(/["<>]/g, '') + '">Expected LP by EOD</td><td align="right" title="' + expectedLpTitle.replace(/["<>]/g, '') + '">' + (expectedLpByEod !== null ? Math.round(expectedLpByEod).toLocaleString() : '-') + '</td></tr>';
+				if (upgradeAutomationLpPerProfileDebug) content += '<tr><td colspan="6"><pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;font-size:10px;line-height:1.35;background:rgba(0,0,0,.2);padding:6px;">' + upgradeAutomationLpPerProfileDebug.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre></td></tr>';
 				content += '<tr><td>LP Target Now Hourly</td><td align="right">' + Math.round(lpTargetNowInflux).toLocaleString() + '</td><td>LP Faction yday</td><td align="right">' + (lpFactionYesterdayRaw != null && Number.isFinite(lpFactionYesterday) ? Math.round(lpFactionYesterday).toLocaleString() : '-') + '</td><td>LP Installed yday</td><td align="right">' + (lpInstalledYesterdayRaw != null && Number.isFinite(lpInstalledYesterday) ? Math.round(lpInstalledYesterday).toLocaleString() : '-') + '</td></tr>';
 				content += '<tr><td>' + lpAggPreLabel + '</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrRelative ?? upgradeAutomationLpControl?.rawAggressiveness ?? upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td><td>Aggr. (abs.)</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrAbsolute ?? (1 + absAdjustment)).toFixed(3) + '</td><td style="color:' + lpAggColor + '">Aggr.</td><td align="right" style="color:' + lpAggColor + '">' + Number(upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td></tr>';
 				content += '<tr><td colspan="6">&nbsp;</td></tr>';

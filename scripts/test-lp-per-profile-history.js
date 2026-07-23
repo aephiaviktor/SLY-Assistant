@@ -34,12 +34,14 @@ vm.runInContext(`
   ${extractFunction('mergeUpgradeAutomationLpPerProfileSignatureState')}
   ${extractFunction('updateUpgradeAutomationLpPerProfileWatchCohort')}
   ${extractFunction('computeUpgradeAutomationLpProcessEodProjection')}
+  ${extractFunction('formatUpgradeAutomationLpProcessDebugLines')}
   ${extractFunction('buildUpgradeAutomationLpPerProfileTransactionQueue')}
   ${extractFunction('extractUpgradeAutomationLpPerProfileRedemptions')}
   this.buildPlan = buildUpgradeAutomationLpPerProfileRpcPlan;
   this.mergeState = mergeUpgradeAutomationLpPerProfileSignatureState;
   this.updateCohort = updateUpgradeAutomationLpPerProfileWatchCohort;
   this.projectEod = computeUpgradeAutomationLpProcessEodProjection;
+  this.formatDebug = formatUpgradeAutomationLpProcessDebugLines;
   this.buildQueue = buildUpgradeAutomationLpPerProfileTransactionQueue;
   this.extractRedemptions = extractUpgradeAutomationLpPerProfileRedemptions;
 `, context);
@@ -86,6 +88,14 @@ assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 150, 750
 assert.equal(context.projectEod(100, 800, 150, 750, 60, 3).expectedCompletionsByEod, 0, 'a process ending after EoD contributes no completed LP');
 assert.equal(context.projectEod(200, 200, 150, 750, 60, 3).expectedCompletionsByEod, 1, 'invalid duration retains the conservative in-flight completion without extrapolation');
 assert.equal(context.projectEod(100, 750, 150, 750, 60, 3).expectedCompletionsByEod, 1, 'a process ending exactly at EoD counts once');
+
+const debugLines = context.formatDebug('MUD', [{
+  profile: 'profile-123456789', craftingProcess: 'process-123456789', component: 'Framework',
+  quantity: 3, lp: 60000000, startTime: 100, endTime: 200, durationSeconds: 100,
+  remainingSeconds: 50, expectedCompletionsByEod: 6, expectedLpByEod: 360000000
+}], new Date('2026-07-23T05:00:00Z'));
+assert.match(debugLines, /MUD LP process diagnosis @ 2026-07-23T05:00:00\.000Z/);
+assert.match(debugLines, /profile-123456789 \| Framework \| process-123456789 \| qty=3 \| lp=60,000,000 \| start=100 \| end=200 \| duration=100s \| remaining=50s \| completions=6 \| expectedLP=360,000,000/);
 
 const historyRunner = extractFunction('runUpgradeAutomationLpPerProfileRedemptionHistory');
 assert.match(historyRunner, /getSignaturesForAddress\(new solanaWeb3\.PublicKey\(profile\)/, 'history queries watched profile addresses directly');
