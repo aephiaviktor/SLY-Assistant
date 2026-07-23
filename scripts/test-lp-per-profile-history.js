@@ -35,7 +35,7 @@ vm.runInContext(`
   ${extractFunction('updateUpgradeAutomationLpPerProfileWatchCohort')}
   ${extractFunction('computeUpgradeAutomationSageEodSeconds')}
   ${extractFunction('computeUpgradeAutomationLpProcessEodProjection')}
-  ${extractFunction('formatUpgradeAutomationLpProcessDebugLines')}
+  ${extractFunction('summarizeUpgradeAutomationUninstalledLp')}
   ${extractFunction('buildUpgradeAutomationLpPerProfileTransactionQueue')}
   ${extractFunction('extractUpgradeAutomationLpPerProfileRedemptions')}
   this.buildPlan = buildUpgradeAutomationLpPerProfileRpcPlan;
@@ -43,7 +43,7 @@ vm.runInContext(`
   this.updateCohort = updateUpgradeAutomationLpPerProfileWatchCohort;
   this.sageEod = computeUpgradeAutomationSageEodSeconds;
   this.projectEod = computeUpgradeAutomationLpProcessEodProjection;
-  this.formatDebug = formatUpgradeAutomationLpProcessDebugLines;
+  this.summarizeUninstalled = summarizeUpgradeAutomationUninstalledLp;
   this.buildQueue = buildUpgradeAutomationLpPerProfileTransactionQueue;
   this.extractRedemptions = extractUpgradeAutomationLpPerProfileRedemptions;
 `, context);
@@ -79,6 +79,9 @@ assert.equal(cohort.profiles['profile-new'].expiresAt, (Math.floor(now / 86400) 
 
 assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 150, 750, 60, 3))), {
   durationSeconds: 100,
+  overdueSeconds: 0,
+  automationAssumed: true,
+  pendingInstallation: false,
   inFlightCompletionsByEod: 1,
   expectedCompletionsByEod: 6,
   inFlightLpByEod: 60,
@@ -90,6 +93,14 @@ assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 150, 750
 assert.equal(context.projectEod(100, 800, 150, 750, 60, 3).expectedCompletionsByEod, 0, 'a process ending after EoD contributes no completed LP');
 assert.equal(context.projectEod(200, 200, 150, 750, 60, 3).expectedCompletionsByEod, 1, 'invalid duration retains the conservative in-flight completion without extrapolation');
 assert.equal(context.projectEod(100, 750, 150, 750, 60, 3).expectedCompletionsByEod, 1, 'a process ending exactly at EoD counts once');
+assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 250, 750, 60, 3))), {
+  durationSeconds: 100, overdueSeconds: 50, automationAssumed: true, pendingInstallation: true,
+  inFlightCompletionsByEod: 1, expectedCompletionsByEod: 6,
+  inFlightLpByEod: 60, expectedLpByEod: 360, repeatLpByEod: 300,
+  inFlightQuantityByEod: 3, expectedQuantityByEod: 18
+}, 'a process overdue by at most two minutes counts its pending installation and automated repeats from now');
+assert.equal(context.projectEod(100, 200, 321, 750, 60, 3).expectedCompletionsByEod, 1, 'a process overdue by more than two minutes counts only its pending installation');
+assert.equal(context.projectEod(100, 200, 321, 750, 60, 3).automationAssumed, false, 'an older overdue process is treated as manual');
 assert.equal(
   context.sageEod(1_782_771_962, new Date('2026-07-23T07:50:00Z')),
   1_782_830_162,
@@ -101,13 +112,12 @@ assert.equal(
   'a 59-minute MUD job has 17 total completions by EoD rather than hundreds from mixed clocks'
 );
 
-const debugLines = context.formatDebug('MUD', [{
-  profile: 'profile-123456789', craftingProcess: 'process-123456789', component: 'Framework',
-  quantity: 3, lp: 60000000, startTime: 100, endTime: 200, durationSeconds: 100,
-  remainingSeconds: 50, expectedCompletionsByEod: 6, expectedLpByEod: 360000000
-}], new Date('2026-07-23T05:00:00Z'));
-assert.match(debugLines, /MUD LP process diagnosis @ 2026-07-23T05:00:00\.000Z/);
-assert.match(debugLines, /profile-123456789 \| Framework \| process-123456789 \| qty=3 \| lp=60,000,000 \| start=100 \| end=200 \| duration=100s \| remaining=50s \| completions=6 \| expectedLP=360,000,000/);
+const uninstalled = context.summarizeUninstalled([
+  { lp: 60, pendingInstallation: true, automationAssumed: true },
+  { lp: 40, pendingInstallation: true, automationAssumed: false },
+  { lp: 999, pendingInstallation: false, automationAssumed: true }
+]);
+assert.deepEqual(JSON.parse(JSON.stringify(uninstalled)), { automatedLp: 60, notAutomatedLp: 40 }, 'faction diagnostics split only uninstalled LP by automation assumption');
 
 const historyRunner = extractFunction('runUpgradeAutomationLpPerProfileRedemptionHistory');
 assert.match(historyRunner, /getSignaturesForAddress\(new solanaWeb3\.PublicKey\(profile\)/, 'history queries watched profile addresses directly');
@@ -117,7 +127,9 @@ assert.match(historyRunner, /offset \+= 8/, 'transaction RPCs use bounded concur
 assert.match(historyRunner, /\[HISTORY-DIAG\]/, 'history cycle logs categorized rejection counters');
 assert.match(source, /lp_redemption_total,[^`]*totalLp=/, 'authoritative cumulative LP total is recorded for hourly deltas');
 assert.match(source, /_field == "expectedLpByEod"/, 'LP panel reads the expected automation-repeat projection');
-assert.match(source, />Expected LP by EOD</, 'panel labels the projection as Expected LP by EOD');
+assert.match(source, />Expected Additional LP by EOD</, 'panel labels the active-process projection as additional LP');
+assert.match(source, />Expected Total LP by EOD</, 'panel shows LP Today plus expected additional LP');
+assert.doesNotMatch(source, />Projected LP Today</, 'historical projected LP is removed from the panel');
 assert.match(source, /lpByEod=.*quantityByEod=/, 'conservative in-flight EoD fields remain in telemetry');
 
 const queue = context.buildQueue({
