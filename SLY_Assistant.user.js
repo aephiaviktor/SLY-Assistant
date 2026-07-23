@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-181
+// @aephia-version 0.7.35-182
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-181'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-182'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4947,6 +4947,30 @@
 		return String(date.getTime()) + '000000';
 	}
 
+	function buildUpgradeAutomationSlyaPerfFields(summary, executionSummary, snapshotForHour) {
+		summary = summary || {};
+		executionSummary = executionSummary || {};
+		snapshotForHour = snapshotForHour || '';
+		const fields = [
+			'lp_today=' + Math.round(Number(summary.today || 0)) + 'i'
+		];
+		if (summary.expectedLpByEod != null && Number.isFinite(Number(summary.expectedLpByEod))) {
+			fields.push('expected_additional_lp_eod=' + Math.round(Number(summary.expectedLpByEod)) + 'i');
+		}
+		if (summary.expectedTotalLpByEod != null && Number.isFinite(Number(summary.expectedTotalLpByEod))) {
+			fields.push('expected_total_lp_eod=' + Math.round(Number(summary.expectedTotalLpByEod)) + 'i');
+		}
+		fields.push('installed_lp_today=' + Math.round(Number(executionSummary.installedToday || 0)) + 'i');
+		if (executionSummary.installedYesterday != null && Number.isFinite(Number(executionSummary.installedYesterday))) {
+			fields.push('installed_lp_yesterday=' + Math.round(Number(executionSummary.installedYesterday)) + 'i');
+		}
+		if (summary.expectedLpByEodAgeMs != null && Number.isFinite(Number(summary.expectedLpByEodAgeMs))) {
+			fields.push('expected_additional_snapshot_age_seconds=' + Math.max(0, Math.round(Number(summary.expectedLpByEodAgeMs) / 1000)) + 'i');
+		}
+		fields.push('snapshot_for_hour=' + influxFieldString(snapshotForHour));
+		return fields.join(',');
+	}
+
 	async function emitUpgradeAutomationInfluxSnapshot(now, summary, executionSummary) {
 		if (!globalSettings.upgradeAutomationInfluxTracking) {
 			upgradeAutomationInfluxDebugStatus = 'influx tracking disabled';
@@ -5024,6 +5048,10 @@
 			`,snapshot_for_hour=${influxFieldString(snapshotForHour)}`
 		);
 		lines.push(
+			`slya_perf,faction=${influxEscape(lpAutoFactionTag)},instance=${influxEscape(lpAutoInstanceTag)}` +
+			` ${buildUpgradeAutomationSlyaPerfFields(summary, executionSummary, snapshotForHour)}`
+		);
+		lines.push(
 			`lp_auto_settings,faction=${influxEscape(lpAutoFactionTag)},instance=${influxEscape(lpAutoInstanceTag)}` +
 			` neutral_phase_length=${Math.max(0, parseIntDefault(globalSettings?.upgradeAutomationAggressivenessStartHour, 12))}i` +
 			`,landing_buffer=${UPGRADE_AUTOMATION_LANDING_BUFFER_SECONDS}i` +
@@ -5052,7 +5080,7 @@
 		let sentCount = 0;
 		for (let idx = 0; idx < lines.length; idx++) {
 			const line = lines[idx];
-			const measurement = line.startsWith('lp_auto_comp,') ? 'lp_auto_comp' : (line.startsWith('lp_auto_settings') || line.startsWith('lp_auto_settings,') ? 'lp_auto_settings' : (line.startsWith('lp_auto_aggr,') ? 'lp_auto_aggr' : (line.startsWith('lp_auto_perf,') ? 'lp_auto_perf' : 'unknown')));
+			const measurement = line.startsWith('lp_auto_comp,') ? 'lp_auto_comp' : (line.startsWith('lp_auto_settings') || line.startsWith('lp_auto_settings,') ? 'lp_auto_settings' : (line.startsWith('lp_auto_aggr,') ? 'lp_auto_aggr' : (line.startsWith('lp_auto_perf,') ? 'lp_auto_perf' : (line.startsWith('slya_perf,') ? 'slya_perf' : 'unknown'))));
 			upgradeAutomationInfluxDebugStatus = `sending ${measurement} ${idx + 1}/${lines.length}`;
 			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][INFLUX] sending measurement=${measurement} line=${idx + 1}/${lines.length}`);
 			await sendToInflux(line);
