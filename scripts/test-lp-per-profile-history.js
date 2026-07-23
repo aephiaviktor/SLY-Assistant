@@ -33,6 +33,7 @@ vm.runInContext(`
   ${extractFunction('buildUpgradeAutomationLpPerProfileRpcPlan')}
   ${extractFunction('mergeUpgradeAutomationLpPerProfileSignatureState')}
   ${extractFunction('updateUpgradeAutomationLpPerProfileWatchCohort')}
+  ${extractFunction('computeUpgradeAutomationSageEodSeconds')}
   ${extractFunction('computeUpgradeAutomationLpProcessEodProjection')}
   ${extractFunction('formatUpgradeAutomationLpProcessDebugLines')}
   ${extractFunction('buildUpgradeAutomationLpPerProfileTransactionQueue')}
@@ -40,6 +41,7 @@ vm.runInContext(`
   this.buildPlan = buildUpgradeAutomationLpPerProfileRpcPlan;
   this.mergeState = mergeUpgradeAutomationLpPerProfileSignatureState;
   this.updateCohort = updateUpgradeAutomationLpPerProfileWatchCohort;
+  this.sageEod = computeUpgradeAutomationSageEodSeconds;
   this.projectEod = computeUpgradeAutomationLpProcessEodProjection;
   this.formatDebug = formatUpgradeAutomationLpProcessDebugLines;
   this.buildQueue = buildUpgradeAutomationLpPerProfileTransactionQueue;
@@ -88,6 +90,16 @@ assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 150, 750
 assert.equal(context.projectEod(100, 800, 150, 750, 60, 3).expectedCompletionsByEod, 0, 'a process ending after EoD contributes no completed LP');
 assert.equal(context.projectEod(200, 200, 150, 750, 60, 3).expectedCompletionsByEod, 1, 'invalid duration retains the conservative in-flight completion without extrapolation');
 assert.equal(context.projectEod(100, 750, 150, 750, 60, 3).expectedCompletionsByEod, 1, 'a process ending exactly at EoD counts once');
+assert.equal(
+  context.sageEod(1_782_771_962, new Date('2026-07-23T07:50:00Z')),
+  1_782_830_162,
+  'SAGE EoD preserves the real seconds remaining until UTC midnight without mixing clock epochs'
+);
+assert.equal(
+  context.projectEod(1_782_768_956, 1_782_772_508, 1_782_771_962, context.sageEod(1_782_771_962, new Date('2026-07-23T07:50:00Z')), 701_389, 2_119).expectedCompletionsByEod,
+  17,
+  'a 59-minute MUD job has 17 total completions by EoD rather than hundreds from mixed clocks'
+);
 
 const debugLines = context.formatDebug('MUD', [{
   profile: 'profile-123456789', craftingProcess: 'process-123456789', component: 'Framework',

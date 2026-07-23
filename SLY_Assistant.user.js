@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-177
+// @aephia-version 0.7.35-178
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-177'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-178'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2343,6 +2343,13 @@
 		].join(' | '))].join('\n');
 	}
 
+	function computeUpgradeAutomationSageEodSeconds(starbaseTime, now = new Date()) {
+		const sageNow = Number(starbaseTime || 0);
+		const utcEodMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+		const secondsUntilUtcEod = Math.max(0, Math.floor((utcEodMs - now.getTime()) / 1000));
+		return sageNow + secondsUntilUtcEod;
+	}
+
 	function computeUpgradeAutomationLpProcessEodProjection(startTime, endTime, nowSeconds, eodSeconds, lp, quantity) {
 		const start = Number(startTime || 0);
 		const end = Number(endTime || 0);
@@ -2382,7 +2389,7 @@
 			const starbaseTime = Number.isFinite(Number(upgradeTime?.starbaseTime))
 				? Number(upgradeTime.starbaseTime)
 				: Math.floor(now.getTime() / 1000);
-			const utcEodSeconds = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1) / 1000);
+			const sageEodSeconds = computeUpgradeAutomationSageEodSeconds(starbaseTime, now);
 
 			const starbaseKey = starbase.publicKey.toBase58();
 			const starbasePlayers = (accountSnapshot?.starbasePlayers || []).filter(row => row?.account?.starbase?.toBase58?.() === starbaseKey);
@@ -2433,7 +2440,7 @@
 							const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[component] || 0);
 							if (!component || !lpPerUnit) { dbg.droppedRecipe++; continue; }
 							const remainingSeconds = Math.max(endTime - starbaseTime, 0);
-							const projection = computeUpgradeAutomationLpProcessEodProjection(startTime, endTime, starbaseTime, utcEodSeconds, lpPerUnit * quantity, quantity);
+							const projection = computeUpgradeAutomationLpProcessEodProjection(startTime, endTime, starbaseTime, sageEodSeconds, lpPerUnit * quantity, quantity);
 							out.push({
 								profile,
 								craftingProcess: processKey,
