@@ -1,0 +1,91 @@
+#!/usr/bin/env node
+'use strict';
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const source = fs.readFileSync(path.join(__dirname, '..', 'SLY_Assistant.user.js'), 'utf8');
+
+function extractFunction(name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `${name} must exist`);
+  const paramsStart = source.indexOf('(', start);
+  let paramsDepth = 0, bodyStart = -1, quote = '', escaped = false;
+  for (let i = paramsStart; i < source.length; i++) {
+    const ch = source[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '(') paramsDepth++;
+    else if (ch === ')' && --paramsDepth === 0) {
+      bodyStart = source.indexOf('{', i);
+      break;
+    }
+  }
+  assert.notEqual(bodyStart, -1, `${name} body must exist`);
+  let depth = 0;
+  quote = '';
+  escaped = false;
+  for (let i = bodyStart; i < source.length; i++) {
+    const ch = source[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '{') depth++;
+    if (ch === '}' && --depth === 0) return source.slice(start, i + 1);
+  }
+  throw new Error(`unterminated function ${name}`);
+}
+
+const context = {
+  Date,
+  String,
+  ConvertCoords: (value) => String(value).split(',').map(Number),
+  validTargets: [
+    { x: 21, y: 0, name: 'MRZ-21' },
+    { x: 17, y: 0, name: 'MRZ-17' },
+  ],
+};
+vm.createContext(context);
+vm.runInContext(`
+  ${extractFunction('getFleetTelemetryHomeCoord')}
+  ${extractFunction('getFleetTelemetryHomeStarbaseName')}
+  this.getHomeName = getFleetTelemetryHomeStarbaseName;
+`, context);
+
+const fleet = { starbaseCoord: '17,0' };
+assert.equal(
+  context.getHomeName(fleet, { starbase: '21,0' }),
+  'MRZ-21',
+  'cycle anchor comes from the configured first starbase, not the fleet current/target starbase'
+);
+
+const loadFunction = extractFunction('addFleetTelemetryCargoLoad');
+assert.doesNotMatch(
+  loadFunction,
+  /cycle\.originStarbase\s*=\s*starbase/,
+  'the first observed cargo load must not redefine the cost-cycle anchor'
+);
+
+const finalizeFunction = extractFunction('maybeFinalizeFleetTelemetryCostCycle');
+assert.match(
+  finalizeFunction,
+  /originStarbase=\$\{influxEscape\(item\.originStarbase \|\| 'unknown'\)\}/,
+  'Influx allocation rows must use each cargo lot pickup starbase as their origin'
+);
+assert.match(
+  finalizeFunction,
+  /homeStarbase=\$\{influxEscape\(homeStarbase \|\| 'unknown'\)\}/,
+  'Influx allocation rows retain the configured cycle anchor separately'
+);
+
+console.log('cargo cost-cycle tests passed');
