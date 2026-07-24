@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-182
+// @aephia-version 0.7.35-183
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-182'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-183'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -5680,24 +5680,20 @@
 		const deliveries = cycle.deliveries.filter(item => Number(item?.cargoVolume || 0) > 0);
 		const totalVolume = deliveries.reduce((sum, item) => sum + Number(item.cargoVolume || 0), 0);
 		if(deliveries.length < 1 || totalVolume <= 0) return false;
-		// Reconcile floating-point and partial-lot residue deterministically onto the
-		// final delivery so every completed cycle is allocated exactly once.
-		const finalDelivery = deliveries[deliveries.length - 1];
-		finalDelivery.loadedFuel = Number(finalDelivery.loadedFuel || 0) +
-			(Number(cycle.burnedFuel || 0) - Number(cycle.emptyBurnedFuel || 0) - deliveries.reduce((sum, item) => sum + Number(item.loadedFuel || 0), 0));
-		finalDelivery.loadedTxCostSol = Number(finalDelivery.loadedTxCostSol || 0) +
-			(Number(cycle.txCostSol || 0) - Number(cycle.emptyTxCostSol || 0) - deliveries.reduce((sum, item) => sum + Number(item.loadedTxCostSol || 0), 0));
-		finalDelivery.loadedTxFeeLamports = Number(finalDelivery.loadedTxFeeLamports || 0) +
-			(Number(cycle.txFeeLamports || 0) - Number(cycle.emptyTxFeeLamports || 0) - deliveries.reduce((sum, item) => sum + Number(item.loadedTxFeeLamports || 0), 0));
-		const loadedWeights = deliveries.map(item => Math.max(0, Number(item.loadedFuel || 0)) + Math.max(0, Number(item.loadedTxCostSol || 0)));
-		const weights = loadedWeights.some(value => value > 0) ? loadedWeights : deliveries.map(item => Number(item.cargoVolume || 0));
-		const overheadFuel = splitTelemetryCost(cycle.emptyBurnedFuel, weights);
-		const overheadTx = splitTelemetryCost(cycle.emptyTxCostSol, weights);
-		const overheadFees = splitTelemetryCost(cycle.emptyTxFeeLamports, weights);
+		// Treat the round trip as one accounting cycle. Allocate every represented
+		// cost by delivered cargo volume so a small load on an otherwise empty leg
+		// does not inherit that leg's full cost.
+		const volumeWeights = deliveries.map(item => Number(item.cargoVolume || 0));
+		const allocatedFuel = splitTelemetryCost(cycle.burnedFuel, volumeWeights);
+		const allocatedTx = splitTelemetryCost(cycle.txCostSol, volumeWeights);
+		const allocatedFees = splitTelemetryCost(cycle.txFeeLamports, volumeWeights);
+		const overheadFuel = splitTelemetryCost(cycle.emptyBurnedFuel, volumeWeights);
+		const overheadTx = splitTelemetryCost(cycle.emptyTxCostSol, volumeWeights);
+		const overheadFees = splitTelemetryCost(cycle.emptyTxFeeLamports, volumeWeights);
 		const lines = deliveries.map((item, index) => {
 			const loadedFuel = Number(item.loadedFuel || 0), loadedTx = Number(item.loadedTxCostSol || 0), loadedFees = Number(item.loadedTxFeeLamports || 0);
 			return `cargo_cost_allocation,faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(fleet.label)},assignment=${influxEscape(fleetParsedData.assignment || 'unknown')},homeStarbase=${influxEscape(homeStarbase || 'unknown')},originStarbase=${influxEscape(item.originStarbase || 'unknown')},deliveryStarbase=${influxEscape(item.starbase || 'unknown')},rss=${influxEscape(item.rssName || 'unknown')},cycleId=${influxEscape(cycle.id || 'unknown')},allocationIndex=${index}` +
-				` amount=${Number(item.amount || 0)},cargoVolume=${Number(item.cargoVolume || 0)},assetMint=${influxFieldString(item.mint || '')},loadedLegFuel=${loadedFuel},loadedLegTxCostSol=${loadedTx},loadedLegTxFeeLamports=${Math.round(loadedFees)}i,emptyLegFuelOverhead=${overheadFuel[index]},emptyLegTxCostSolOverhead=${overheadTx[index]},emptyLegTxFeeLamportsOverhead=${Math.round(overheadFees[index])}i,allocatedFuel=${loadedFuel + overheadFuel[index]},allocatedTxCostSol=${loadedTx + overheadTx[index]},allocatedTxFeeLamports=${Math.round(loadedFees + overheadFees[index])}i,loadedLegCount=${Math.round(Number(item.loadedLegCount || 0))}i,cycleBurnedFuel=${cycle.burnedFuel},cycleTxCostSol=${cycle.txCostSol},cycleTxFeeLamports=${Math.round(cycle.txFeeLamports)}i,cycleEmptyFuel=${cycle.emptyBurnedFuel},cycleEmptyTxCostSol=${cycle.emptyTxCostSol},cycleMovementCount=${cycle.movementCount}i,cycleDeliveredVolume=${totalVolume},cycleDeliveryCount=${deliveries.length}i,deliveryIndex=${index}i`;
+				` amount=${Number(item.amount || 0)},cargoVolume=${Number(item.cargoVolume || 0)},assetMint=${influxFieldString(item.mint || '')},loadedLegFuel=${loadedFuel},loadedLegTxCostSol=${loadedTx},loadedLegTxFeeLamports=${Math.round(loadedFees)}i,emptyLegFuelOverhead=${overheadFuel[index]},emptyLegTxCostSolOverhead=${overheadTx[index]},emptyLegTxFeeLamportsOverhead=${Math.round(overheadFees[index])}i,allocatedFuel=${allocatedFuel[index]},allocatedTxCostSol=${allocatedTx[index]},allocatedTxFeeLamports=${Math.round(allocatedFees[index])}i,loadedLegCount=${Math.round(Number(item.loadedLegCount || 0))}i,cycleBurnedFuel=${cycle.burnedFuel},cycleTxCostSol=${cycle.txCostSol},cycleTxFeeLamports=${Math.round(cycle.txFeeLamports)}i,cycleEmptyFuel=${cycle.emptyBurnedFuel},cycleEmptyTxCostSol=${cycle.emptyTxCostSol},cycleMovementCount=${cycle.movementCount}i,cycleDeliveredVolume=${totalVolume},cycleDeliveryCount=${deliveries.length}i,deliveryIndex=${index}i`;
 		}).join('\n');
 		if(lines) await sendToInflux(lines);
 		// Loads performed during the same home turnaround belong to the next cycle.

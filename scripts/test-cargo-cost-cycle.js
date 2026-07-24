@@ -87,5 +87,20 @@ assert.match(
   /homeStarbase=\$\{influxEscape\(homeStarbase \|\| 'unknown'\)\}/,
   'Influx allocation rows retain the configured cycle anchor separately'
 );
+assert.match(
+  finalizeFunction,
+  /splitTelemetryCost\(cycle\.burnedFuel, volumeWeights\)/,
+  'the complete cycle fuel cost must be allocated by delivered cargo volume'
+);
+assert.match(
+  finalizeFunction,
+  /splitTelemetryCost\(cycle\.txCostSol, volumeWeights\)/,
+  'the complete cycle transaction cost must be allocated by delivered cargo volume'
+);
+assert.doesNotMatch(
+  finalizeFunction,
+  /loadedWeights/,
+  'cycle allocation must not depend on which leg carried an asset'
+);
 
 console.log('cargo cost-cycle tests passed');
