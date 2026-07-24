@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-183
+// @aephia-version 0.7.35-184
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-183'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-184'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -10449,14 +10449,63 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	}
 
 	function transportSubwarpPrefToMoveType(subwarpPref) {
-		return subwarpPref == 1 ? 'subwarp' : (subwarpPref == 2 ? 'warpsubwarp' : (subwarpPref == 3 ? 'warp-subwarp-warp' : 'warp'));
+		return subwarpPref == 4 ? 'automated' : (subwarpPref == 1 ? 'subwarp' : (subwarpPref == 2 ? 'warpsubwarp' : (subwarpPref == 3 ? 'warp-subwarp-warp' : 'warp')));
 	}
 
 	function transportMoveTypeToSubwarpPref(moveType) {
+		if(moveType == 'automated') return 4;
 		if(moveType == 'subwarp') return 1;
 		if(moveType == 'warpsubwarp') return 2;
 		if(moveType == 'warp-subwarp-warp') return 3;
 		return 0;
+	}
+
+	function calculateAutomatedTravelMode({ manifest = [], loadedCargo = [], cargoCapacity = 0, ammoCapacity = 0, fuelCapacity = 0, ammoMint = '', fuelMint = '', cargoSizes = {} }) {
+		let configuredCargoVolume = 0;
+		for(const entry of manifest) {
+			if(!entry || !entry.res || !(Number(entry.amt || 0) > 0)) continue;
+			let cargoAmount = Number(entry.amt || 0);
+			if(entry.res === ammoMint) cargoAmount = Math.max(0, cargoAmount - Math.max(0, Number(ammoCapacity || 0)));
+			if(entry.res === fuelMint) cargoAmount = Math.max(0, cargoAmount - Math.max(0, Number(fuelCapacity || 0)));
+			configuredCargoVolume += cargoAmount * Math.max(0, Number(cargoSizes[entry.res] || 1));
+		}
+
+		let loadedCargoVolume = 0;
+		for(const entry of loadedCargo) {
+			if(!entry || !entry.mint || !(Number(entry.amount || 0) > 0)) continue;
+			loadedCargoVolume += Number(entry.amount || 0) * Math.max(0, Number(cargoSizes[entry.mint] || 1));
+		}
+
+		const requiredVolume = Math.min(configuredCargoVolume, Math.max(0, Number(cargoCapacity || 0)));
+		const thresholdVolume = requiredVolume * 0.95;
+		return {
+			moveType: loadedCargoVolume >= thresholdVolume ? 'warp' : 'subwarp',
+			configuredCargoVolume,
+			loadedCargoVolume,
+			requiredVolume,
+			thresholdVolume
+		};
+	}
+
+	async function resolveAutomatedTravelMode(fleet, manifest) {
+		const parsedCargo = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.cargoHold, {programId: tokenProgramPK});
+		const loadedCargo = parsedCargo.value.map(item => ({
+			mint: item.account.data.parsed.info.mint,
+			amount: Number(item.account.data.parsed.info.tokenAmount.uiAmount || 0)
+		}));
+		const cargoSizes = Object.fromEntries(cargoItems.map(item => [item.token, Number(item.size || 1)]));
+		const decision = calculateAutomatedTravelMode({
+			manifest,
+			loadedCargo,
+			cargoCapacity: fleet.cargoCapacity,
+			ammoCapacity: globalSettings.transportUseAmmoBank ? fleet.ammoCapacity : 0,
+			fuelCapacity: fleet.fuelCapacity,
+			ammoMint: sageGameAcct.account.mints.ammo.toString(),
+			fuelMint: sageGameAcct.account.mints.fuel.toString(),
+			cargoSizes
+		});
+		cLog(1, `${FleetTimeStamp(fleet.label)} Automated Travel Mode -> ${decision.moveType == 'warp' ? 'Warp' : 'Subwarp'} (loaded ${decision.loadedCargoVolume}/${decision.requiredVolume}, threshold ${decision.thresholdVolume})`);
+		return decision.moveType;
 	}
 
 	function cloneTransportManifest(manifest) {
@@ -10771,11 +10820,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return { valid: true, moveType: effectiveMoveType };
 	}
 
-	async function persistFleetTransportRouteState(i, moveType, moveTarget, transportPlusRouteIndex = null) {
+	async function persistFleetTransportRouteState(i, moveType, moveTarget, transportPlusRouteIndex = null, configuredMoveType = null) {
 		const fleetPK = userFleets[i].publicKey.toString();
 		const fleetParsedData = JSON.parse(await GM.getValue(fleetPK, '{}'));
-		fleetParsedData.moveType = moveType;
-		fleetParsedData.subwarpPref = transportMoveTypeToSubwarpPref(moveType);
+		const savedMoveType = configuredMoveType || moveType;
+		fleetParsedData.moveType = savedMoveType;
+		fleetParsedData.subwarpPref = transportMoveTypeToSubwarpPref(savedMoveType);
 		fleetParsedData.moveTarget = moveTarget;
 		if(transportPlusRouteIndex !== null && !isNaN(transportPlusRouteIndex)) fleetParsedData.transportPlusRouteIndex = transportPlusRouteIndex;
 		await saveFleetConfig(fleetPK, fleetParsedData, 'assist-move-type');
@@ -10864,7 +10914,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let fleetSubwarpPref = document.createElement('select');
 			fleetSubwarpPref.style.width = '85px';
 			fleetSubwarpPref.style.display = fleetParsedData && fleetParsedData.assignment == 'Supply Chain' ? 'none' : 'inline-block';
-			fleetSubwarpPref.innerHTML = '<option value="0">Warp</option><option value="1">Subwarp</option><option value="2">Warp(SB) / Subwarp</option><option value="3">Warp, Subwarp, Warp, ...</option>';
+			fleetSubwarpPref.innerHTML = '<option value="4">Automated</option><option value="0">Warp</option><option value="1">Subwarp</option><option value="2">Warp(SB) / Subwarp</option><option value="3">Warp, Subwarp, Warp, ...</option>';
 			if(fleetParsedData) { if(fleetParsedData.subwarpPref == 'false') fleetParsedData.subwarpPref=0; if(fleetParsedData.subwarpPref == 'true') fleetParsedData.subwarpPref=1; } // compatibility to old version
 			fleetSubwarpPref.value = fleetParsedData && fleetParsedData.subwarpPref ? fleetParsedData.subwarpPref : 0;
 			let fleetSubwarpPrefTd = document.createElement('td');
@@ -11232,11 +11282,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				routeDirection.innerHTML = getTransportPlusRouteLabel(routeIndex, targetCount);
 
 				let routeMoveTypeLabel = document.createElement('span');
-				routeMoveTypeLabel.innerHTML = 'Warp/Subwarp:';
+				routeMoveTypeLabel.innerHTML = 'Travel Mode:';
 				let routeMoveType = document.createElement('select');
 				routeMoveType.classList.add('transport-plus-movetype');
 				routeMoveType.style.width = '110px';
-				routeMoveType.innerHTML = '<option value="0">Warp</option><option value="1">Subwarp</option><option value="2">Warp(SB) / Subwarp</option><option value="3">Warp, Subwarp, Warp, ...</option>';
+				routeMoveType.innerHTML = '<option value="4">Automated</option><option value="0">Warp</option><option value="1">Subwarp</option><option value="2">Warp(SB) / Subwarp</option><option value="3">Warp, Subwarp, Warp, ...</option>';
 				routeMoveType.value = routeData.subwarpPref || 0;
 
 				routeHeader.appendChild(routeLabel);
@@ -14275,6 +14325,11 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${logPrefix} - recovery departure blocked: arriving leg still has ${pendingCrewUnload ? passengerCrew + ' crew' : 'cargo'} to unload`);
 				return false;
 			}
+			const configuredMoveType = moveType;
+			if(configuredMoveType == 'automated') {
+				userFleets[i].moveType = await resolveAutomatedTravelMode(userFleets[i], destinationManifest);
+				userFleets[i].automatedTravelMoveType = userFleets[i].moveType;
+			}
 
 			// Loaded cargo proves which leg was prepared, but it does not prove the
 			// propulsion tank was filled before the reload/update. Only bypass the
@@ -14294,7 +14349,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			const recovery = {
 				recovered: true,
 				reason: 'loaded_cargo_at_source_after_restart',
-				leg: { sourceCoord, destCoord, destinationManifest, moveType, routeIndex }
+				leg: { sourceCoord, destCoord, destinationManifest, moveType: userFleets[i].moveType, configuredMoveType, routeIndex }
 			};
 			cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${logPrefix} - cargo for ${destCoord} is already onboard; skipping reload`);
 			await recoverTransportMovement(i, fleetCoords, recovery, logPrefix);
@@ -14331,7 +14386,11 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		async function recoverTransportMovement(i, fleetCoords, recovery, logPrefix) {
 			const leg = recovery && recovery.leg;
 			if(!leg || !leg.destCoord) return false;
-			await persistFleetTransportRouteState(i, leg.moveType || userFleets[i].moveType, leg.destCoord, leg.routeIndex);
+			let effectiveMoveType = leg.moveType || userFleets[i].moveType;
+			const configuredMoveType = leg.configuredMoveType || effectiveMoveType;
+			if(effectiveMoveType == 'automated') effectiveMoveType = await resolveAutomatedTravelMode(userFleets[i], leg.destinationManifest || []);
+			userFleets[i].moveType = effectiveMoveType;
+			await persistFleetTransportRouteState(i, effectiveMoveType, leg.destCoord, leg.routeIndex, configuredMoveType);
 			cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${logPrefix} - recovered route to ${leg.destCoord} (${recovery.reason})`);
 			const [targetX, targetY] = ConvertCoords(leg.destCoord);
 			const moveDist = calculateMovementDistance(fleetCoords, [targetX, targetY]);
@@ -14481,6 +14540,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
         const [starbaseX, starbaseY] = ConvertCoords(userFleets[i].starbaseCoord);
 
         const fleetParsedData = JSON.parse(await GM.getValue(userFleets[i].publicKey.toString(), '{}'));
+		const configuredMoveType = transportSubwarpPrefToMoveType(fleetParsedData.subwarpPref || 0);
+		if(configuredMoveType == 'automated') userFleets[i].moveType = 'warp';
 		const targetTotalContext = getLegacyTransportTotalContext('transportResource1', userFleets[i].starbaseCoord, userFleets[i].destCoord);
 		const starbaseTotalContext = getLegacyTransportTotalContext('transportSBResource1', userFleets[i].starbaseCoord, userFleets[i].destCoord);
         let targetCargoManifest = [
@@ -14671,6 +14732,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					applyTransportLoadedTotals(targetTotalManifest, loadedCargo, loadedCrew);
 					await persistLegacyTransportManifestTotals(i, targetTotalManifest);
                 }
+				if(configuredMoveType == 'automated') {
+					userFleets[i].moveType = await resolveAutomatedTravelMode(userFleets[i], targetTotalManifest);
+					userFleets[i].automatedTravelMoveType = userFleets[i].moveType;
+				}
                 userFleets[i].moveTarget = userFleets[i].destCoord;
                 userFleets[i].resupplying = false;
                 cLog(3,`${FleetTimeStamp(userFleets[i].label)} userFleets[i]: `, userFleets[i]);
@@ -14833,6 +14898,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					applyTransportLoadedTotals(starbaseTotalManifest, loadedCargo, loadedCrew);
 					await persistLegacyTransportManifestTotals(i, starbaseTotalManifest);
                 }
+				if(configuredMoveType == 'automated') {
+					userFleets[i].moveType = await resolveAutomatedTravelMode(userFleets[i], starbaseTotalManifest);
+					userFleets[i].automatedTravelMoveType = userFleets[i].moveType;
+				}
                 userFleets[i].moveTarget = userFleets[i].starbaseCoord;
                 userFleets[i].resupplying = false;
                 cLog(3,`${FleetTimeStamp(userFleets[i].label)} userFleets[i]: `, userFleets[i]);
@@ -14940,7 +15009,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 	async function handleTransportStop(i, sourceCoord, destCoord, currentManifest, destinationManifest, moveType, roundTrip, routeIndex = null) {
 		const sourceCoords = ConvertCoords(sourceCoord);
 		const destCoords = ConvertCoords(destCoord);
-		userFleets[i].moveType = moveType;
+		const configuredMoveType = moveType;
+		userFleets[i].moveType = configuredMoveType == 'automated' ? 'warp' : configuredMoveType;
 		userFleets[i].resupplying = true;
 
 		let sourceCargoManifest = cloneTransportManifest(currentManifest);
@@ -15087,7 +15157,11 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			await persistTransportPlusRouteManifestTotals(i, routeIndex, destinationTotalManifest);
 		}
 
-		await persistFleetTransportRouteState(i, moveType, destCoord, routeIndex);
+		if(configuredMoveType == 'automated') {
+			userFleets[i].moveType = await resolveAutomatedTravelMode(userFleets[i], destinationTotalManifest);
+			userFleets[i].automatedTravelMoveType = userFleets[i].moveType;
+		}
+		await persistFleetTransportRouteState(i, userFleets[i].moveType, destCoord, routeIndex, configuredMoveType);
 		userFleets[i].resupplying = false;
 		cLog(3,`${FleetTimeStamp(userFleets[i].label)} userFleets[i]: `, userFleets[i]);
 		return true;
@@ -15131,7 +15205,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				}
 				if(!activeLeg) activeLeg = transportPlusLegs.find(route => CoordsEqual(ConvertCoords(route.destCoord), activeMoveTargetCoords));
 				if(activeLeg) {
-					userFleets[i].moveType = activeLeg.moveType;
+					userFleets[i].moveType = activeLeg.moveType == 'automated' ? (userFleets[i].automatedTravelMoveType || 'subwarp') : activeLeg.moveType;
 					userFleets[i].moveTarget = activeMoveTarget;
 					userFleets[i].transportPlusRouteIndex = activeLeg.routeIndex;
 				}
@@ -17212,7 +17286,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			scanAutoInfoStr += '<b>Minimum probability:</b> The algo tries to find fields with at least this chance (these fields count as a "good" field)<br>';
 			scanAutoInfoStr += '<b>Home at fuel/dist %:</b> After each movement the fleet checks the fuel that is needed to reach the home base. If you enter a value larger than 100 here (e.g. 130 = 130%) and the fleet has less than 130% of the fuel needed for the way back, it will start moving towards the home base and scan along. It can move up to 2 fields (essentially it uses the "auto(1,2hv++)" pattern now), then it scans, then it moves again. It will still try to find better bypass fields while moving. It only works for fleets that are running out of fuel before running out of cargo space.<br>';
 			let commonInfoStr = 'You can enter amounts with the suffixes K, M and G. So e.g. "1M" equals "1000000".<br>The "Clean" button will clean up your config file and will remove all fleets that are not shown in the table below (do a backup before!).<br>The "Download" button will save/backup your current config to a file.<br>If something goes wrong, you can import the backup later and paste it in the "Import" textbox.';
-			assistModalContent.innerHTML = '<div class="assist-modal-header"><img src="' + iconStr + '" /><div style="text-align:center;padding-left: 15px;">AEP v' + AEPHIA_SLYA_VERSION + '<div style="font-size:65%">(<span class="tooltip">Info<div class="tooltiptext">'+commonInfoStr+'</div></span> / <span class="tooltip">Auto scan<div class="tooltiptext" style="max-width:600px">'+scanAutoInfoStr+'</div></span>)</div></div><div class="assist-modal-header-right"><button id="cleanBtn" class="assist-modal-btn">Clean</button><button id="undockAllBtn" class="assist-modal-btn">Undock All</button><button id="configImportExport" class="assist-modal-btn">Import</button><button id="downloadConfig" class="assist-modal-btn">Download</button><button class=" assist-modal-btn assist-modal-save">Save</button>&nbsp;&nbsp;<span class="assist-modal-close">&#x2715;</span></div></div><div class="assist-modal-body"><span id="assist-modal-error"></span><table id="fleetTable"><tr><td>Fleet</td><td>Assignment</td><td>Target</td><td>Starbase</td><td>Warp/Subwarp</td><td>Max Cargo</td><td>Max Ammo</td><td>Max Fuel</td></tr></table><hr><strong>Crafting</strong><table id="craftTable"><tr><td></td><td>Starbase</td><td>Crew</td><td>Item | Max Amount</td><td>If stock is below</td><td>Use special ingredient</td></tr></table></div>';
+			assistModalContent.innerHTML = '<div class="assist-modal-header"><img src="' + iconStr + '" /><div style="text-align:center;padding-left: 15px;">AEP v' + AEPHIA_SLYA_VERSION + '<div style="font-size:65%">(<span class="tooltip">Info<div class="tooltiptext">'+commonInfoStr+'</div></span> / <span class="tooltip">Auto scan<div class="tooltiptext" style="max-width:600px">'+scanAutoInfoStr+'</div></span>)</div></div><div class="assist-modal-header-right"><button id="cleanBtn" class="assist-modal-btn">Clean</button><button id="undockAllBtn" class="assist-modal-btn">Undock All</button><button id="configImportExport" class="assist-modal-btn">Import</button><button id="downloadConfig" class="assist-modal-btn">Download</button><button class=" assist-modal-btn assist-modal-save">Save</button>&nbsp;&nbsp;<span class="assist-modal-close">&#x2715;</span></div></div><div class="assist-modal-body"><span id="assist-modal-error"></span><table id="fleetTable"><tr><td>Fleet</td><td>Assignment</td><td>Target</td><td>Starbase</td><td>Travel Mode</td><td>Max Cargo</td><td>Max Ammo</td><td>Max Fuel</td></tr></table><hr><strong>Crafting</strong><table id="craftTable"><tr><td></td><td>Starbase</td><td>Crew</td><td>Item | Max Amount</td><td>If stock is below</td><td>Use special ingredient</td></tr></table></div>';
 			assistModal.append(assistModalContent);
 
 			let settingsModal = document.createElement('div');
