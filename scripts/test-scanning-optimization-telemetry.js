@@ -42,6 +42,12 @@ assert.match(source, /className = 'scan-optimization-toggle'/, 'fleet config exp
 assert.match(source, /scanOptimizationEnabled: scanOptimizationEnabled/, 'fleet config persists the opt-in');
 assert.match(source, /scanOptimizationExperimentId: scanOptimizationExperimentId/, 'fleet config persists experiment continuity');
 assert.match(source, /sendScanningOptimizationEvent\(fleet, 'transaction'/, 'all fleet transactions use the central telemetry hook');
+const transactionHook = source.slice(
+  source.indexOf("sendScanningOptimizationEvent(fleet, 'transaction'"),
+  source.indexOf("if(!instructionError", source.indexOf("sendScanningOptimizationEvent(fleet, 'transaction'"))
+);
+assert.doesNotMatch(transactionHook, /`operation=\$\{optimizationInfluxString/, 'operation is not duplicated as both a tag and field');
+assert.match(transactionHook, /`,operation=\$\{influxEscape/, 'operation remains available as a transaction tag');
 assert.match(source, /sendScanningOptimizationEvent\(userFleets\[i\], 'scan_result'/, 'scan outcomes emit linked result events');
 assert.match(source, /sendToInflux\(`optimization_event,\$\{tags\} \$\{fields\}`, 'optimization'\)/, 'optimization events target the dedicated bucket');
 assert.match(source, /moveWhileScanning=\$\{fleet\?\.scanMove \? 'true' : 'false'\}/, 'Move While Scanning is included in each parameter snapshot');
