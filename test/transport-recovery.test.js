@@ -54,6 +54,23 @@ test('Electron transport recovery also rejects Nostromo partial cargo', () => {
   assert.equal(fn(manifest, { ammo: 54116, food: 0 }), false);
 });
 
+test('partial useful manifest cargo prevents a false no-cargo error', () => {
+  const { fn } = loadFunction('hasUsefulTransportCargoForManifest');
+  const manifest = [
+    { res: 'food', amt: 50000 },
+    { res: 'field-stabilizer', amt: 120000 },
+  ];
+
+  assert.equal(fn(manifest, { food: 30000 }), true);
+});
+
+test('keep-one residue is not useful departing cargo', () => {
+  const { fn, context } = loadFunction('hasUsefulTransportCargoForManifest');
+  context.globalSettings.transportKeep1 = true;
+
+  assert.equal(fn([{ res: 'food', amt: 50000 }], { food: 1 }), false);
+});
+
 test('transport recovery accepts a fully loaded manifest', () => {
   const { fn } = loadFunction('hasLoadedTransportCargoForManifest');
   const manifest = [

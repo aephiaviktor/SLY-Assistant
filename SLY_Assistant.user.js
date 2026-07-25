@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-190
+// @aephia-version 0.7.35-191
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-190'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-191'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -14431,6 +14431,14 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			});
 		}
 
+		function hasUsefulTransportCargoForManifest(manifest, cargoAmounts) {
+			const keepAmount = globalSettings.transportKeep1 ? 1 : 0;
+			return (manifest || []).some(entry => {
+				if(!entry || !entry.res || !(Number(entry.amt || 0) > 0)) return false;
+				return Number(cargoAmounts[entry.res] || 0) > keepAmount;
+			});
+		}
+
 		async function resumeLoadedTransportDeparture(i, fleetState, fleetCoords, sourceCoord, destCoord, destinationManifest, arrivalManifest, moveType, roundTrip, routeIndex = null, logPrefix = 'Transporting', persistedMoveTarget = '') {
 			if(fleetState !== 'Idle' || !CoordsEqual(fleetCoords, ConvertCoords(sourceCoord))) return false;
 			const savedTarget = String(userFleets[i].moveTarget || persistedMoveTarget || '').trim();
@@ -15796,7 +15804,13 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 
 		const cargoHoldLoadedThisStop = Math.max(0, startingCargoSpace - cargoSpace);
 		const totalLoadedThisStop = cargoHoldLoadedThisStop + Math.max(0, ammoLoadingIntoAmmoBank) + Math.max(0, Number(fuelLoadedThisStop || 0));
-	        if (totalLoadedThisStop <= 0 && expectedCnt > 0) {
+		const cargoAlreadyOnboard = {};
+		for(const tokenAccount of fleetCurrentCargo.value) {
+			const mint = tokenAccount.account.data.parsed.info.mint;
+			cargoAlreadyOnboard[mint] = (cargoAlreadyOnboard[mint] || 0) + Number(tokenAccount.account.data.parsed.info.tokenAmount.uiAmount || 0);
+		}
+		if(ammoEntry) cargoAlreadyOnboard[ammoMint] = (cargoAlreadyOnboard[ammoMint] || 0) + ammoAlreadyInAmmoBank;
+	        if (totalLoadedThisStop <= 0 && expectedCnt > 0 && !hasUsefulTransportCargoForManifest(transportManifest, cargoAlreadyOnboard)) {
 	            updateFleetState(userFleets[i], 'ERROR: No cargo loaded');
 	            cLog(2,`${FleetTimeStamp(userFleets[i].label)} ERROR: No cargo, ammo, or fuel loaded`);
 	            if(globalSettings.emailNoCargoLoaded) await sendEMail(userFleets[i].label + ' no cargo loaded', notEnoughInfo);
