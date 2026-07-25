@@ -49,6 +49,16 @@ const transactionHook = source.slice(
 assert.doesNotMatch(transactionHook, /`operation=\$\{optimizationInfluxString/, 'operation is not duplicated as both a tag and field');
 assert.match(transactionHook, /`,operation=\$\{influxEscape/, 'operation remains available as a transaction tag');
 assert.match(source, /sendScanningOptimizationEvent\(userFleets\[i\], 'scan_result'/, 'scan outcomes emit linked result events');
+const scanResultHook = source.slice(
+  source.indexOf("sendScanningOptimizationEvent(userFleets[i], 'scan_result'"),
+  source.indexOf("].join(','), ',operation=SCAN');", source.indexOf("sendScanningOptimizationEvent(userFleets[i], 'scan_result'")) + 34
+);
+assert.match(scanResultHook, /durationMs=/, 'scan results include transaction duration');
+assert.match(scanResultHook, /txFeeLamports=/, 'scan results include transaction fees');
+assert.match(scanResultHook, /txCostSol=/, 'scan results include transaction cost');
+assert.match(scanResultHook, /error=/, 'scan results include the transaction error field');
+assert.match(scanResultHook, /operation=SCAN/, 'scan results identify the associated transaction operation');
+assert.match(source, /slyaTxDurationMs = Date\.now\(\) - macroOpStart/, 'confirmed transactions retain duration for linked result events');
 assert.match(source, /sendToInflux\(`optimization_event,\$\{tags\} \$\{fields\}`, 'optimization'\)/, 'optimization events target the dedicated bucket');
 assert.match(source, /moveWhileScanning=\$\{fleet\?\.scanMove \? 'true' : 'false'\}/, 'Move While Scanning is included in each parameter snapshot');
 

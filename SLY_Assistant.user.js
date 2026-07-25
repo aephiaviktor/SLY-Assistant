@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-188
+// @aephia-version 0.7.35-189
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-188'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-189'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -8600,7 +8600,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 				if(tryCount > 1) cLog(3, `${FleetTimeStamp(fleetName)} Got txResult in ${tryCount} tries`, txResult);
 				annotateSlyaTxCost(txResult);
-				if(txResult) txResult.slyaTxHash = txHash || '';
+				if(txResult) {
+					txResult.slyaTxHash = txHash || '';
+					txResult.slyaTxDurationMs = Date.now() - macroOpStart;
+				}
 				cLog(4, `${FleetTimeStamp(fleetName)} txResult`, txResult);
 				cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> CONFIRM ✅ ${confirmationTimeStr}`);
 				confirmed = true;
@@ -13639,6 +13642,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			sendScanningOptimizationEvent(userFleets[i], 'scan_result', [
 				`signature=${optimizationInfluxString(scanResult?.slyaTxHash || '')}`,
 				`success=${scanResult && !scanResult?.meta?.err ? 'true' : 'false'}`,
+				`durationMs=${Math.round(Number(scanResult?.slyaTxDurationMs || 0))}i`,
+				`txFeeLamports=${Math.round(getSlyaTxFeeLamports(scanResult))}i`,
+				`txCostSol=${getSlyaTxCostSol(scanResult)}`,
+				`error=${optimizationInfluxString(scanResult?.meta?.err ? JSON.stringify(scanResult.meta.err) : '')}`,
 				`sduFound=${Number(sduFound || 0)}`,
 				`burnedFood=${Number(burnedFood || 0)}`,
 				`chance=${Number(scanCondition || 0)}`,
@@ -13647,7 +13654,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				`scanStrikes=${Math.round(Number(userFleets[i].scanStrikes || 0))}i`,
 				`resultSectorX=${Number(fleetCoords[0] || 0)}`,
 				`resultSectorY=${Number(fleetCoords[1] || 0)}`
-			].join(','));
+			].join(','), ',operation=SCAN');
 
 		}
 		else if (!moved && Date.now() < userFleets[i].scanEnd && userFleets[i].state == 'Idle') {
