@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-191
+// @aephia-version 0.7.35-192
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-191'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-192'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2329,12 +2329,21 @@
 	function summarizeUpgradeAutomationUninstalledLp(processes) {
 		let automatedLp = 0;
 		let notAutomatedLp = 0;
+		let notAutomatedOlderThan24hLp = 0;
+		let oldestNotAutomatedAgeSeconds = 0;
 		for (const process of (processes || [])) {
 			if (!process?.pendingInstallation) continue;
-			if (process.automationAssumed) automatedLp += Math.max(0, Number(process.lp || 0));
-			else notAutomatedLp += Math.max(0, Number(process.lp || 0));
+			const lp = Math.max(0, Number(process.lp || 0));
+			const overdueSeconds = Math.max(0, Number(process.overdueSeconds || 0));
+			if (process.automationAssumed) {
+				automatedLp += lp;
+			} else {
+				notAutomatedLp += lp;
+				oldestNotAutomatedAgeSeconds = Math.max(oldestNotAutomatedAgeSeconds, overdueSeconds);
+				if (overdueSeconds > 86400) notAutomatedOlderThan24hLp += lp;
+			}
 		}
-		return { automatedLp, notAutomatedLp };
+		return { automatedLp, notAutomatedLp, notAutomatedOlderThan24hLp, oldestNotAutomatedAgeSeconds };
 	}
 
 	function computeUpgradeAutomationSageEodSeconds(starbaseTime, now = new Date()) {
@@ -2354,8 +2363,9 @@
 		const pendingInstallation = end <= now;
 		const completesByEod = pendingInstallation || (end > now && end <= eod);
 		const automationAssumed = !pendingInstallation || overdueSeconds <= 120;
+		const staleManualInstallation = pendingInstallation && !automationAssumed && overdueSeconds > 86400;
 		const repeatAnchor = pendingInstallation ? now : end;
-		const inFlightCompletionsByEod = completesByEod ? 1 : 0;
+		const inFlightCompletionsByEod = completesByEod && !staleManualInstallation ? 1 : 0;
 		const expectedCompletionsByEod = inFlightCompletionsByEod && automationAssumed && durationSeconds > 0
 			? 1 + Math.floor(Math.max(0, eod - repeatAnchor) / durationSeconds)
 			: inFlightCompletionsByEod;
@@ -2365,6 +2375,7 @@
 			durationSeconds,
 			overdueSeconds,
 			automationAssumed,
+			staleManualInstallation,
 			pendingInstallation,
 			inFlightCompletionsByEod,
 			expectedCompletionsByEod,
@@ -3793,7 +3804,14 @@
 			remainingHoursFloor: planning.remainingHoursFloor,
 			mode: ag.aggr >= 0.75 ? 'Catch-up' : ag.aggr <= 0.25 ? 'Suppress' : 'Balanced',
 			aggressiveness: ag.aggr,
+			aggrRelative: ag.aggrRel,
+			aggrAbsolute: ag.aggrAbs,
 			aggressivenessActive,
+			todayTotal: control.todayTotal,
+			expectedLpByEod: expectedLpByEod.value,
+			expectedTotalLpByEod,
+			expectedLpByEodSnapshotTime: expectedLpByEod.snapshotTime,
+			expectedLpByEodAgeMs: expectedLpByEod.ageMs,
 			projectedLpToday,
 			specialRiskControl,
 			specialRiskDebug: {
@@ -4947,6 +4965,41 @@
 		return String(date.getTime()) + '000000';
 	}
 
+	function buildUpgradeAutomationUpgradingOptimizationLines(now, summary, executionSummary, uninstalledSummary) {
+		summary = summary || {};
+		executionSummary = executionSummary || {};
+		uninstalledSummary = uninstalledSummary || {};
+		const faction = influxEscape(String(getUpgradeAutomationInfluxFactionTag()));
+		const instance = influxEscape(String(getSlyaInfluxInstanceTag()));
+		const timestamp = Math.floor(now.getTime());
+		const aggregateFields = [
+			`player_lp_installed_today=${Math.round(Number(executionSummary.installedToday || 0))}i`,
+			`faction_lp_installed_today=${Math.round(Number(summary.today || 0))}i`,
+			`phantom_crew=${Math.max(0, Math.floor(Number(executionSummary.effectiveCrewTotal != null ? executionSummary.effectiveCrewTotal : executionSummary.crewTotal || 0)))}i`,
+			`neutral_lp_target=${Math.round(Number(executionSummary.neutralLpTargetFullDay || 0))}i`,
+			`requested_lp_target=${Math.round(Number(executionSummary.requestedLpTargetFullDay || executionSummary.requestedLpTargetOpt || 0))}i`,
+			`optimizer_lp_target=${Math.round(Number(executionSummary.achievableLpTargetFullDay || executionSummary.achievableLpTargetOpt || 0))}i`,
+			`aggressiveness_rel=${Number.isFinite(Number(summary.aggrRelative)) ? Number(summary.aggrRelative) : 0}`,
+			`aggressiveness_abs=${Number.isFinite(Number(summary.aggrAbsolute)) ? Number(summary.aggrAbsolute) : 0}`,
+			`aggressiveness=${Number.isFinite(Number(summary.aggressiveness)) ? Number(summary.aggressiveness) : 0}`,
+			`uninstalled_automated_lp=${Math.round(Number(uninstalledSummary.automatedLp || 0))}i`,
+			`uninstalled_not_automated_lp=${Math.round(Number(uninstalledSummary.notAutomatedLp || 0))}i`,
+			`uninstalled_not_automated_older_24h_lp=${Math.round(Number(uninstalledSummary.notAutomatedOlderThan24hLp || 0))}i`,
+			`oldest_uninstalled_not_automated_age_seconds=${Math.max(0, Math.round(Number(uninstalledSummary.oldestNotAutomatedAgeSeconds || 0)))}i`
+		];
+		if (summary.expectedLpByEod != null && Number.isFinite(Number(summary.expectedLpByEod))) aggregateFields.push(`expected_additional_lp_eod=${Math.round(Number(summary.expectedLpByEod))}i`);
+		if (summary.expectedTotalLpByEod != null && Number.isFinite(Number(summary.expectedTotalLpByEod))) aggregateFields.push(`expected_total_lp_eod=${Math.round(Number(summary.expectedTotalLpByEod))}i`);
+		const lines = [`optimization_upgrading,faction=${faction},instance=${instance} ${aggregateFields.join(',')} ${timestamp}`];
+		for (const row of (executionSummary.neutralComponentPlan || [])) {
+			const component = String(row.displayName || row.name || '').trim();
+			if (!component) continue;
+			const installedToday = Math.max(0, Math.floor(Number(row.installedToday || 0)));
+			const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[component] || (component === 'Survey Data Unit' ? UPGRADE_AUTOMATION_COMPONENT_LP.SDU : 0) || 0);
+			lines.push(`optimization_upgrading_component,faction=${faction},instance=${instance},component=${influxEscape(component)} installed_today=${installedToday}i,installed_lp_today=${Math.round(installedToday * lpPerUnit)}i,lp_per_unit=${Math.round(lpPerUnit)}i ${timestamp}`);
+		}
+		return lines;
+	}
+
 	function buildUpgradeAutomationSlyaPerfFields(summary, executionSummary, snapshotForHour) {
 		summary = summary || {};
 		executionSummary = executionSummary || {};
@@ -5089,8 +5142,12 @@
 			sentCount++;
 			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][INFLUX] sent measurement=${measurement} line=${idx + 1}/${lines.length}`);
 		}
-		upgradeAutomationInfluxDebugStatus = `send ok lines=${sentCount} last=${lastMeasurementSent || 'n/a'}`;
-		await appendUpgradeAutomationLog(`[UPGRADE-AUTO][INFLUX] debug send ok lines=${sentCount}`);
+		const optimizationLines = buildUpgradeAutomationUpgradingOptimizationLines(now, summary, executionSummary, upgradeAutomationUninstalledLp);
+		for (const optimizationLine of optimizationLines) {
+			await sendToInflux(optimizationLine, 'optimization');
+		}
+		upgradeAutomationInfluxDebugStatus = `send ok lines=${sentCount} optimizationLines=${optimizationLines.length} last=${lastMeasurementSent || 'n/a'}`;
+		await appendUpgradeAutomationLog(`[UPGRADE-AUTO][INFLUX] debug send ok lines=${sentCount} optimizationLines=${optimizationLines.length}`);
 	}
 
 	function extractInventoryFromCargo(starbasePlayerCargoHoldsAndTokens) {
@@ -5247,6 +5304,13 @@
 			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][${trigger}] runtime not ready after wait; snapshot skipped`);
 			return;
 		}
+		// Refresh the process-level source first so the simulation, aggressiveness,
+		// and emitted optimization snapshot all consume the same current LP view.
+		try {
+			await runUpgradeAutomationLpPerProfileCycle(now);
+		} catch (e) {
+			try { await appendUpgradeAutomationLog(`[UPGRADE-AUTO][${trigger}] lp_per_profile cycle failed err=${String(e?.message || e)}`); } catch (_) {}
+		}
 		let lastLpControlSummary = null;
 		let lastExecutionSummary = null;
 		for (const instanceId of [1,2]) {
@@ -5283,7 +5347,13 @@
 				today: Number(res.todayTotal || 0),
 				lpGap: Number(res.targetNow || 0) - Number(res.todayTotal || 0),
 				aggressiveness: Number(res.aggressiveness || 0),
-				aggressivenessActive: isUpgradeAutomationAggressivenessActive(now)
+				aggrRelative: Number(res.aggrRelative || 0),
+				aggrAbsolute: Number(res.aggrAbsolute || 0),
+				aggressivenessActive: isUpgradeAutomationAggressivenessActive(now),
+				expectedLpByEod: res.expectedLpByEod,
+				expectedTotalLpByEod: res.expectedTotalLpByEod,
+				expectedLpByEodSnapshotTime: res.expectedLpByEodSnapshotTime,
+				expectedLpByEodAgeMs: res.expectedLpByEodAgeMs
 			};
 			const sums24 = await getUpgradeAutomationEventSumsLast24h(now.getTime());
 			const buffers = computeBufferDaysMap(inventory, sums24);
@@ -5296,17 +5366,6 @@
 			const logLine = `[UPGRADE-AUTO][${trigger}] instance=${instanceId} utc=${now.toISOString()} dayProgress=${res.progress.toFixed(4)} avg7w=${Math.round(res.avg7Weighted)} aggr=${res.aggressiveness.toFixed(3)} err=${res.errNow.toFixed(3)} trend2=${res.trend2.toFixed(3)} targetNow=${Math.round(res.targetNow)} today=${Math.round(res.todayTotal)} crew(total=${crewSnap.totalCrew},busy=${crewSnap.busyCrew},avail=${crewSnap.availableCrew}) inv[${invStr}] up24[${upStr}] craft24[${crStr}] bufferDays[${bufStr}] mix5[${mix5Str}]`;
 			cLog(1, logLine);
 			await appendUpgradeAutomationLog(logLine);
-		}
-		// Per-profile LP tracking (SLY_17, 2026-07-21). Runs BEFORE the second
-		// readiness check so it still fires when the snapshot summary is
-		// deferred (the previous placement made it unreachable if readiness
-		// failed, since `isUpgradeAutomationReady()` early-returns the function).
-		// Throttled to ~60s inside the cycle function. Wrapped in its own
-		// try/catch so a failure here never breaks the main snapshot.
-		try {
-			await runUpgradeAutomationLpPerProfileCycle(now);
-		} catch (e) {
-			try { await appendUpgradeAutomationLog(`[UPGRADE-AUTO][${trigger}] lp_per_profile cycle failed err=${String(e?.message || e)}`); } catch (_) {}
 		}
 		if (!isUpgradeAutomationReady()) {
 			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][${trigger}] startup summary deferred waiting for readiness`);
@@ -6366,15 +6425,15 @@
 				const expectedLpProfiles = Number(upgradeAutomationLpControl?.expectedLpByEodProfiles || 0);
 				const expectedLpRows = Number(upgradeAutomationLpControl?.expectedLpByEodRows || 0);
 				const expectedLpTitle = expectedLpByEod !== null
-					? `Expected additional LP by 00:00 UTC from active upgrade jobs plus complete same-duration automation repeats. Latest snapshot: ${expectedLpSnapshotTime || 'unknown'}; profiles: ${expectedLpProfiles}; rows: ${expectedLpRows}.`
+					? `Expected additional LP by 00:00 UTC from active upgrade jobs, automation repeats, and manual pending installations no older than 24 hours. Older manual backlog is excluded. Latest snapshot: ${expectedLpSnapshotTime || 'unknown'}; profiles: ${expectedLpProfiles}; rows: ${expectedLpRows}.`
 					: `Unavailable${upgradeAutomationLpControl?.expectedLpByEodError ? ': ' + String(upgradeAutomationLpControl.expectedLpByEodError) : ''}`;
 				const absAdjustment = Number.isFinite(upgradeAutomationLpControl?.absAdjustment) ? upgradeAutomationLpControl.absAdjustment : 0;
-				content += '<tr><td>LP Today</td><td align="right">' + Math.round(lpToday).toLocaleString() + '</td><td title="' + expectedLpTitle.replace(/["<>]/g, '') + '">Expected Additional LP by EOD</td><td align="right" title="' + expectedLpTitle.replace(/["<>]/g, '') + '">' + (expectedLpByEod !== null ? Math.round(expectedLpByEod).toLocaleString() : '-') + '</td><td>Expected Total LP by EOD</td><td align="right">' + (expectedTotalLpByEod !== null ? Math.round(expectedTotalLpByEod).toLocaleString() : '-') + '</td></tr>';
-				if (upgradeAutomationUninstalledLp) content += '<tr><td>Uninstalled automated LP</td><td align="right">' + Math.round(Number(upgradeAutomationUninstalledLp.automatedLp || 0)).toLocaleString() + '</td><td>Uninstalled not automated LP</td><td align="right">' + Math.round(Number(upgradeAutomationUninstalledLp.notAutomatedLp || 0)).toLocaleString() + '</td><td></td><td></td></tr>';
+				content += '<tr><td>Faction LP Installed Today</td><td align="right">' + Math.round(lpToday).toLocaleString() + '</td><td title="' + expectedLpTitle.replace(/["<>]/g, '') + '">Expected Additional LP by EOD</td><td align="right" title="' + expectedLpTitle.replace(/["<>]/g, '') + '">' + (expectedLpByEod !== null ? Math.round(expectedLpByEod).toLocaleString() : '-') + '</td><td>Expected Total LP by EOD</td><td align="right">' + (expectedTotalLpByEod !== null ? Math.round(expectedTotalLpByEod).toLocaleString() : '-') + '</td></tr>';
+				if (upgradeAutomationUninstalledLp) content += '<tr><td>Uninstalled automated LP</td><td align="right">' + Math.round(Number(upgradeAutomationUninstalledLp.automatedLp || 0)).toLocaleString() + '</td><td>Uninstalled not automated LP</td><td align="right">' + Math.round(Number(upgradeAutomationUninstalledLp.notAutomatedLp || 0)).toLocaleString() + '</td><td>Uninstalled not automated LP (&gt;24h)</td><td align="right">' + Math.round(Number(upgradeAutomationUninstalledLp.notAutomatedOlderThan24hLp || 0)).toLocaleString() + '</td></tr>';
 				content += '<tr><td>LP Target Now Hourly</td><td align="right">' + Math.round(lpTargetNowInflux).toLocaleString() + '</td><td>LP Faction yday</td><td align="right">' + (lpFactionYesterdayRaw != null && Number.isFinite(lpFactionYesterday) ? Math.round(lpFactionYesterday).toLocaleString() : '-') + '</td><td>LP Installed yday</td><td align="right">' + (lpInstalledYesterdayRaw != null && Number.isFinite(lpInstalledYesterday) ? Math.round(lpInstalledYesterday).toLocaleString() : '-') + '</td></tr>';
 				content += '<tr><td>' + lpAggPreLabel + '</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrRelative ?? upgradeAutomationLpControl?.rawAggressiveness ?? upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td><td>Aggr. (abs.)</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrAbsolute ?? (1 + absAdjustment)).toFixed(3) + '</td><td style="color:' + lpAggColor + '">Aggr.</td><td align="right" style="color:' + lpAggColor + '">' + Number(upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td></tr>';
 				content += '<tr><td colspan="6">&nbsp;</td></tr>';
-				content += '<tr><td>Installed LP Today</td><td align="right">' + Math.round(installedToday).toLocaleString() + '</td><td></td><td></td><td></td><td></td></tr>';
+				content += '<tr><td>Player LP Installed Today</td><td align="right">' + Math.round(installedToday).toLocaleString() + '</td><td></td><td></td><td></td><td></td></tr>';
 				content += '<tr><td>Neutral LP Target</td><td align="right">' + Math.round(neutralLpTargetFullDay).toLocaleString() + '</td><td>Requested LP Target</td><td align="right">' + Math.round(requestedLpTarget).toLocaleString() + '</td><td>Optimizer LP Target</td><td align="right">' + Math.round(achievableLpTargetFullDay).toLocaleString() + '</td></tr>';
 				if (upgradeAutomationLpControlError || upgradeAutomationExecutionSummaryError) {
 					const lpErrors = [upgradeAutomationLpControlError, upgradeAutomationExecutionSummaryError].filter(Boolean).join(' | ');

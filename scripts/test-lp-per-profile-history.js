@@ -81,6 +81,7 @@ assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 150, 750
   durationSeconds: 100,
   overdueSeconds: 0,
   automationAssumed: true,
+  staleManualInstallation: false,
   pendingInstallation: false,
   inFlightCompletionsByEod: 1,
   expectedCompletionsByEod: 6,
@@ -94,13 +95,15 @@ assert.equal(context.projectEod(100, 800, 150, 750, 60, 3).expectedCompletionsBy
 assert.equal(context.projectEod(200, 200, 150, 750, 60, 3).expectedCompletionsByEod, 1, 'invalid duration retains the conservative in-flight completion without extrapolation');
 assert.equal(context.projectEod(100, 750, 150, 750, 60, 3).expectedCompletionsByEod, 1, 'a process ending exactly at EoD counts once');
 assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 250, 750, 60, 3))), {
-  durationSeconds: 100, overdueSeconds: 50, automationAssumed: true, pendingInstallation: true,
+  durationSeconds: 100, overdueSeconds: 50, automationAssumed: true, staleManualInstallation: false, pendingInstallation: true,
   inFlightCompletionsByEod: 1, expectedCompletionsByEod: 6,
   inFlightLpByEod: 60, expectedLpByEod: 360, repeatLpByEod: 300,
   inFlightQuantityByEod: 3, expectedQuantityByEod: 18
 }, 'a process overdue by at most two minutes counts its pending installation and automated repeats from now');
-assert.equal(context.projectEod(100, 200, 321, 750, 60, 3).expectedCompletionsByEod, 1, 'a process overdue by more than two minutes counts only its pending installation');
+assert.equal(context.projectEod(100, 200, 321, 750, 60, 3).expectedCompletionsByEod, 1, 'a process overdue by more than two minutes but no more than 24 hours counts its pending installation once');
 assert.equal(context.projectEod(100, 200, 321, 750, 60, 3).automationAssumed, false, 'an older overdue process is treated as manual');
+assert.equal(context.projectEod(100, 200, 86_601, 90_000, 60, 3).expectedCompletionsByEod, 0, 'manual uninstalled LP older than 24 hours is excluded from Expected Additional LP by EOD');
+assert.equal(context.projectEod(100, 200, 86_600, 90_000, 60, 3).expectedCompletionsByEod, 1, 'manual uninstalled LP exactly 24 hours old remains expected once');
 assert.equal(
   context.sageEod(1_782_771_962, new Date('2026-07-23T07:50:00Z')),
   1_782_830_162,
@@ -113,11 +116,17 @@ assert.equal(
 );
 
 const uninstalled = context.summarizeUninstalled([
-  { lp: 60, pendingInstallation: true, automationAssumed: true },
-  { lp: 40, pendingInstallation: true, automationAssumed: false },
-  { lp: 999, pendingInstallation: false, automationAssumed: true }
+  { lp: 60, pendingInstallation: true, automationAssumed: true, overdueSeconds: 50 },
+  { lp: 40, pendingInstallation: true, automationAssumed: false, overdueSeconds: 500 },
+  { lp: 30, pendingInstallation: true, automationAssumed: false, overdueSeconds: 90_000 },
+  { lp: 999, pendingInstallation: false, automationAssumed: true, overdueSeconds: 0 }
 ]);
-assert.deepEqual(JSON.parse(JSON.stringify(uninstalled)), { automatedLp: 60, notAutomatedLp: 40 }, 'faction diagnostics split only uninstalled LP by automation assumption');
+assert.deepEqual(JSON.parse(JSON.stringify(uninstalled)), {
+  automatedLp: 60,
+  notAutomatedLp: 70,
+  notAutomatedOlderThan24hLp: 30,
+  oldestNotAutomatedAgeSeconds: 90_000
+}, 'faction diagnostics split uninstalled LP and identify the manual backlog older than 24 hours');
 
 const historyRunner = extractFunction('runUpgradeAutomationLpPerProfileRedemptionHistory');
 assert.match(historyRunner, /getSignaturesForAddress\(new solanaWeb3\.PublicKey\(profile\)/, 'history queries watched profile addresses directly');
