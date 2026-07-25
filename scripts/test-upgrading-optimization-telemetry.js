@@ -33,7 +33,7 @@ const context = {
   String,
   Array,
   Object,
-  UPGRADE_AUTOMATION_COMPONENT_LP: { Framework: 300, Electronics: 120 },
+  UPGRADE_AUTOMATION_COMPONENT_LP: { Framework: 300, Electronics: 120, SDU: 1325 },
   influxEscape: value => String(value).replaceAll(' ', '\\ '),
   influxFieldString: value => `"${String(value)}"`,
   getUpgradeAutomationInfluxFactionTag: () => 'MUD',
@@ -41,9 +41,16 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(`
+  ${extractFunction('getUpgradeAutomationComponentLpPerUnit')}
+  ${extractFunction('computeUpgradeAutomationInstalledLp')}
   ${extractFunction('buildUpgradeAutomationUpgradingOptimizationLines')}
+  this.componentLp = getUpgradeAutomationComponentLpPerUnit;
+  this.installedLp = computeUpgradeAutomationInstalledLp;
   this.buildLines = buildUpgradeAutomationUpgradingOptimizationLines;
 `, context);
+
+assert.equal(context.componentLp('Survey Data Unit'), 1325, 'the display name resolves to the canonical SDU LP value');
+assert.equal(context.installedLp({ Framework: 2, 'Survey Data Unit': 3 }), 4_575, 'player installed LP includes SDU');
 
 const lines = context.buildLines(
   new Date('2026-07-25T11:50:00Z'),
@@ -56,7 +63,7 @@ const lines = context.buildLines(
     aggressiveness: 0.88,
   },
   {
-    installedToday: 250,
+    installedToday: 960,
     effectiveCrewTotal: 840,
     neutralLpTargetFullDay: 2_000,
     requestedLpTargetFullDay: 2_500,
@@ -76,7 +83,7 @@ const lines = context.buildLines(
 
 assert.equal(lines.length, 3, 'one aggregate and one row per component are emitted');
 assert.match(lines[0], /^optimization_upgrading,faction=MUD,instance=MUD-1 /);
-assert.match(lines[0], /player_lp_installed_today=250i/);
+assert.match(lines[0], /player_lp_installed_today=960i/, 'player installed LP equals the sum of all component LP, not the legacy SDU-excluding total');
 assert.match(lines[0], /faction_lp_installed_today=1000i/);
 assert.match(lines[0], /expected_additional_lp_eod=400i/);
 assert.match(lines[0], /expected_total_lp_eod=1400i/);
@@ -97,6 +104,16 @@ assert.match(lines[1], /installed_lp_today=600i/);
 assert.match(lines[2], /component=Electronics/);
 assert.match(lines[2], /installed_lp_today=360i/);
 assert.ok(lines.every(line => line.endsWith(` ${new Date('2026-07-25T11:50:00Z').getTime()}`)), 'all rows share one millisecond timestamp');
+
+const simulation = source.slice(
+  source.indexOf('async function runUpgradeAutomationSimulation('),
+  source.indexOf('const __slyaUpgradeAutomationApi =')
+);
+assert.match(simulation, /fetchUpgradeAutomationExpectedLpByEod\(now\)/, 'the simulation loads the fresh EOD forecast');
+assert.match(simulation, /computeAggressivenessFromControl\(control, cumErr, influxTarget, now, expectedTotalLpByEod\)/, 'simulation aggressiveness consumes Expected Total LP');
+assert.match(simulation, /expectedLpByEod: expectedLpByEod\.value/, 'the simulation exposes Expected Additional LP to the snapshot producer');
+assert.match(simulation, /aggrRelative: ag\.aggrRel/, 'the simulation exposes relative aggressiveness');
+assert.match(simulation, /aggrAbsolute: ag\.aggrAbs/, 'the simulation exposes absolute aggressiveness');
 
 const snapshotRunner = extractFunction('runUpgradeAutomationSnapshot');
 assert.ok(snapshotRunner.indexOf('await runUpgradeAutomationLpPerProfileCycle(now)') < snapshotRunner.indexOf('await runUpgradeAutomationSimulation(instanceId, inventory, now)'), 'process telemetry refreshes before the optimizer consumes Expected Total LP');

@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-192
+// @aephia-version 0.7.35-193
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-192'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-193'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2326,6 +2326,17 @@
 		} catch (e) { return 0; }
 	}
 
+	function getUpgradeAutomationComponentLpPerUnit(component) {
+		const name = String(component || '').trim();
+		return Number(UPGRADE_AUTOMATION_COMPONENT_LP[name] || (name === 'Survey Data Unit' ? UPGRADE_AUTOMATION_COMPONENT_LP.SDU : 0) || 0);
+	}
+
+	function computeUpgradeAutomationInstalledLp(installedTodayByComponent) {
+		return Object.entries(installedTodayByComponent || {}).reduce((sum, [component, amount]) => {
+			return sum + Math.max(0, Number(amount || 0)) * getUpgradeAutomationComponentLpPerUnit(component);
+		}, 0);
+	}
+
 	function summarizeUpgradeAutomationUninstalledLp(processes) {
 		let automatedLp = 0;
 		let notAutomatedLp = 0;
@@ -3668,10 +3679,7 @@
 		}
 		const influxInstalledTodayTotal = Object.values(influxInstalledTodayByComponent).reduce((sum, value) => sum + Math.max(0, Number(value || 0)), 0);
 		const installedTodayByComponent = influxInstalledTodayTotal > 0 ? influxInstalledTodayByComponent : localInstalledTodayByComponent;
-		const installedTodayRaw = Object.entries(installedTodayByComponent).reduce((sum, [resource, amount]) => {
-			const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[resource] || 0);
-			return sum + Number(amount || 0) * lpPerUnit;
-		}, 0);
+		const installedTodayRaw = computeUpgradeAutomationInstalledLp(installedTodayByComponent);
 		const installedToday = installedTodayRaw;
 		const elapsedUtcSeconds = Math.max(Math.floor((now.getTime() - utcDayStartMs) / 1000), 1);
 		const lpPerSecondNow = installedToday / elapsedUtcSeconds;
@@ -4994,7 +5002,7 @@
 			const component = String(row.displayName || row.name || '').trim();
 			if (!component) continue;
 			const installedToday = Math.max(0, Math.floor(Number(row.installedToday || 0)));
-			const lpPerUnit = Number(UPGRADE_AUTOMATION_COMPONENT_LP[component] || (component === 'Survey Data Unit' ? UPGRADE_AUTOMATION_COMPONENT_LP.SDU : 0) || 0);
+			const lpPerUnit = getUpgradeAutomationComponentLpPerUnit(component);
 			lines.push(`optimization_upgrading_component,faction=${faction},instance=${instance},component=${influxEscape(component)} installed_today=${installedToday}i,installed_lp_today=${Math.round(installedToday * lpPerUnit)}i,lp_per_unit=${Math.round(lpPerUnit)}i ${timestamp}`);
 		}
 		return lines;
@@ -5210,7 +5218,11 @@
 		cumErr += control.errNow;
 		await saveUpgradeAutomationState(instanceId, { dayKey, cumErr });
 
-		const ag = computeAggressivenessFromControl(control, cumErr, influxTarget, now);
+		const expectedLpByEod = await fetchUpgradeAutomationExpectedLpByEod(now);
+		const expectedTotalLpByEod = expectedLpByEod.value != null && Number.isFinite(Number(expectedLpByEod.value))
+			? control.todayTotal + Number(expectedLpByEod.value)
+			: null;
+		const ag = computeAggressivenessFromControl(control, cumErr, influxTarget, now, expectedTotalLpByEod);
 		const mix = allocateUpgradeMix(metrics, inventory, ag.aggr);
 
 		const result = {
@@ -5233,6 +5245,12 @@
 			cumErr,
 			score: ag.score,
 			aggressiveness: ag.aggr,
+			aggrRelative: ag.aggrRel,
+			aggrAbsolute: ag.aggrAbs,
+			expectedLpByEod: expectedLpByEod.value,
+			expectedTotalLpByEod,
+			expectedLpByEodSnapshotTime: expectedLpByEod.snapshotTime,
+			expectedLpByEodAgeMs: expectedLpByEod.ageMs,
 			mix
 		};
 
