@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-185
+// @aephia-version 0.7.35-186
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-185'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-186'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4939,8 +4939,7 @@
 			if(operation.kind === 'load') {
 				await addFleetTelemetryCargoLoad(fleet, fleetParsedData, operation);
 			} else if(operation.kind === 'unload') {
-				const deliveryCycle = await addFleetTelemetryCargoDelivery(fleet, fleetParsedData, operation);
-				if(deliveryCycle) scheduleFleetTelemetryCostCycleFinalization(fleet, fleetParsedData, operation.starbase);
+				await addFleetTelemetryCargoDelivery(fleet, fleetParsedData, operation);
 			}
 		}
 	}
@@ -4989,18 +4988,6 @@
 	async function addFleetTelemetryMovementCost(fleet, fleetParsedData, movementCost, fleetCurrentCargo) {
 		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return null;
 		let cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
-		const homeStarbase = cycle.homeStarbase || getFleetTelemetryHomeStarbaseName(fleet, fleetParsedData);
-		// A home turnaround can unload the completed cycle and load the next trip in
-		// one bundle. Roll the old cycle over before charging the first outbound leg.
-		if(cycle.deliveries.some(item => String(item?.starbase || '') === String(homeStarbase || ''))) {
-			const timerKey = fleet.publicKey.toString();
-			if(fleetTelemetryFinalizeTimers.has(timerKey)) {
-				clearTimeout(fleetTelemetryFinalizeTimers.get(timerKey));
-				fleetTelemetryFinalizeTimers.delete(timerKey);
-			}
-			await maybeFinalizeFleetTelemetryCostCycle(fleet, fleetParsedData, homeStarbase);
-			cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
-		}
 		const fuel = Math.max(0, Number(movementCost?.burnedFuel || 0));
 		const txSol = getSlyaTxCostSol(movementCost?.txResult);
 		const txLamports = getSlyaTxFeeLamports(movementCost?.txResult);
@@ -5087,7 +5074,7 @@
 		}, 60000));
 	}
 
-	async function maybeFinalizeFleetTelemetryCostCycle(fleet, fleetParsedData, starbaseName) {
+	async function maybeFinalizeFleetTelemetryCostCycle(fleet, fleetParsedData, starbaseName, legCount) {
 		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return false;
 		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
 		const homeStarbase = cycle.homeStarbase || getFleetTelemetryHomeStarbaseName(fleet, fleetParsedData);
@@ -5105,12 +5092,14 @@
 		const overheadFuel = splitTelemetryCost(cycle.emptyBurnedFuel, volumeWeights);
 		const overheadTx = splitTelemetryCost(cycle.emptyTxCostSol, volumeWeights);
 		const overheadFees = splitTelemetryCost(cycle.emptyTxFeeLamports, volumeWeights);
-		const lines = deliveries.map((item, index) => {
+		const completedLegCount = Math.max(1, Math.round(Number(legCount || cycle.movementCount || 1)));
+		const allocationLines = deliveries.map((item, index) => {
 			const loadedFuel = Number(item.loadedFuel || 0), loadedTx = Number(item.loadedTxCostSol || 0), loadedFees = Number(item.loadedTxFeeLamports || 0);
 			return `cargo_cost_allocation,faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(fleet.label)},assignment=${influxEscape(fleetParsedData.assignment || 'unknown')},homeStarbase=${influxEscape(homeStarbase || 'unknown')},originStarbase=${influxEscape(item.originStarbase || 'unknown')},deliveryStarbase=${influxEscape(item.starbase || 'unknown')},rss=${influxEscape(item.rssName || 'unknown')},cycleId=${influxEscape(cycle.id || 'unknown')},allocationIndex=${index}` +
 				` amount=${Number(item.amount || 0)},cargoVolume=${Number(item.cargoVolume || 0)},assetMint=${influxFieldString(item.mint || '')},loadedLegFuel=${loadedFuel},loadedLegTxCostSol=${loadedTx},loadedLegTxFeeLamports=${Math.round(loadedFees)}i,emptyLegFuelOverhead=${overheadFuel[index]},emptyLegTxCostSolOverhead=${overheadTx[index]},emptyLegTxFeeLamportsOverhead=${Math.round(overheadFees[index])}i,allocatedFuel=${allocatedFuel[index]},allocatedTxCostSol=${allocatedTx[index]},allocatedTxFeeLamports=${Math.round(allocatedFees[index])}i,loadedLegCount=${Math.round(Number(item.loadedLegCount || 0))}i,cycleBurnedFuel=${cycle.burnedFuel},cycleTxCostSol=${cycle.txCostSol},cycleTxFeeLamports=${Math.round(cycle.txFeeLamports)}i,cycleEmptyFuel=${cycle.emptyBurnedFuel},cycleEmptyTxCostSol=${cycle.emptyTxCostSol},cycleMovementCount=${cycle.movementCount}i,cycleDeliveredVolume=${totalVolume},cycleDeliveryCount=${deliveries.length}i,deliveryIndex=${index}i`;
-		}).join('\n');
-		if(lines) await sendToInflux(lines);
+		});
+		const completionLine = `cargo_cycle_completed,faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(fleet.label)},assignment=${influxEscape(fleetParsedData.assignment || 'unknown')},cycleId=${influxEscape(cycle.id || 'unknown')} legCount=${completedLegCount}i,movementCount=${Math.round(cycle.movementCount)}i`;
+		await sendToInflux(allocationLines.concat(completionLine).join('\n'));
 		// Loads performed during the same home turnaround belong to the next cycle.
 		// Preserve their provenance, but reset all movement costs because the cycle
 		// being finalized above has already allocated its complete cost total.
@@ -14066,6 +14055,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
         const hasTargetManifest = hasTransportManifest(targetCargoManifest);
         const hasStarbaseManifest = hasTransportManifest(starbaseCargoManifest);
 
+		if(fleetState === 'Idle' && fleetCoords[0] == starbaseX && fleetCoords[1] == starbaseY) {
+			await maybeFinalizeFleetTelemetryCostCycle(userFleets[i], fleetParsedData, getFleetTelemetryHomeStarbaseName(userFleets[i], fleetParsedData), 2);
+		}
+
 		// After an app reload/update, moveTarget is not guaranteed to survive in
 		// memory. If the fleet is still idle at a route source but already carries
 		// meaningful cargo for the departing leg, loading has already completed.
@@ -14685,6 +14678,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		}
 
 		let activeLeg = null;
+		if (fleetState === 'Idle' && activeTransportPlusRouteIndex === transportPlusLegs.length - 1) {
+			const completedLeg = transportPlusLegs[activeTransportPlusRouteIndex];
+			if(completedLeg && CoordsEqual(fleetCoords, ConvertCoords(completedLeg.destCoord))) {
+				await maybeFinalizeFleetTelemetryCostCycle(userFleets[i], fleetParsedData, getFleetTelemetryHomeStarbaseName(userFleets[i], fleetParsedData), transportPlusLegs.length);
+			}
+		}
 		if (fleetState === 'Idle') {
 			if(activeTransportPlusRouteIndex !== null) {
 				const indexedLeg = transportPlusLegs[activeTransportPlusRouteIndex];

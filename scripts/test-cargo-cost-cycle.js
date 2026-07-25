@@ -102,5 +102,29 @@ assert.doesNotMatch(
   /loadedWeights/,
   'cycle allocation must not depend on which leg carried an asset'
 );
+assert.match(
+  finalizeFunction,
+  /cargo_cycle_completed[^\n]+legCount=\$\{completedLegCount\}i/,
+  'finalization must emit one explicit completion event with the configured leg count'
+);
+
+const movementFunction = extractFunction('addFleetTelemetryMovementCost');
+assert.doesNotMatch(
+  movementFunction,
+  /maybeFinalizeFleetTelemetryCostCycle/,
+  'movement coordinates must not decide when a round trip is complete'
+);
+
+const supplyChainFunction = extractFunction('handleSupplyChain');
+assert.match(
+  supplyChainFunction,
+  /activeTransportPlusRouteIndex === transportPlusLegs\.length - 1/,
+  'Supply Chain must close only after the final configured route leg'
+);
+assert.match(
+  supplyChainFunction,
+  /maybeFinalizeFleetTelemetryCostCycle[^\n]+transportPlusLegs\.length/,
+  'Supply Chain completion must report its actual route leg count'
+);
 
 console.log('cargo cost-cycle tests passed');
