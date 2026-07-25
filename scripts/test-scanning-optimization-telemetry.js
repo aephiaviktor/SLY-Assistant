@@ -59,6 +59,20 @@ assert.match(scanResultHook, /txCostSol=/, 'scan results include transaction cos
 assert.match(scanResultHook, /error=/, 'scan results include the transaction error field');
 assert.match(scanResultHook, /operation=SCAN/, 'scan results identify the associated transaction operation');
 assert.match(source, /slyaTxDurationMs = Date\.now\(\) - macroOpStart/, 'confirmed transactions retain duration for linked result events');
+vm.runInContext(`${extractFunction('getScanningOptimizationMovementFields')}\nthis.movementFields = getScanningOptimizationMovementFields;`, context);
+const movementFleet = { scanOptimizationMovementContext: { fromX: 10, fromY: 14, toX: 11, toY: 14, distance: 1, expectedTravelSeconds: 216, burnedFuel: 12.5, mode: 'subwarp' } };
+assert.deepEqual(Array.from(context.movementFields(movementFleet, 'SCAN')), [], 'non-movement transactions stay sparse');
+const movementFields = Array.from(context.movementFields(movementFleet, 'SUBWARP'));
+assert.ok(movementFields.includes('fromSectorX=10'), 'movement records its origin');
+assert.ok(movementFields.includes('toSectorY=14'), 'movement records its destination');
+assert.ok(movementFields.includes('movementDistance=1'), 'movement records distance');
+assert.ok(movementFields.includes('expectedTravelSeconds=216'), 'movement records expected travel time');
+assert.ok(movementFields.includes('burnedFuel=12.5'), 'movement start records calculated fuel burn');
+assert.ok(movementFields.includes('movementPhase="start"'), 'movement start is explicitly identified');
+const exitMovementFields = Array.from(context.movementFields(movementFleet, 'EXIT SUBWARP'));
+assert.ok(exitMovementFields.includes('movementPhase="exit"'), 'movement exit is explicitly identified');
+assert.ok(!exitMovementFields.some(field => field.startsWith('burnedFuel=')), 'movement exit does not double-count fuel burn');
+assert.match(source, /scanOptimizationMovementContext = null/, 'movement context is cleared after the exit transaction');
 assert.match(source, /sendToInflux\(`optimization_event,\$\{tags\} \$\{fields\}`, 'optimization'\)/, 'optimization events target the dedicated bucket');
 assert.match(source, /moveWhileScanning=\$\{fleet\?\.scanMove \? 'true' : 'false'\}/, 'Move While Scanning is included in each parameter snapshot');
 

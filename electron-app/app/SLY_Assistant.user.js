@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-189
+// @aephia-version 0.7.35-190
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-189'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-190'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -7690,6 +7690,25 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		});
 	}
 
+	function getScanningOptimizationMovementFields(fleet, opName) {
+		const context = fleet?.scanOptimizationMovementContext;
+		const normalizedOp = String(opName || '').toUpperCase();
+		if(!context || !['WARP', 'SUBWARP', 'EXIT WARP', 'EXIT SUBWARP'].includes(normalizedOp)) return [];
+		const isExit = normalizedOp.startsWith('EXIT ');
+		const fields = [
+			`fromSectorX=${Number(context.fromX)}`,
+			`fromSectorY=${Number(context.fromY)}`,
+			`toSectorX=${Number(context.toX)}`,
+			`toSectorY=${Number(context.toY)}`,
+			`movementDistance=${Number(context.distance || 0)}`,
+			`expectedTravelSeconds=${Number(context.expectedTravelSeconds || 0)}`,
+			`movementMode=${optimizationInfluxString(context.mode || '')}`,
+			`movementPhase=${optimizationInfluxString(isExit ? 'exit' : 'start')}`
+		];
+		if(!isExit) fields.push(`burnedFuel=${Number(context.burnedFuel || 0)}`);
+		return fields;
+	}
+
 	function getCustomInstructionErrorCode(instructionError, logMessages) {
 		let errorDetail = Array.isArray(instructionError) ? instructionError[1] : instructionError;
 		if (typeof errorDetail === 'number') return errorDetail;
@@ -8032,7 +8051,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					`durationMs=${Math.round(fullMsTaken)}i`,
 					`txFeeLamports=${Math.round(getSlyaTxFeeLamports(txResult))}i`,
 					`txCostSol=${getSlyaTxCostSol(txResult)}`,
-					`error=${optimizationInfluxString(instructionError || txResult?.meta?.err ? JSON.stringify(instructionError || txResult.meta.err) : '')}`
+					`error=${optimizationInfluxString(instructionError || txResult?.meta?.err ? JSON.stringify(instructionError || txResult.meta.err) : '')}`,
+					...getScanningOptimizationMovementFields(fleet, opName)
 				].join(','), `,operation=${influxEscape(opName || 'unknown')}`);
 
 				if(!instructionError && !(txResult?.meta?.err)) {
@@ -12772,6 +12792,11 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					}
 
 					moveTime = calculateWarpTime(userFleets[i], moveDist);
+					userFleets[i].scanOptimizationMovementContext = {
+						fromX: extra[0], fromY: extra[1], toX: moveX, toY: moveY,
+						distance: moveDist, expectedTravelSeconds: moveTime,
+						burnedFuel: moveDist*(userFleets[i].warpFuelConsumptionRate/100), mode: 'warp'
+					};
 					const warpResult = await execWarp(userFleets[i], moveX, moveY, moveTime);
 					if(warpResult && warpResult.warpCooldownRetry) return warpResult.warpCooldownFinished;
 						const movementStarbaseCoords = ConvertCoords(fleetParsedData.starbase || userFleets[i].starbaseCoord);
@@ -12787,8 +12812,13 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 						await sendFleetMovementCargoTelemetry(userFleets[i], fleetParsedData, fleetCurrentCargo, movementTags, 'warp');
 						if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].warpFuelConsumptionRate/100);
 						warpCooldownFinished = warpResult.warpCooldownFinished;
-					} else if (currentFuelCnt + currentCargoFuelCnt >= subwarpCost) {
+				} else if (currentFuelCnt + currentCargoFuelCnt >= subwarpCost) {
 					moveTime = calculateSubwarpTime(userFleets[i], moveDist);
+					userFleets[i].scanOptimizationMovementContext = {
+						fromX: extra[0], fromY: extra[1], toX: moveX, toY: moveY,
+						distance: moveDist, expectedTravelSeconds: moveTime,
+						burnedFuel: moveDist*(userFleets[i].subwarpFuelConsumptionRate/100), mode: 'subwarp'
+					};
 					const subwarpResult = await execSubwarp(userFleets[i], moveX, moveY, moveTime);
 					const fleetPK = userFleets[i].publicKey.toString();
 					const fleetSavedData = await GM.getValue(fleetPK, '{}');
@@ -12860,6 +12890,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				await execExitSubwarp(userFleets[i]);
 			}
 		}
+		userFleets[i].scanOptimizationMovementContext = null;
 
 		fleetAcctInfo = await getAccountInfo(userFleets[i].label, 'full fleet info', userFleets[i].publicKey);
 		[fleetState, extra] = getFleetState(fleetAcctInfo, userFleets[i]);
