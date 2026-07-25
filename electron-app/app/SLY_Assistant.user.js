@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-184
+// @aephia-version 0.7.35-185
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-184'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-185'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -7656,6 +7656,51 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return String(lines || '').split('\n').map(line => line ? line + fields : line).join('\n');
 	}
 
+	function optimizationInfluxString(value) {
+		return `"${String(value ?? '').replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('\n', ' ')}"`;
+	}
+
+	function buildScanningOptimizationParameterFields(fleet) {
+		const startCoords = Array.isArray(fleet?.startingCoords) ? fleet.startingCoords : [];
+		return [
+			`experimentId=${optimizationInfluxString(fleet?.scanOptimizationExperimentId)}`,
+			`fleetAccount=${optimizationInfluxString(getPubkeyString(fleet?.publicKey))}`,
+			`assignment="Scan"`,
+			`target=${optimizationInfluxString(fleet?.destCoord)}`,
+			`starbase=${optimizationInfluxString(fleet?.starbaseCoord)}`,
+			`overridePattern=${optimizationInfluxString(fleet?.scanPattern)}`,
+			`overridePatternLength=${Math.round(Number(fleet?.scanPatternLength || 0))}i`,
+			`travelMode=${optimizationInfluxString(fleet?.moveType)}`,
+			`moveWhileScanning=${fleet?.scanMove ? 'true' : 'false'}`,
+			`minimumProbability=${Number(fleet?.scanMin || 0)}`,
+			`instantStrikeOutBelow=${Number(fleet?.scanMin2 || 0)}`,
+			`instantStrikeOutOnSuccessBelow=${Number(fleet?.scanMin3 || 0)}`,
+			`searchDistance=${Math.round(Number(fleet?.scanSearchDist || 0))}i`,
+			`clusterFactor=${Number(fleet?.scanClusterFactor || 0)}`,
+			`neighborhoodMinimumGood=${Math.round(Number(fleet?.scanNeighborhoodMinGood || 0))}i`,
+			`checkWhileCooldownLeft=${Number(fleet?.scanCheckWhileCooldownLeft || 0)}`,
+			`bypassPercent=${Number(fleet?.scanBypassPercent || 0)}`,
+			`homeAtFuelDistancePercent=${Number(fleet?.scanHomeAtPercent || 0)}`,
+			`scanStrikeCount=${Math.round(Number(globalSettings?.scanStrikeCount || 0))}i`,
+			`scanSectorRegenerationSeconds=${Math.round(Number(globalSettings?.scanSectorRegenTime || 0))}i`,
+			`scanPauseSeconds=${Math.round(Number(globalSettings?.scanPauseTime || 0))}i`,
+			`scanResupplyOnLowFuel=${globalSettings?.scanResupplyOnLowFuel ? 'true' : 'false'}`,
+			`scanBlockResetAfterResupply=${globalSettings?.scanBlockResetAfterResupply ? 'true' : 'false'}`,
+			`sectorX=${Number(startCoords[0] || 0)}`,
+			`sectorY=${Number(startCoords[1] || 0)}`
+		].join(',');
+	}
+
+	function sendScanningOptimizationEvent(fleet, eventType, extraFields = '', extraTags = '') {
+		if(!fleet?.scanOptimizationEnabled || !fleet?.scanOptimizationExperimentId) return;
+		const status = eventType === 'transaction' && extraFields.includes('success=false') ? 'error' : 'ok';
+		const tags = `optimization_type=scanning,phase=baseline_collection,event_type=${influxEscape(eventType)},variant=baseline,instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(fleet.label || 'unknown')},status=${status}${extraTags}`;
+		const fields = buildScanningOptimizationParameterFields(fleet) + (extraFields ? `,${extraFields}` : '');
+		void sendToInflux(`optimization_event,${tags} ${fields}`, 'optimization').catch(error => {
+			cLog(1, `${FleetTimeStamp(fleet.label)} optimization telemetry failed`, error);
+		});
+	}
+
 	function getCustomInstructionErrorCode(instructionError, logMessages) {
 		let errorDetail = Array.isArray(instructionError) ? instructionError[1] : instructionError;
 		if (typeof errorDetail === 'number') return errorDetail;
@@ -7976,6 +8021,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 				if(tryCount > 1) cLog(3, `${FleetTimeStamp(fleetName)} Got txResult in ${tryCount} tries`, txResult);
 				annotateSlyaTxCost(txResult);
+				if(txResult) txResult.slyaTxHash = txHash || '';
 				cLog(4, `${FleetTimeStamp(fleetName)} txResult`, txResult);
 				cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> CONFIRM ✅ ${confirmationTimeStr}`);
 				confirmed = true;
@@ -7988,6 +8034,15 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				let statGroup = ((confirmation && confirmation.value && confirmation.value.err && confirmation.value.err.InstructionError) || (txResult && txResult.meta && txResult.meta.err && txResult.meta.err.InstructionError)) ? 'Txs IxErrors' : 'Txs Confirmed'; //statsadd
 				await alterStats(statGroup,opName,fullMsTaken/1000,'Seconds',1); //statsadd
 				await alterFees(fullMsTaken/1000, opName); //autofee
+				sendScanningOptimizationEvent(fleet, 'transaction', [
+					`operation=${optimizationInfluxString(opName)}`,
+					`signature=${optimizationInfluxString(txHash || '')}`,
+					`success=${instructionError || txResult?.meta?.err ? 'false' : 'true'}`,
+					`durationMs=${Math.round(fullMsTaken)}i`,
+					`txFeeLamports=${Math.round(getSlyaTxFeeLamports(txResult))}i`,
+					`txCostSol=${getSlyaTxCostSol(txResult)}`,
+					`error=${optimizationInfluxString(instructionError || txResult?.meta?.err ? JSON.stringify(instructionError || txResult.meta.err) : '')}`
+				].join(','), `,operation=${influxEscape(opName || 'unknown')}`);
 
 				if(!instructionError && !(txResult?.meta?.err)) {
 					try { await applyConfirmedCargoTelemetry(ix, fleet); }
@@ -10258,6 +10313,26 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			fleetLabel.innerHTML = fleet.label;
 			let fleetLabelTd = document.createElement('td');
 			fleetLabelTd.appendChild(fleetLabel);
+			let scanOptimizationDiv = document.createElement('div');
+			scanOptimizationDiv.className = 'scan-optimization-control';
+			scanOptimizationDiv.style.display = fleetParsedData && fleetParsedData.assignment == 'Scan' ? 'block' : 'none';
+			scanOptimizationDiv.style.marginTop = '4px';
+			let scanOptimizationLabel = document.createElement('label');
+			scanOptimizationLabel.title = 'Collect baseline scanning transactions and results in the optimization bucket. This does not change parameters.';
+			scanOptimizationLabel.innerHTML = 'Start Optimization ';
+			let scanOptimization = document.createElement('input');
+			scanOptimization.className = 'scan-optimization-toggle';
+			scanOptimization.setAttribute('type', 'checkbox');
+			scanOptimization.checked = !!(fleetParsedData && fleetParsedData.scanOptimizationEnabled);
+			scanOptimizationLabel.appendChild(scanOptimization);
+			scanOptimizationDiv.appendChild(scanOptimizationLabel);
+			if(scanOptimization.checked && fleetParsedData.scanOptimizationExperimentId) {
+				let scanOptimizationStatus = document.createElement('small');
+				scanOptimizationStatus.style.display = 'block';
+				scanOptimizationStatus.innerText = 'Baseline collection · ' + fleetParsedData.scanOptimizationExperimentId.slice(-8);
+				scanOptimizationDiv.appendChild(scanOptimizationStatus);
+			}
+			fleetLabelTd.appendChild(scanOptimizationDiv);
 
 			let assistAssignments = ['','Scan','Mine','Transport','Supply Chain'];
 			let assignmentOptionsStr = '';
@@ -10878,6 +10953,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 			fleetAssignment.onchange = function() {
 					if (fleetAssignment.value == 'Scan') {
+							scanOptimizationDiv.style.display = 'block';
 							scanRow.style.display = 'table-row';
 							scanRow2.style.display = 'table-row';
 							mineRow.style.display = 'none';
@@ -10889,6 +10965,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 							fleetDestCoordSelect.style.display = 'none';
 							fleetSubwarpPref.style.display = 'inline-block';
 					} else if (fleetAssignment.value == 'Mine') {
+							scanOptimizationDiv.style.display = 'none';
 							mineRow.style.display = 'table-row';
 							scanRow.style.display = 'none';
 							scanRow2.style.display = 'none';
@@ -10900,6 +10977,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 							fleetDestCoordSelect.style.display = 'inline-block';
 							fleetSubwarpPref.style.display = 'inline-block';
 					} else if (fleetAssignment.value == 'Transport') {
+							scanOptimizationDiv.style.display = 'none';
 							transportRow.style.display = 'table-row';
 							scanRow.style.display = 'none';
 							scanRow2.style.display = 'none';
@@ -10911,6 +10989,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 							fleetDestCoordSelect.style.display = 'inline-block';
 							fleetSubwarpPref.style.display = 'inline-block';
 					} else if (fleetAssignment.value == 'Supply Chain') {
+							scanOptimizationDiv.style.display = 'none';
 							transportPlusRow.style.display = 'table-row';
 							transportRow.style.display = 'none';
 							scanRow.style.display = 'none';
@@ -10922,6 +11001,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 							fleetDestCoordSelect.style.display = 'inline-block';
 							fleetSubwarpPref.style.display = 'none';
 					} else {
+							scanOptimizationDiv.style.display = 'none';
 							scanRow.style.display = 'none';
 							scanRow2.style.display = 'none';
 							mineRow.style.display = 'none';
@@ -11561,6 +11641,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let scanMin = parseInt(scanRows[i].children[1].children[0].children[1].value) || 0;
 			let scanMin2 = parseInt(scanRows[i].children[1].children[0].children[3].value) || 0;
 			let scanMove = scanRows[i].children[2].children[0].children[1].checked;
+			let scanOptimizationEnabled = fleetAssignment == 'Scan' && !!row.querySelector('.scan-optimization-toggle')?.checked;
+			let scanOptimizationExperimentId = scanOptimizationEnabled
+				? (fleetParsedData.scanOptimizationEnabled && fleetParsedData.scanOptimizationExperimentId
+					? fleetParsedData.scanOptimizationExperimentId
+					: `scan-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`)
+				: '';
 
 			let scanMin3 = parseInt(scanRows2[i].children[1].children[0].children[1].value) || 0;
 			let scanPattern = scanRows2[i].children[1].children[0].children[3].value;
@@ -11715,6 +11801,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					scanPattern: scanPattern,
 					scanPatternLength: scanPatternLength,
 					scanMove: scanMove,
+					scanOptimizationEnabled: scanOptimizationEnabled,
+					scanOptimizationExperimentId: scanOptimizationExperimentId,
 					scanEnd: fleetScanEnd
 				};
 				const fleetSaveStart = slyaPerfNowMs();
@@ -11753,6 +11841,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				userFleets[userFleetIndex].scanPattern = scanPattern;
 				userFleets[userFleetIndex].scanPatternLength = scanPatternLength;
 				userFleets[userFleetIndex].scanMove = scanMove;
+				userFleets[userFleetIndex].scanOptimizationEnabled = scanOptimizationEnabled;
+				userFleets[userFleetIndex].scanOptimizationExperimentId = scanOptimizationExperimentId;
 				userFleets[userFleetIndex].scanBlockIdx = scanMove ? userFleets[userFleetIndex].scanBlockIdx : 0;
 			}
 		}
@@ -12968,6 +13058,18 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			const sduStarbaseCoords = ConvertCoords(userFleets[i].starbaseCoord);
 			const sduStarbaseContext = await getTelemetryStarbaseContextFromCoords(sduStarbaseCoords[0], sduStarbaseCoords[1]);
 			await sendToInflux(`sdu,instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},starbase=${influxEscape(sduStarbaseContext.starbaseName || 'unknown')},fleet=${influxEscape(userFleets[i].label)},sectorX=${fleetCoords[0]},sectorY=${fleetCoords[1]} amount=${sduFound},burnedFood=${burnedFood},chance=${scanCondition},cargoRoomLeft=${userFleets[i].cargoCapacity - cargoCnt - sduFound}${buildSlyaTxCostInfluxFields(scanResult)}`);
+			sendScanningOptimizationEvent(userFleets[i], 'scan_result', [
+				`signature=${optimizationInfluxString(scanResult?.slyaTxHash || '')}`,
+				`success=${scanResult && !scanResult?.meta?.err ? 'true' : 'false'}`,
+				`sduFound=${Number(sduFound || 0)}`,
+				`burnedFood=${Number(burnedFood || 0)}`,
+				`chance=${Number(scanCondition || 0)}`,
+				`cargoRoomLeft=${Number(userFleets[i].cargoCapacity - cargoCnt - sduFound)}`,
+				`struckOut=${struckOut ? 'true' : 'false'}`,
+				`scanStrikes=${Math.round(Number(userFleets[i].scanStrikes || 0))}i`,
+				`resultSectorX=${Number(fleetCoords[0] || 0)}`,
+				`resultSectorY=${Number(fleetCoords[1] || 0)}`
+			].join(','));
 
 		}
 		else if (!moved && Date.now() < userFleets[i].scanEnd && userFleets[i].state == 'Idle') {
@@ -12982,9 +13084,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		return val.replaceAll("\\","\\\\").replaceAll(" ","\\ ").replaceAll(",","\\,").replaceAll("=","\\=");
 	}
 
-	function buildInfluxWriteUrl() {
+	function buildInfluxWriteUrl(bucketOverride = '') {
 		const rawUrl = String(globalSettings?.influxURL || '').trim();
-		const bucket = String(globalSettings?.influxDB || '').trim();
+		const bucket = String(bucketOverride || globalSettings?.influxDB || '').trim();
 		if (!rawUrl || !bucket) return rawUrl;
 		try {
 			const url = new URL(rawUrl);
@@ -13000,12 +13102,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		}
 	}
 
-	async function sendToInflux(msg) {
+	async function sendToInflux(msg, bucketOverride = '') {
 		if(!globalSettings.influxURL.length) return;
 		let message = '';
 		try {
 			cLog(2, 'Sending message to influx:', msg);
-			const influxWriteUrl = buildInfluxWriteUrl();
+			const influxWriteUrl = buildInfluxWriteUrl(bucketOverride);
 			const response = await fetch(influxWriteUrl, {
 				method: "POST",
 				body: msg,
@@ -16491,6 +16593,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				let fleetScanHomeAtPercent = fleetParsedData && fleetParsedData.scanHomeAtPercent ? fleetParsedData.scanHomeAtPercent : 0;
 				//let fleetScanMove = fleetParsedData && fleetParsedData.scanMove == 'false' || false ? false : true;
 				let fleetScanMove = fleetParsedData && fleetParsedData.scanMove;
+				let fleetScanOptimizationEnabled = !!(fleetParsedData && fleetParsedData.assignment == 'Scan' && fleetParsedData.scanOptimizationEnabled);
+				let fleetScanOptimizationExperimentId = fleetScanOptimizationEnabled ? String(fleetParsedData.scanOptimizationExperimentId || '') : '';
 				let fleetMineResource = fleetParsedData && fleetParsedData.mineResource ? fleetParsedData.mineResource : '';
 				let fleetStarbase = fleetParsedData && fleetParsedData.starbase ? fleetParsedData.starbase : '';
 				let fleetMoveType = fleetParsedData && fleetParsedData.moveType ? fleetParsedData.moveType : 'warp';
@@ -16598,6 +16702,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					scanBypassPercent: fleetScanBypassPercent,
 					scanHomeAtPercent: fleetScanHomeAtPercent,
 					scanMove: fleetScanMove,
+					scanOptimizationEnabled: fleetScanOptimizationEnabled,
+					scanOptimizationExperimentId: fleetScanOptimizationExperimentId,
 					foodCnt: currentFoodCnt ? currentFoodCnt.account.data.parsed.info.tokenAmount.uiAmount : 0,
 					sduCnt: currentSduCnt ? currentSduCnt.account.data.parsed.info.tokenAmount.uiAmount : 0,
 					fuelCnt: currentFuelCnt ? currentFuelCnt.account.data.parsed.info.tokenAmount.uiAmount : 0,
