@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-200
+// @aephia-version 0.7.35-201
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-200'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-201'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -869,8 +869,9 @@
 			const phantomLowBuffer = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
 			const phantomUpgradeEligible = !phantomInventoryBlocked;
 			const displayName = name + (phantomInventoryBlocked ? ' (blocked)' : '');
-			const phantomNumberStyle = (phantomInventoryBlocked || phantomLowBuffer) ? ' style="color:#ff8080"' : '';
-			html += '<tr><td style="padding-left:18px">' + displayName + '</td><td align="right">' + Math.round(upgrade).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + Math.round(inventory).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + (bufferDaysPhantom === null ? '' : Number(bufferDaysPhantom).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td><td align="right">' + Math.round(craft).toLocaleString() + '</td><td align="right">' + Math.round(inventoryGlobal).toLocaleString() + '</td><td align="right">' + Math.round(plannedDrain).toLocaleString() + '</td><td align="right">' + Math.round(observedDrain).toLocaleString() + '</td><td align="right">' + Math.round(effectiveDrain).toLocaleString() + '</td><td align="right">' + (!phantomUpgradeEligible || bufferDaysGlobal === null ? '' : Number(bufferDaysGlobal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td></tr>';
+			const phantomInventoryStyle = phantomInventoryBlocked ? ' style="color:#ff8080"' : '';
+			const phantomBufferStyle = phantomLowBuffer ? ' style="color:#ff8080"' : '';
+			html += '<tr><td style="padding-left:18px">' + displayName + '</td><td align="right">' + Math.round(upgrade).toLocaleString() + '</td><td align="right"' + phantomInventoryStyle + '>' + Math.round(inventory).toLocaleString() + '</td><td align="right"' + phantomBufferStyle + '>' + (bufferDaysPhantom === null ? '' : Number(bufferDaysPhantom).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td><td align="right">' + Math.round(craft).toLocaleString() + '</td><td align="right">' + Math.round(inventoryGlobal).toLocaleString() + '</td><td align="right">' + Math.round(plannedDrain).toLocaleString() + '</td><td align="right">' + Math.round(observedDrain).toLocaleString() + '</td><td align="right">' + Math.round(effectiveDrain).toLocaleString() + '</td><td align="right">' + (!phantomUpgradeEligible || bufferDaysGlobal === null ? '' : Number(bufferDaysGlobal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td></tr>';
 		}
 		return html;
 	}
@@ -3014,10 +3015,13 @@
 	async function getUpgradeAutomationFreshInventoryForStart(slot) {
 		const coordinates = String(slot?.coordinates || '').trim();
 		const component = String(slot?.item || '').trim();
-		if(!coordinates || !component) return 0;
-		const starbase = await getStarbaseData(coordinates);
-		const starbasePlayer = await getStarbasePlayerData(starbase);
-		const cargo = await getCargoHoldsTokenAccounts(starbasePlayer);
+		const coordParts = coordinates.split(',').map(value => Number.parseInt(String(value).trim(), 10));
+		if(coordParts.length !== 2 || !coordParts.every(Number.isFinite) || !component) throw new Error('invalid_upgrade_start_inventory_context');
+		const starbase = await getStarbaseFromCoords(coordParts[0], coordParts[1], true);
+		if(!starbase?.publicKey || !userProfileAcct) throw new Error('upgrade_start_starbase_unavailable');
+		const starbasePlayer = await getStarbasePlayer(userProfileAcct, starbase.publicKey);
+		if(!starbasePlayer) throw new Error('upgrade_start_starbase_player_unavailable');
+		const cargo = await getStarbasePlayerCargoHolds(starbasePlayer);
 		const inventory = extractInventoryFromCargo(cargo);
 		return Math.max(0, Math.floor(getUpgradeAutomationComponentValue(inventory, component)));
 	}
@@ -5211,12 +5215,16 @@
 		};
 		const byMint = {};
 		for (const rec of (starbasePlayerCargoHoldsAndTokens || [])) {
-			const mint = rec?.tokenAcct?.account?.mint?.toString?.() || rec?.mint?.toString?.() || '';
-			const amount = Number(rec?.tokenAcct?.account?.amount || rec?.amount || 0);
-			if (!mint) continue;
-			byMint[mint] = (byMint[mint] || 0) + (Number.isFinite(amount) ? amount : 0);
+			const tokens = Array.isArray(rec?.cargoHoldTokens) ? rec.cargoHoldTokens : [rec];
+			for (const token of tokens) {
+				const mint = token?.tokenAcct?.account?.mint?.toString?.() || token?.mint?.toString?.() || '';
+				const amount = Number(token?.tokenAcct?.account?.amount || token?.amount || 0);
+				if (!mint) continue;
+				byMint[mint] = (byMint[mint] || 0) + (Number.isFinite(amount) ? amount : 0);
+			}
 		}
-		for (const r of (allRes || [])) {
+		const resourceCatalogue = typeof allRes !== 'undefined' && Array.isArray(allRes) ? allRes : (Array.isArray(cargoItems) ? cargoItems : []);
+		for (const r of resourceCatalogue) {
 			const name = r?.name;
 			if (!(name in inv)) continue;
 			const mint = r?.token?.toString?.() || r?.token;
@@ -5385,9 +5393,11 @@
 				if (p && typeof userData !== 'undefined' && userData?.profile?.publicKey?.toString?.() === p) {
 					const phantomFleet = (userFleets || []).find(f => (f?.label || '').toLowerCase().includes('phantom'));
 					if (phantomFleet) {
-						const sb = await getStarbaseData(phantomFleet.destCoord || phantomFleet.starbaseCoord);
-						const sp = await getStarbasePlayerData(sb);
-						const cargo = await getCargoHoldsTokenAccounts(sp);
+						const coordParts = String(phantomFleet.destCoord || phantomFleet.starbaseCoord || '').split(',').map(value => Number.parseInt(String(value).trim(), 10));
+						if(coordParts.length !== 2 || !coordParts.every(Number.isFinite)) throw new Error('invalid_phantom_inventory_coordinates');
+						const sb = await getStarbaseFromCoords(coordParts[0], coordParts[1], true);
+						const sp = await getStarbasePlayer(userProfileAcct, sb.publicKey);
+						const cargo = await getStarbasePlayerCargoHolds(sp);
 						inventory = extractInventoryFromCargo(cargo);
 						const totalCrew = Number(sp?.account?.totalCrew || 0);
 						const busyCrew = Number(sp?.account?.busyCrew || 0);

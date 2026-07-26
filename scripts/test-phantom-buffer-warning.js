@@ -40,7 +40,8 @@ vm.runInContext(`
 
 const lowBufferHtml = context.renderRows({}, { Framework: 100 }, { Framework: 25 }, { Framework: 1000 }, {});
 assert.match(lowBufferHtml, /Framework/);
-assert.match(lowBufferHtml, /color:#ff8080/, 'a Phantom buffer below 0.5 remains a red numeric warning');
+assert.match(lowBufferHtml, /align="right">25<\/td><td align="right" style="color:#ff8080">0\.25<\/td>/,
+  'positive Phantom inventory stays white while its low Buffer Days value is red');
 assert.doesNotMatch(lowBufferHtml, /<span style="color:#ff8080">Framework/, 'a low-buffer component name stays white');
 assert.doesNotMatch(lowBufferHtml, /Framework \(blocked\)/, 'a low positive Phantom buffer is not labelled blocked');
 
@@ -64,5 +65,26 @@ vm.runInContext(`
 assert.equal(context.capStartAmount(100, 25), 25, 'scheduler uses all available inventory when it is below the planned amount');
 assert.equal(context.capStartAmount(100, 0), 0, 'scheduler does not start with zero inventory');
 assert.equal(context.capStartAmount(100, 150), 100, 'scheduler does not exceed its planned amount');
+
+const freshInventoryReader = extractFunction('getUpgradeAutomationFreshInventoryForStart');
+assert.match(freshInventoryReader, /getStarbaseFromCoords\(/, 'JIT inventory uses the standalone starbase lookup');
+assert.match(freshInventoryReader, /getStarbasePlayer\(/, 'JIT inventory uses the standalone starbase-player lookup');
+assert.match(freshInventoryReader, /getStarbasePlayerCargoHolds\(/, 'JIT inventory uses the standalone cargo lookup');
+assert.doesNotMatch(freshInventoryReader, /getStarbaseData|getStarbasePlayerData|getCargoHoldsTokenAccounts/,
+  'JIT inventory does not reference APIs absent from standalone SLYA');
+
+const inventoryContext = {
+  cargoItems: [{ name: 'Framework', token: 'framework-mint' }],
+  allRes: undefined
+};
+vm.createContext(inventoryContext);
+vm.runInContext(`
+  ${extractFunction('extractInventoryFromCargo')}
+  this.extractInventory = extractInventoryFromCargo;
+`, inventoryContext);
+const extractedInventory = inventoryContext.extractInventory([{
+  cargoHoldTokens: [{ mint: 'framework-mint', amount: 17 }]
+}]);
+assert.equal(extractedInventory.Framework, 17, 'standalone nested cargo holds are mapped through cargoItems without allRes');
 
 console.log('phantom inventory safety tests passed');
