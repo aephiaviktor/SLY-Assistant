@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-195
+// @aephia-version 0.7.35-197
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-195'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-197'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -10364,18 +10364,33 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			scanOptimizationDiv.style.display = fleetParsedData && fleetParsedData.assignment == 'Scan' ? 'block' : 'none';
 			scanOptimizationDiv.style.marginTop = '4px';
 			let scanOptimizationLabel = document.createElement('label');
-			scanOptimizationLabel.title = 'Collect baseline scanning transactions and results in the optimization bucket. This does not change parameters.';
-			scanOptimizationLabel.innerHTML = 'Start Optimization ';
+			scanOptimizationLabel.title = 'Record scanning transactions and results in the optimization bucket without changing parameters.';
+			scanOptimizationLabel.innerHTML = 'Record Data ';
 			let scanOptimization = document.createElement('input');
 			scanOptimization.className = 'scan-optimization-toggle';
 			scanOptimization.setAttribute('type', 'checkbox');
 			scanOptimization.checked = !!(fleetParsedData && fleetParsedData.scanOptimizationEnabled);
 			scanOptimizationLabel.appendChild(scanOptimization);
 			scanOptimizationDiv.appendChild(scanOptimizationLabel);
+			let scanOptimizationRunLabel = document.createElement('label');
+			scanOptimizationRunLabel.title = 'Run automatic parameter experiments while Record Data is enabled.';
+			scanOptimizationRunLabel.innerHTML = ' Start Optimization ';
+			let scanOptimizationRun = document.createElement('input');
+			scanOptimizationRun.className = 'scan-optimization-run-toggle';
+			scanOptimizationRun.setAttribute('type', 'checkbox');
+			scanOptimizationRun.checked = !!(fleetParsedData && fleetParsedData.scanOptimizationRunEnabled);
+			const syncScanningOptimizationControls = () => {
+				scanOptimizationRun.disabled = !scanOptimization.checked;
+				if(scanOptimizationRun.disabled) scanOptimizationRun.checked = false;
+			};
+			scanOptimization.addEventListener('change', syncScanningOptimizationControls);
+			syncScanningOptimizationControls();
+			scanOptimizationRunLabel.appendChild(scanOptimizationRun);
+			scanOptimizationDiv.appendChild(scanOptimizationRunLabel);
 			if(scanOptimization.checked && fleetParsedData.scanOptimizationExperimentId) {
 				let scanOptimizationStatus = document.createElement('small');
 				scanOptimizationStatus.style.display = 'block';
-				scanOptimizationStatus.innerText = 'Baseline collection · ' + fleetParsedData.scanOptimizationExperimentId.slice(-8);
+				scanOptimizationStatus.innerText = 'Recording · ' + fleetParsedData.scanOptimizationExperimentId.slice(-8);
 				scanOptimizationDiv.appendChild(scanOptimizationStatus);
 			}
 			fleetLabelTd.appendChild(scanOptimizationDiv);
@@ -11688,6 +11703,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let scanMin2 = parseInt(scanRows[i].children[1].children[0].children[3].value) || 0;
 			let scanMove = scanRows[i].children[2].children[0].children[1].checked;
 			let scanOptimizationEnabled = fleetAssignment == 'Scan' && !!row.querySelector('.scan-optimization-toggle')?.checked;
+			let scanOptimizationRunEnabled = scanOptimizationEnabled && !!row.querySelector('.scan-optimization-run-toggle')?.checked;
 			let scanOptimizationExperimentId = scanOptimizationEnabled
 				? (fleetParsedData.scanOptimizationEnabled && fleetParsedData.scanOptimizationExperimentId
 					? fleetParsedData.scanOptimizationExperimentId
@@ -11849,6 +11865,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					scanMove: scanMove,
 					scanOptimizationEnabled: scanOptimizationEnabled,
 					scanOptimizationExperimentId: scanOptimizationExperimentId,
+					scanOptimizationRunEnabled: scanOptimizationRunEnabled,
 					scanEnd: fleetScanEnd
 				};
 				const fleetSaveStart = slyaPerfNowMs();
@@ -11889,6 +11906,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				userFleets[userFleetIndex].scanMove = scanMove;
 				userFleets[userFleetIndex].scanOptimizationEnabled = scanOptimizationEnabled;
 				userFleets[userFleetIndex].scanOptimizationExperimentId = scanOptimizationExperimentId;
+				userFleets[userFleetIndex].scanOptimizationRunEnabled = scanOptimizationRunEnabled;
 				userFleets[userFleetIndex].scanBlockIdx = scanMove ? userFleets[userFleetIndex].scanBlockIdx : 0;
 			}
 		}
@@ -16679,6 +16697,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				let fleetScanMove = fleetParsedData && fleetParsedData.scanMove;
 				let fleetScanOptimizationEnabled = !!(fleetParsedData && fleetParsedData.assignment == 'Scan' && fleetParsedData.scanOptimizationEnabled);
 				let fleetScanOptimizationExperimentId = fleetScanOptimizationEnabled ? String(fleetParsedData.scanOptimizationExperimentId || '') : '';
+				let fleetScanOptimizationRunEnabled = !!(fleetScanOptimizationEnabled && fleetParsedData.scanOptimizationRunEnabled);
 				let fleetMineResource = fleetParsedData && fleetParsedData.mineResource ? fleetParsedData.mineResource : '';
 				let fleetStarbase = fleetParsedData && fleetParsedData.starbase ? fleetParsedData.starbase : '';
 				let fleetMoveType = fleetParsedData && fleetParsedData.moveType ? fleetParsedData.moveType : 'warp';
@@ -16788,6 +16807,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					scanMove: fleetScanMove,
 					scanOptimizationEnabled: fleetScanOptimizationEnabled,
 					scanOptimizationExperimentId: fleetScanOptimizationExperimentId,
+					scanOptimizationRunEnabled: fleetScanOptimizationRunEnabled,
 					foodCnt: currentFoodCnt ? currentFoodCnt.account.data.parsed.info.tokenAmount.uiAmount : 0,
 					sduCnt: currentSduCnt ? currentSduCnt.account.data.parsed.info.tokenAmount.uiAmount : 0,
 					fuelCnt: currentFuelCnt ? currentFuelCnt.account.data.parsed.info.tokenAmount.uiAmount : 0,
