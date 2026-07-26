@@ -41,12 +41,25 @@ vm.runInContext(`
 const lowBufferHtml = context.renderRows({}, { Framework: 100 }, { Framework: 25 }, { Framework: 1000 }, {});
 assert.match(lowBufferHtml, /Framework/);
 assert.match(lowBufferHtml, /color:#ff8080/, 'a Phantom buffer below 0.5 remains a red warning');
-assert.doesNotMatch(lowBufferHtml, /\(blocked\)/, 'a low Phantom buffer is no longer labelled blocked');
+assert.doesNotMatch(lowBufferHtml, /Framework \(blocked\)/, 'a low positive Phantom buffer is not labelled blocked');
+
+const zeroInventoryHtml = context.renderRows({}, { Framework: 100 }, { Framework: 0 }, { Framework: 1000 }, {});
+assert.match(zeroInventoryHtml, /Framework \(blocked\)/, 'zero Phantom inventory is visibly blocked');
 
 const neutralPlan = extractFunction('computeUpgradeAutomationNeutralPlan');
-assert.match(neutralPlan, /const phantomUpgradeEligible = inventoryPhantom > 0;/,
+assert.match(neutralPlan, /const phantomInventoryBlocked = inventoryPhantom <= 0;/,
+  'zero Phantom inventory has an explicit optimizer block');
+assert.match(neutralPlan, /const phantomUpgradeEligible = !phantomInventoryBlocked;/,
   'positive Phantom inventory remains optimizer-eligible regardless of buffer days');
 assert.doesNotMatch(neutralPlan, /phantomUpgradeEligible = inventoryPhantom > 0 && !phantomBlocked/,
   'the 0.5 Phantom buffer threshold must not block optimizer allocation');
 
-console.log('phantom buffer warning tests passed');
+vm.runInContext(`
+  ${extractFunction('getUpgradeAutomationCappedStartAmount')}
+  this.capStartAmount = getUpgradeAutomationCappedStartAmount;
+`, context);
+assert.equal(context.capStartAmount(100, 25), 25, 'scheduler uses all available inventory when it is below the planned amount');
+assert.equal(context.capStartAmount(100, 0), 0, 'scheduler does not start with zero inventory');
+assert.equal(context.capStartAmount(100, 150), 100, 'scheduler does not exceed its planned amount');
+
+console.log('phantom inventory safety tests passed');
