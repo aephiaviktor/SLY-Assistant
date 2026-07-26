@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-197
+// @aephia-version 0.7.35-198
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-197'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-198'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -8382,6 +8382,49 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		].join(',');
 	}
 
+	const SCANNING_OPTIMIZATION_PARAMETERS = Object.freeze([
+		['scanMin', 'Minimum Probability'],
+		['scanMin2', 'Instant Strike Out Below'],
+		['scanMin3', 'Instant S/O Below (Success)'],
+		['scanSearchDist', 'Search Distance'],
+		['scanClusterFactor', 'Cluster/Distance'],
+		['scanNeighborhoodMinGood', 'Neighbor Min Good'],
+		['scanCheckWhileCooldownLeft', 'Check Cooldown Left %'],
+		['scanBypassPercent', 'Bypass %'],
+		['scanHomeAtPercent', 'Home at Fuel/Distance %'],
+		['scanPatternLength', 'Override Pattern Length']
+	]);
+
+	function buildScanningOptimizationValues(start, end, step) {
+		const first = Number(start);
+		const last = Number(end);
+		const increment = Math.abs(Number(step));
+		if(!Number.isFinite(first) || !Number.isFinite(last) || !Number.isFinite(increment) || increment <= 0) return [];
+		const direction = last >= first ? 1 : -1;
+		const values = [];
+		for(let value = first; direction > 0 ? value <= last : value >= last; value += direction * increment) {
+			values.push(Number(value.toFixed(8)));
+			if(values.length >= 20) break;
+		}
+		return values;
+	}
+
+	function buildScanningOptimizationSchedule(values, scansPerBlock, scansPerValue, random = Math.random) {
+		const blockSize = Math.max(1, Math.floor(Number(scansPerBlock)));
+		const target = Math.max(blockSize, Math.floor(Number(scansPerValue)));
+		if(!Array.isArray(values) || !values.length || target % blockSize !== 0) return [];
+		const schedule = [];
+		for(let round = 0; round < target / blockSize; round++) {
+			const shuffled = [...values];
+			for(let i = shuffled.length - 1; i > 0; i--) {
+				const j = Math.floor(random() * (i + 1));
+				[shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+			}
+			for(const value of shuffled) schedule.push({ value, scans: blockSize });
+		}
+		return schedule;
+	}
+
 	function sendScanningOptimizationEvent(fleet, eventType, extraFields = '', extraTags = '') {
 		if(!fleet?.scanOptimizationEnabled || !fleet?.scanOptimizationExperimentId) return;
 		const status = eventType === 'transaction' && extraFields.includes('success=false') ? 'error' : 'ok';
@@ -11046,14 +11089,48 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			scanOptimizationRun.className = 'scan-optimization-run-toggle';
 			scanOptimizationRun.setAttribute('type', 'checkbox');
 			scanOptimizationRun.checked = !!(fleetParsedData && fleetParsedData.scanOptimizationRunEnabled);
+			let scanOptimizationConfig = document.createElement('div');
+			scanOptimizationConfig.className = 'scan-optimization-config';
+			scanOptimizationConfig.style.marginTop = '4px';
+			let scanOptimizationParameter = document.createElement('select');
+			scanOptimizationParameter.className = 'scan-optimization-parameter';
+			for(const [key, label] of SCANNING_OPTIMIZATION_PARAMETERS) scanOptimizationParameter.add(new Option(label, key));
+			scanOptimizationParameter.value = fleetParsedData.scanOptimizationParameter || 'scanMin';
+			const createOptimizationNumberInput = (className, value, title) => {
+				const input = document.createElement('input');
+				input.type = 'number'; input.className = className; input.value = value; input.title = title; input.style.width = '45px';
+				return input;
+			};
+			const configuredParameterValue = Number(fleetParsedData[scanOptimizationParameter.value] || 0);
+			let scanOptimizationStart = createOptimizationNumberInput('scan-optimization-start', fleetParsedData.scanOptimizationStart ?? configuredParameterValue, 'Start value');
+			let scanOptimizationEnd = createOptimizationNumberInput('scan-optimization-end', fleetParsedData.scanOptimizationEnd ?? configuredParameterValue + 5, 'End value');
+			let scanOptimizationStep = createOptimizationNumberInput('scan-optimization-step', fleetParsedData.scanOptimizationStep ?? 1, 'Step');
+			let scanOptimizationScansPerBlock = createOptimizationNumberInput('scan-optimization-scans-per-block', fleetParsedData.scanOptimizationScansPerBlock ?? 10, 'Scans per randomized block');
+			let scanOptimizationScansPerValue = createOptimizationNumberInput('scan-optimization-scans-per-value', fleetParsedData.scanOptimizationScansPerValue ?? 50, 'Target scans per value');
+			let scanOptimizationSummary = document.createElement('small');
+			scanOptimizationSummary.style.display = 'block';
+			for(const node of [scanOptimizationParameter, document.createTextNode(' from '), scanOptimizationStart, document.createTextNode(' to '), scanOptimizationEnd, document.createTextNode(' step '), scanOptimizationStep, document.createTextNode(' · block '), scanOptimizationScansPerBlock, document.createTextNode(' · per value '), scanOptimizationScansPerValue, scanOptimizationSummary]) scanOptimizationConfig.appendChild(node);
+			const refreshScanningOptimizationSummary = () => {
+				const values = buildScanningOptimizationValues(scanOptimizationStart.value, scanOptimizationEnd.value, scanOptimizationStep.value);
+				const schedule = buildScanningOptimizationSchedule(values, scanOptimizationScansPerBlock.value, scanOptimizationScansPerValue.value, () => 0.5);
+				const totalScans = schedule.reduce((sum, block) => sum + block.scans, 0);
+				const cooldown = Number(fleet?.account?.stats?.miscStats?.scanCoolDown || 0);
+				const hours = cooldown > 0 ? totalScans * cooldown / 3600 : 0;
+				scanOptimizationSummary.innerText = schedule.length ? `${values.length} values · ${schedule.length} blocks · ${totalScans} scans${hours ? ` · ~${hours.toFixed(1)} cooldown hours` : ''}` : 'Invalid range or scans/value must be divisible by block size';
+			};
+			for(const input of [scanOptimizationParameter, scanOptimizationStart, scanOptimizationEnd, scanOptimizationStep, scanOptimizationScansPerBlock, scanOptimizationScansPerValue]) input.addEventListener('change', refreshScanningOptimizationSummary);
+			refreshScanningOptimizationSummary();
 			const syncScanningOptimizationControls = () => {
 				scanOptimizationRun.disabled = !scanOptimization.checked;
 				if(scanOptimizationRun.disabled) scanOptimizationRun.checked = false;
+				scanOptimizationConfig.style.display = scanOptimizationRun.checked && !scanOptimizationRun.disabled ? 'block' : 'none';
 			};
 			scanOptimization.addEventListener('change', syncScanningOptimizationControls);
+			scanOptimizationRun.addEventListener('change', syncScanningOptimizationControls);
 			syncScanningOptimizationControls();
 			scanOptimizationRunLabel.appendChild(scanOptimizationRun);
 			scanOptimizationDiv.appendChild(scanOptimizationRunLabel);
+			scanOptimizationDiv.appendChild(scanOptimizationConfig);
 			if(scanOptimization.checked && fleetParsedData.scanOptimizationExperimentId) {
 				let scanOptimizationStatus = document.createElement('small');
 				scanOptimizationStatus.style.display = 'block';
@@ -12371,6 +12448,18 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let scanMove = scanRows[i].children[2].children[0].children[1].checked;
 			let scanOptimizationEnabled = fleetAssignment == 'Scan' && !!row.querySelector('.scan-optimization-toggle')?.checked;
 			let scanOptimizationRunEnabled = scanOptimizationEnabled && !!row.querySelector('.scan-optimization-run-toggle')?.checked;
+			let scanOptimizationParameter = row.querySelector('.scan-optimization-parameter')?.value || 'scanMin';
+			let scanOptimizationStart = Number(row.querySelector('.scan-optimization-start')?.value);
+			let scanOptimizationEnd = Number(row.querySelector('.scan-optimization-end')?.value);
+			let scanOptimizationStep = Math.abs(Number(row.querySelector('.scan-optimization-step')?.value));
+			let scanOptimizationScansPerBlock = Math.max(1, parseInt(row.querySelector('.scan-optimization-scans-per-block')?.value) || 10);
+			let scanOptimizationScansPerValue = Math.max(1, parseInt(row.querySelector('.scan-optimization-scans-per-value')?.value) || 50);
+			let scanOptimizationValues = buildScanningOptimizationValues(scanOptimizationStart, scanOptimizationEnd, scanOptimizationStep);
+			let scanOptimizationSchedule = buildScanningOptimizationSchedule(scanOptimizationValues, scanOptimizationScansPerBlock, scanOptimizationScansPerValue);
+			if(scanOptimizationRunEnabled && !scanOptimizationSchedule.length) {
+				scanOptimizationRunEnabled = false;
+				inputError('ERROR: Invalid scanning optimization schedule', 'Use a valid range and make scans/value divisible by block size', 1);
+			}
 			let scanOptimizationExperimentId = scanOptimizationEnabled
 				? (fleetParsedData.scanOptimizationEnabled && fleetParsedData.scanOptimizationExperimentId
 					? fleetParsedData.scanOptimizationExperimentId
@@ -12533,6 +12622,14 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					scanOptimizationEnabled: scanOptimizationEnabled,
 					scanOptimizationExperimentId: scanOptimizationExperimentId,
 					scanOptimizationRunEnabled: scanOptimizationRunEnabled,
+					scanOptimizationParameter: scanOptimizationParameter,
+					scanOptimizationStart: scanOptimizationStart,
+					scanOptimizationEnd: scanOptimizationEnd,
+					scanOptimizationStep: scanOptimizationStep,
+					scanOptimizationScansPerBlock: scanOptimizationScansPerBlock,
+					scanOptimizationScansPerValue: scanOptimizationScansPerValue,
+					scanOptimizationValues: scanOptimizationValues,
+					scanOptimizationSchedule: scanOptimizationSchedule,
 					scanEnd: fleetScanEnd
 				};
 				const fleetSaveStart = slyaPerfNowMs();
@@ -12574,6 +12671,14 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				userFleets[userFleetIndex].scanOptimizationEnabled = scanOptimizationEnabled;
 				userFleets[userFleetIndex].scanOptimizationExperimentId = scanOptimizationExperimentId;
 				userFleets[userFleetIndex].scanOptimizationRunEnabled = scanOptimizationRunEnabled;
+				userFleets[userFleetIndex].scanOptimizationParameter = scanOptimizationParameter;
+				userFleets[userFleetIndex].scanOptimizationStart = scanOptimizationStart;
+				userFleets[userFleetIndex].scanOptimizationEnd = scanOptimizationEnd;
+				userFleets[userFleetIndex].scanOptimizationStep = scanOptimizationStep;
+				userFleets[userFleetIndex].scanOptimizationScansPerBlock = scanOptimizationScansPerBlock;
+				userFleets[userFleetIndex].scanOptimizationScansPerValue = scanOptimizationScansPerValue;
+				userFleets[userFleetIndex].scanOptimizationValues = scanOptimizationValues;
+				userFleets[userFleetIndex].scanOptimizationSchedule = scanOptimizationSchedule;
 				userFleets[userFleetIndex].scanBlockIdx = scanMove ? userFleets[userFleetIndex].scanBlockIdx : 0;
 			}
 		}
@@ -17368,6 +17473,14 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				let fleetScanOptimizationEnabled = !!(fleetParsedData && fleetParsedData.assignment == 'Scan' && fleetParsedData.scanOptimizationEnabled);
 				let fleetScanOptimizationExperimentId = fleetScanOptimizationEnabled ? String(fleetParsedData.scanOptimizationExperimentId || '') : '';
 				let fleetScanOptimizationRunEnabled = !!(fleetScanOptimizationEnabled && fleetParsedData.scanOptimizationRunEnabled);
+				let fleetScanOptimizationParameter = String(fleetParsedData.scanOptimizationParameter || 'scanMin');
+				let fleetScanOptimizationStart = Number(fleetParsedData.scanOptimizationStart ?? 0);
+				let fleetScanOptimizationEnd = Number(fleetParsedData.scanOptimizationEnd ?? 5);
+				let fleetScanOptimizationStep = Number(fleetParsedData.scanOptimizationStep || 1);
+				let fleetScanOptimizationScansPerBlock = Math.max(1, Number(fleetParsedData.scanOptimizationScansPerBlock || 10));
+				let fleetScanOptimizationScansPerValue = Math.max(1, Number(fleetParsedData.scanOptimizationScansPerValue || 50));
+				let fleetScanOptimizationValues = Array.isArray(fleetParsedData.scanOptimizationValues) ? fleetParsedData.scanOptimizationValues : [];
+				let fleetScanOptimizationSchedule = Array.isArray(fleetParsedData.scanOptimizationSchedule) ? fleetParsedData.scanOptimizationSchedule : [];
 				let fleetMineResource = fleetParsedData && fleetParsedData.mineResource ? fleetParsedData.mineResource : '';
 				let fleetStarbase = fleetParsedData && fleetParsedData.starbase ? fleetParsedData.starbase : '';
 				let fleetMoveType = fleetParsedData && fleetParsedData.moveType ? fleetParsedData.moveType : 'warp';
@@ -17478,6 +17591,14 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					scanOptimizationEnabled: fleetScanOptimizationEnabled,
 					scanOptimizationExperimentId: fleetScanOptimizationExperimentId,
 					scanOptimizationRunEnabled: fleetScanOptimizationRunEnabled,
+					scanOptimizationParameter: fleetScanOptimizationParameter,
+					scanOptimizationStart: fleetScanOptimizationStart,
+					scanOptimizationEnd: fleetScanOptimizationEnd,
+					scanOptimizationStep: fleetScanOptimizationStep,
+					scanOptimizationScansPerBlock: fleetScanOptimizationScansPerBlock,
+					scanOptimizationScansPerValue: fleetScanOptimizationScansPerValue,
+					scanOptimizationValues: fleetScanOptimizationValues,
+					scanOptimizationSchedule: fleetScanOptimizationSchedule,
 					foodCnt: currentFoodCnt ? currentFoodCnt.account.data.parsed.info.tokenAmount.uiAmount : 0,
 					sduCnt: currentSduCnt ? currentSduCnt.account.data.parsed.info.tokenAmount.uiAmount : 0,
 					fuelCnt: currentFuelCnt ? currentFuelCnt.account.data.parsed.info.tokenAmount.uiAmount : 0,
