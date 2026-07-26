@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-201
+// @aephia-version 0.7.35-202
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-201'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-202'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2433,8 +2433,8 @@
 		const starbase = await getStarbaseFromCoords(coordParts[0], coordParts[1], true);
 		if(!starbase?.publicKey || !userProfileAcct) throw new Error('upgrade_start_starbase_unavailable');
 		const starbasePlayer = await getStarbasePlayer(userProfileAcct, starbase.publicKey);
-		if(!starbasePlayer) throw new Error('upgrade_start_starbase_player_unavailable');
-		const cargo = await getStarbasePlayerCargoHolds(starbasePlayer);
+		if(!starbasePlayer?.publicKey) throw new Error('upgrade_start_starbase_player_unavailable');
+		const cargo = await getStarbasePlayerCargoHolds(starbasePlayer.publicKey);
 		const inventory = extractInventoryFromCargo(cargo);
 		return Math.max(0, Math.floor(getUpgradeAutomationComponentValue(inventory, component)));
 	}
@@ -4746,7 +4746,8 @@
 						if(coordParts.length !== 2 || !coordParts.every(Number.isFinite)) throw new Error('invalid_phantom_inventory_coordinates');
 						const sb = await getStarbaseFromCoords(coordParts[0], coordParts[1], true);
 						const sp = await getStarbasePlayer(userProfileAcct, sb.publicKey);
-						const cargo = await getStarbasePlayerCargoHolds(sp);
+						if(!sp?.publicKey) throw new Error('phantom_starbase_player_unavailable');
+						const cargo = await getStarbasePlayerCargoHolds(sp.publicKey);
 						inventory = extractInventoryFromCargo(cargo);
 						const totalCrew = Number(sp?.account?.totalCrew || 0);
 						const busyCrew = Number(sp?.account?.busyCrew || 0);

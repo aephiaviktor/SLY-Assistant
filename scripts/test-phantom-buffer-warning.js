@@ -69,7 +69,8 @@ assert.equal(context.capStartAmount(100, 150), 100, 'scheduler does not exceed i
 const freshInventoryReader = extractFunction('getUpgradeAutomationFreshInventoryForStart');
 assert.match(freshInventoryReader, /getStarbaseFromCoords\(/, 'JIT inventory uses the standalone starbase lookup');
 assert.match(freshInventoryReader, /getStarbasePlayer\(/, 'JIT inventory uses the standalone starbase-player lookup');
-assert.match(freshInventoryReader, /getStarbasePlayerCargoHolds\(/, 'JIT inventory uses the standalone cargo lookup');
+assert.match(freshInventoryReader, /getStarbasePlayerCargoHolds\(starbasePlayer\.publicKey\)/,
+  'JIT inventory passes the StarbasePlayer public key to the standalone cargo lookup');
 assert.doesNotMatch(freshInventoryReader, /getStarbaseData|getStarbasePlayerData|getCargoHoldsTokenAccounts/,
   'JIT inventory does not reference APIs absent from standalone SLYA');
 
