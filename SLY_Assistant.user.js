@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-202
+// @aephia-version 0.7.35-203
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-202'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-203'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -3012,6 +3012,22 @@
 		);
 	}
 
+	function getUpgradeAutomationCargoAmountByMint(cargoHolds, componentMint) {
+		const mint = String(componentMint || '');
+		if(!mint) return 0;
+		let total = 0;
+		for(const cargoHold of (cargoHolds || [])) {
+			const tokens = Array.isArray(cargoHold?.cargoHoldTokens) ? cargoHold.cargoHoldTokens : [cargoHold];
+			for(const token of tokens) {
+				const tokenMint = token?.tokenAcct?.account?.mint?.toString?.() || token?.mint?.toString?.() || '';
+				if(String(tokenMint) !== mint) continue;
+				const amount = Number(token?.tokenAcct?.account?.amount || token?.amount || 0);
+				if(Number.isFinite(amount)) total += amount;
+			}
+		}
+		return Math.max(0, total);
+	}
+
 	async function getUpgradeAutomationFreshInventoryForStart(slot) {
 		const coordinates = String(slot?.coordinates || '').trim();
 		const component = String(slot?.item || '').trim();
@@ -3022,8 +3038,10 @@
 		const starbasePlayer = await getStarbasePlayer(userProfileAcct, starbase.publicKey);
 		if(!starbasePlayer?.publicKey) throw new Error('upgrade_start_starbase_player_unavailable');
 		const cargo = await getStarbasePlayerCargoHolds(starbasePlayer.publicKey);
-		const inventory = extractInventoryFromCargo(cargo);
-		return Math.max(0, Math.floor(getUpgradeAutomationComponentValue(inventory, component)));
+		const recipe = upgradeRecipes.find(item => String(item?.name || '') === component);
+		const componentMint = recipe?.input?.[0]?.mint?.toString?.() || String(recipe?.input?.[0]?.mint || '');
+		if(!componentMint) throw new Error('upgrade_start_component_mint_unavailable');
+		return Math.max(0, Math.floor(getUpgradeAutomationCargoAmountByMint(cargo, componentMint)));
 	}
 
 	async function prepareUpgradeAutomationAmountForStart(userCraft, now = new Date()) {
@@ -5223,11 +5241,10 @@
 				byMint[mint] = (byMint[mint] || 0) + (Number.isFinite(amount) ? amount : 0);
 			}
 		}
-		const resourceCatalogue = typeof allRes !== 'undefined' && Array.isArray(allRes) ? allRes : (Array.isArray(cargoItems) ? cargoItems : []);
-		for (const r of resourceCatalogue) {
-			const name = r?.name;
-			if (!(name in inv)) continue;
-			const mint = r?.token?.toString?.() || r?.token;
+		for (const name of Object.keys(inv)) {
+			const recipeName = (name === 'SDU' ? 'SDU' : name) + ' Upgrade';
+			const recipe = upgradeRecipes.find(item => String(item?.name || '') === recipeName);
+			const mint = recipe?.input?.[0]?.mint?.toString?.() || String(recipe?.input?.[0]?.mint || '');
 			if (!mint) continue;
 			inv[name] = Math.max(0, Number(byMint[mint] || 0));
 		}

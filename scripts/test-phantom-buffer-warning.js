@@ -71,12 +71,17 @@ assert.match(freshInventoryReader, /getStarbaseFromCoords\(/, 'JIT inventory use
 assert.match(freshInventoryReader, /getStarbasePlayer\(/, 'JIT inventory uses the standalone starbase-player lookup');
 assert.match(freshInventoryReader, /getStarbasePlayerCargoHolds\(starbasePlayer\.publicKey\)/,
   'JIT inventory passes the StarbasePlayer public key to the standalone cargo lookup');
+assert.match(freshInventoryReader, /recipe\?\.input\?\.\[0\]\?\.mint/,
+  'JIT inventory resolves the required mint from the upgrade recipe');
+assert.doesNotMatch(freshInventoryReader, /extractInventoryFromCargo\(cargo\)/,
+  'JIT inventory does not route the required mint through a resource-name catalogue');
 assert.doesNotMatch(freshInventoryReader, /getStarbaseData|getStarbasePlayerData|getCargoHoldsTokenAccounts/,
   'JIT inventory does not reference APIs absent from standalone SLYA');
 
 const inventoryContext = {
-  cargoItems: [{ name: 'Framework', token: 'framework-mint' }],
-  allRes: undefined
+  cargoItems: [],
+  allRes: undefined,
+  upgradeRecipes: [{ name: 'Framework Upgrade', input: [{ mint: { toString: () => 'framework-mint' } }] }]
 };
 vm.createContext(inventoryContext);
 vm.runInContext(`
@@ -86,6 +91,6 @@ vm.runInContext(`
 const extractedInventory = inventoryContext.extractInventory([{
   cargoHoldTokens: [{ mint: 'framework-mint', amount: 17 }]
 }]);
-assert.equal(extractedInventory.Framework, 17, 'standalone nested cargo holds are mapped through cargoItems without allRes');
+assert.equal(extractedInventory.Framework, 17, 'standalone nested cargo holds are mapped through authoritative upgrade recipe mints');
 
 console.log('phantom inventory safety tests passed');
