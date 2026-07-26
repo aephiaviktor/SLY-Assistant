@@ -40,11 +40,14 @@ vm.runInContext(`
 
 const lowBufferHtml = context.renderRows({}, { Framework: 100 }, { Framework: 25 }, { Framework: 1000 }, {});
 assert.match(lowBufferHtml, /Framework/);
-assert.match(lowBufferHtml, /color:#ff8080/, 'a Phantom buffer below 0.5 remains a red warning');
+assert.match(lowBufferHtml, /color:#ff8080/, 'a Phantom buffer below 0.5 remains a red numeric warning');
+assert.doesNotMatch(lowBufferHtml, /<span style="color:#ff8080">Framework/, 'a low-buffer component name stays white');
 assert.doesNotMatch(lowBufferHtml, /Framework \(blocked\)/, 'a low positive Phantom buffer is not labelled blocked');
 
 const zeroInventoryHtml = context.renderRows({}, { Framework: 100 }, { Framework: 0 }, { Framework: 1000 }, {});
 assert.match(zeroInventoryHtml, /Framework \(blocked\)/, 'zero Phantom inventory is visibly blocked');
+assert.doesNotMatch(zeroInventoryHtml, /<span style="color:#ff8080">Framework/, 'a blocked component name stays white');
+assert.match(zeroInventoryHtml, /align="right" style="color:#ff8080">0<\/td>/, 'zero inventory remains a red numeric warning');
 
 const neutralPlan = extractFunction('computeUpgradeAutomationNeutralPlan');
 assert.match(neutralPlan, /const phantomInventoryBlocked = inventoryPhantom <= 0;/,
