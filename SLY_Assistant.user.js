@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-193
+// @aephia-version 0.7.35-194
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-193'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-194'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -865,10 +865,10 @@
 			const effectiveDrain = getUpgradeAutomationEffectiveDrain(plannedDrain, observedDrain);
 			const bufferDaysPhantom = upgrade > 0 ? (inventory / upgrade) : null;
 			const bufferDaysGlobal = effectiveDrain > 0 ? (inventoryGlobal / effectiveDrain) : null;
-			const phantomBlocked = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
-			const phantomUpgradeEligible = inventory > 0 && !phantomBlocked;
-			const displayName = phantomBlocked ? '<span style="color:#ff8080">' + name + ' (blocked)</span>' : name;
-			const phantomNumberStyle = phantomBlocked ? ' style="color:#ff8080"' : '';
+			const phantomLowBuffer = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
+			const phantomUpgradeEligible = inventory > 0;
+			const displayName = phantomLowBuffer ? '<span style="color:#ff8080">' + name + '</span>' : name;
+			const phantomNumberStyle = phantomLowBuffer ? ' style="color:#ff8080"' : '';
 			html += '<tr><td style="padding-left:18px">' + displayName + '</td><td align="right">' + Math.round(upgrade).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + Math.round(inventory).toLocaleString() + '</td><td align="right"' + phantomNumberStyle + '>' + (bufferDaysPhantom === null ? '' : Number(bufferDaysPhantom).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td><td align="right">' + Math.round(craft).toLocaleString() + '</td><td align="right">' + Math.round(inventoryGlobal).toLocaleString() + '</td><td align="right">' + Math.round(plannedDrain).toLocaleString() + '</td><td align="right">' + Math.round(observedDrain).toLocaleString() + '</td><td align="right">' + Math.round(effectiveDrain).toLocaleString() + '</td><td align="right">' + (!phantomUpgradeEligible || bufferDaysGlobal === null ? '' : Number(bufferDaysGlobal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + '</td></tr>';
 		}
 		return html;
@@ -3113,8 +3113,8 @@
 			const avgCrewNeeded = secondsPerUnit > 0 ? (neutralTargetRemaining * secondsPerUnit) / Math.max(1, secondsInRemainingHours) : 0;
 			// Keep this aligned with formatUpgradeAutomationInfluxRows: Buffer Days Phantom = inventory / upgrading 24h.
 			const bufferDaysPhantom = upgrade24h > 0 ? (inventoryPhantom / upgrade24h) : (inventoryPhantom > 0 ? Number.POSITIVE_INFINITY : null);
-			const phantomBlocked = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
-			const phantomUpgradeEligible = inventoryPhantom > 0 && !phantomBlocked;
+			const phantomLowBuffer = bufferDaysPhantom !== null && Number(bufferDaysPhantom) < 0.5;
+			const phantomUpgradeEligible = inventoryPhantom > 0;
 			const specialRiskControlled = !!riskControl?.enabled && isUpgradeAutomationNeutralSpecialBlockedComponent(canonicalName);
 			const specialRiskMultiplier = specialRiskControlled ? Math.max(0, Number(riskControl.multiplier || 0)) : 1;
 			const specialMaxCrew = specialRiskControlled ? Math.min(totalCrew, Math.max(0, Math.floor(totalCrew * specialRiskMultiplier))) : Number.POSITIVE_INFINITY;
@@ -3134,7 +3134,7 @@
 				neutralTargetRemaining,
 				avgCrewNeeded,
 				bufferDaysGlobal,
-				phantomBlocked,
+				phantomLowBuffer,
 				phantomUpgradeEligible,
 				neutralPhaseBlocked,
 				targetPhaseBlocked: specialRiskBlocked,
@@ -6490,7 +6490,7 @@
 					const actualSideStyle = row.optimizerSource ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.optimizerDestination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
 					const riskLabel = row.specialRiskControlled ? (' (risk ' + Math.round(Number(row.specialRiskMultiplier || 0) * 100) + '%)') : '';
 					const neutralBlockedLabel = row.neutralPhaseBlocked && !row.specialRiskBlocked && highlightNeutral ? ' (neutral blocked)' : '';
-					const optimizerDisplayName = row.phantomBlocked ? '<span style="color:#ff8080">' + row.displayName + ' (blocked)</span>' : (row.specialRiskBlocked ? row.displayName + ' (risk blocked)' : row.displayName + neutralBlockedLabel + riskLabel);
+					const optimizerDisplayName = row.phantomLowBuffer ? '<span style="color:#ff8080">' + row.displayName + '</span>' : (row.specialRiskBlocked ? row.displayName + ' (risk blocked)' : row.displayName + neutralBlockedLabel + riskLabel);
 					content += '<tr><td' + actualSideStyle + '>' + optimizerDisplayName + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(upgradeAutomationExecutionSummary.neutralPhaseMode ? (row.neutralUpgradingPhase || 0) : (row.neutralUpgradingHour || 0)) || 0).toLocaleString() + '</td><td align="right"' + neutralBufferStyle + '>' + neutralBufferDisplay + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalCrew || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalUpgradingHour || 0)).toLocaleString() + '</td><td align="right"' + finalBufferStyle + '>' + finalBufferDisplay + '</td></tr>';
 				}
 			} else {
