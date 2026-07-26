@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-194
+// @aephia-version 0.7.35-195
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-194'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-195'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -4854,6 +4854,20 @@
 		return `${fleet.publicKey.toString()}:${homeCoord || 'unknown'}:${Date.now()}`;
 	}
 
+	function normalizeFleetTelemetryRouteValue(value) {
+		return String(value || '').replace(/\s+/g, '').toLowerCase();
+	}
+
+	function hasFleetTelemetryRouteChanged(cycle, fleet, fleetParsedData = {}) {
+		if(!cycle?.id) return false;
+		const savedHome = normalizeFleetTelemetryRouteValue(cycle.homeCoord);
+		const configuredHome = normalizeFleetTelemetryRouteValue(getFleetTelemetryHomeCoord(fleet, fleetParsedData));
+		const savedAssignment = normalizeFleetTelemetryRouteValue(cycle.assignment);
+		const configuredAssignment = normalizeFleetTelemetryRouteValue(fleetParsedData.assignment);
+		return (!!savedHome && !!configuredHome && savedHome !== configuredHome)
+			|| (!!savedAssignment && !!configuredAssignment && savedAssignment !== configuredAssignment);
+	}
+
 	function normalizeFleetTelemetryCostCycle(cycle, fleet, fleetParsedData = {}) {
 		cycle = cycle && typeof cycle === 'object' ? cycle : {};
 		cycle.id = cycle.id || buildFleetTelemetryCycleId(fleet, fleetParsedData);
@@ -4875,11 +4889,32 @@
 		return cycle;
 	}
 
+	async function archiveFleetTelemetryCostCycle(fleet, cycle, fleetParsedData = {}) {
+		const archivedAt = Date.now();
+		const archiveKey = `transportCostCycleArchived:${fleet.publicKey.toString()}:${archivedAt}`;
+		await GM.setValue(archiveKey, JSON.stringify({
+			...cycle,
+			archivedAt,
+			archiveReason: 'route_changed',
+			replacementHomeCoord: getFleetTelemetryHomeCoord(fleet, fleetParsedData),
+			replacementAssignment: fleetParsedData.assignment || '',
+		}));
+		await GM.deleteValue(getFleetTelemetryCostCycleKey(fleet));
+		scheduleSlyaStateBackup('transport-cost-cycle-route-change');
+		cLog(1, `${FleetTimeStamp(fleet.label)} archived stale cargo telemetry cycle after route change`);
+	}
+
 	async function getFleetTelemetryCostCycle(fleet, fleetParsedData = {}) {
 		const key = getFleetTelemetryCostCycleKey(fleet);
 		try {
 			const saved = JSON.parse(await GM.getValue(key, '{}'));
-			if(saved && saved.id) return normalizeFleetTelemetryCostCycle(saved, fleet, fleetParsedData);
+			if(saved && saved.id) {
+				if(hasFleetTelemetryRouteChanged(saved, fleet, fleetParsedData)) {
+					await archiveFleetTelemetryCostCycle(fleet, saved, fleetParsedData);
+					return normalizeFleetTelemetryCostCycle({}, fleet, fleetParsedData);
+				}
+				return normalizeFleetTelemetryCostCycle(saved, fleet, fleetParsedData);
+			}
 		} catch (e) {}
 		return normalizeFleetTelemetryCostCycle({}, fleet, fleetParsedData);
 	}

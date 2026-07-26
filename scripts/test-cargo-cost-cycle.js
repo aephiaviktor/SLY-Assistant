@@ -59,7 +59,10 @@ vm.createContext(context);
 vm.runInContext(`
   ${extractFunction('getFleetTelemetryHomeCoord')}
   ${extractFunction('getFleetTelemetryHomeStarbaseName')}
+  ${extractFunction('normalizeFleetTelemetryRouteValue')}
+  ${extractFunction('hasFleetTelemetryRouteChanged')}
   this.getHomeName = getFleetTelemetryHomeStarbaseName;
+  this.hasRouteChanged = hasFleetTelemetryRouteChanged;
 `, context);
 
 const fleet = { starbaseCoord: '17,0' };
@@ -67,6 +70,31 @@ assert.equal(
   context.getHomeName(fleet, { starbase: '21,0' }),
   'MRZ-21',
   'cycle anchor comes from the configured first starbase, not the fleet current/target starbase'
+);
+assert.equal(
+  context.hasRouteChanged({ id: 'old-cycle', homeCoord: '25,14', assignment: 'Transport' }, fleet, { starbase: '21,0', assignment: 'Transport' }),
+  true,
+  'a changed configured home invalidates the persisted accounting cycle'
+);
+assert.equal(
+  context.hasRouteChanged({ id: 'same-cycle', homeCoord: '21,0', assignment: 'Transport' }, fleet, { starbase: '21,0', assignment: 'Transport' }),
+  false,
+  'the same configured route preserves the persisted accounting cycle'
+);
+assert.equal(
+  context.hasRouteChanged({ id: 'assignment-cycle', homeCoord: '21,0', assignment: 'Supply Chain' }, fleet, { starbase: '21,0', assignment: 'Transport' }),
+  true,
+  'an assignment change also invalidates the persisted accounting cycle'
+);
+
+const getCycleFunction = extractFunction('getFleetTelemetryCostCycle');
+assert.match(
+  getCycleFunction,
+  /hasFleetTelemetryRouteChanged/
+);
+assert.match(
+  getCycleFunction,
+  /archiveFleetTelemetryCostCycle/
 );
 
 const loadFunction = extractFunction('addFleetTelemetryCargoLoad');
