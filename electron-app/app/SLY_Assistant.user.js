@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-207
+// @aephia-version 0.7.35-208
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-207'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-208'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -10611,14 +10611,26 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let scanOptimizationScansPerValue = createOptimizationNumberInput('scan-optimization-scans-per-value', fleetParsedData.scanOptimizationScansPerValue ?? 50, 'Target scans per value');
 			let scanOptimizationSummary = document.createElement('small');
 			scanOptimizationSummary.style.display = 'block';
+			let scanOptimizationStatus = document.createElement('small');
+			scanOptimizationStatus.style.display = scanOptimization.checked && fleetParsedData.scanOptimizationExperimentId ? 'block' : 'none';
 			for(const node of [scanOptimizationParameter, document.createTextNode(' from '), scanOptimizationStart, document.createTextNode(' to '), scanOptimizationEnd, document.createTextNode(' step '), scanOptimizationStep, document.createTextNode(' · block '), scanOptimizationScansPerBlock, document.createTextNode(' · per value '), scanOptimizationScansPerValue, scanOptimizationSummary]) scanOptimizationConfig.appendChild(node);
 			const refreshScanningOptimizationSummary = () => {
 				const values = buildScanningOptimizationValues(scanOptimizationStart.value, scanOptimizationEnd.value, scanOptimizationStep.value);
 				const schedule = buildScanningOptimizationSchedule(values, scanOptimizationScansPerBlock.value, scanOptimizationScansPerValue.value, () => 0.5);
 				const totalScans = schedule.reduce((sum, block) => sum + block.scans, 0);
-				const cooldown = Number(fleet?.account?.stats?.miscStats?.scanCoolDown || 0);
-				const hours = cooldown > 0 ? totalScans * cooldown / 3600 : 0;
+				const cooldown = Number(fleet?.scanCooldown || 0);
+				const hours = cooldown > 0 ? totalScans * (cooldown + 2) / 3600 : 0;
 				scanOptimizationSummary.innerText = schedule.length ? `${values.length} values · ${schedule.length} blocks · ${totalScans} scans${hours ? ` · ~${hours.toFixed(1)} cooldown hours` : ''}` : 'Invalid range or scans/value must be divisible by block size';
+				const draftChanged = scanOptimizationParameter.value !== String(fleetParsedData.scanOptimizationParameter || 'scanMin')
+					|| Number(scanOptimizationStart.value) !== Number(fleetParsedData.scanOptimizationStart)
+					|| Number(scanOptimizationEnd.value) !== Number(fleetParsedData.scanOptimizationEnd)
+					|| Number(scanOptimizationStep.value) !== Number(fleetParsedData.scanOptimizationStep)
+					|| Number(scanOptimizationScansPerBlock.value) !== Number(fleetParsedData.scanOptimizationScansPerBlock)
+					|| Number(scanOptimizationScansPerValue.value) !== Number(fleetParsedData.scanOptimizationScansPerValue)
+					|| scanOptimizationRun.checked !== !!fleetParsedData.scanOptimizationRunEnabled;
+				scanOptimizationStatus.style.display = scanOptimization.checked && fleetParsedData.scanOptimizationExperimentId ? 'block' : 'none';
+				if(draftChanged && schedule.length) scanOptimizationStatus.innerText = `Pending save · ${scanOptimizationParameter.value} · ${schedule.length} blocks · 0/${totalScans} scans${hours ? ` · ~${hours.toFixed(1)}h remaining` : ''}`;
+				else scanOptimizationStatus.innerText = formatScanningOptimizationStatus({...fleetParsedData, scanCooldown: fleet.scanCooldown});
 			};
 			for(const input of [scanOptimizationParameter, scanOptimizationStart, scanOptimizationEnd, scanOptimizationStep, scanOptimizationScansPerBlock, scanOptimizationScansPerValue]) input.addEventListener('change', refreshScanningOptimizationSummary);
 			refreshScanningOptimizationSummary();
@@ -10626,6 +10638,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				scanOptimizationRun.disabled = !scanOptimization.checked;
 				if(scanOptimizationRun.disabled) scanOptimizationRun.checked = false;
 				scanOptimizationConfig.style.display = scanOptimizationRun.checked && !scanOptimizationRun.disabled ? 'block' : 'none';
+				refreshScanningOptimizationSummary();
 			};
 			scanOptimization.addEventListener('change', syncScanningOptimizationControls);
 			scanOptimizationRun.addEventListener('change', syncScanningOptimizationControls);
@@ -10633,12 +10646,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			scanOptimizationRunLabel.appendChild(scanOptimizationRun);
 			scanOptimizationDiv.appendChild(scanOptimizationRunLabel);
 			scanOptimizationDiv.appendChild(scanOptimizationConfig);
-			if(scanOptimization.checked && fleetParsedData.scanOptimizationExperimentId) {
-				let scanOptimizationStatus = document.createElement('small');
-				scanOptimizationStatus.style.display = 'block';
-				scanOptimizationStatus.innerText = formatScanningOptimizationStatus({...fleetParsedData, scanCooldown: fleet.scanCooldown});
-				scanOptimizationDiv.appendChild(scanOptimizationStatus);
-			}
+			scanOptimizationDiv.appendChild(scanOptimizationStatus);
 			fleetLabelTd.appendChild(scanOptimizationDiv);
 
 			let assistAssignments = ['','Scan','Mine','Transport','Supply Chain'];
