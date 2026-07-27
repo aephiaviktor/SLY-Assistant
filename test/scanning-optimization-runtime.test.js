@@ -26,6 +26,7 @@ function loadRuntime(file) {
   const context = {};
   vm.createContext(context);
   vm.runInContext([
+    "const SCANNING_OPTIMIZATION_PARAMETER_KEYS = new Set(['scanMin','scanMin2','scanMin3','scanSearchDist','scanClusterFactor','scanNeighborhoodMinGood','scanCheckWhileCooldownLeft','scanBypassPercent','scanHomeAtPercent','scanNearbyAdvantage','scanPatternLength']);",
     extractFunction(source, 'buildScanningOptimizationSchedule'),
     extractFunction(source, 'resolveScanningOptimizationSchedule'),
     extractFunction(source, 'getScanningOptimizationRuntimeState'),
@@ -55,9 +56,10 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
       scanOptimizationBlockScansCompleted: 0
     };
 
-    assert.deepEqual({ ...getState(fleet) }, {
+    assert.deepEqual(JSON.parse(JSON.stringify(getState(fleet))), {
       active: true, complete: false, blockIndex: 0, blockScansCompleted: 0,
-      totalBlocks: 2, totalScans: 4, completedScans: 0, value: 8, scansInBlock: 2
+      totalBlocks: 2, totalScans: 4, completedScans: 0, value: 8,
+      values: { scanMin: 8 }, parameters: ['scanMin'], scansInBlock: 2
     });
 
     const first = advance(fleet);
@@ -101,6 +103,34 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
     assert.equal(changed.schedule.length, 3);
   });
 
+  test(`${file} restores original values between independent parameters and at completion`, () => {
+    const { advance } = loadRuntime(file);
+    const fleet = {
+      scanOptimizationEnabled: true,
+      scanOptimizationRunEnabled: true,
+      scanOptimizationOriginalValues: { scanMin: 14, scanMin2: 6 },
+      scanOptimizationSchedule: [
+        { values: { scanMin: 8 }, scans: 1 },
+        { values: { scanMin2: 3 }, scans: 1 }
+      ],
+      scanOptimizationBlockIndex: 0,
+      scanOptimizationBlockScansCompleted: 0,
+      scanMin: 8,
+      scanMin2: 6
+    };
+
+    const boundary = advance(fleet);
+    assert.equal(boundary.complete, false);
+    assert.equal(fleet.scanMin, 14, 'finished parameter must return to its original value');
+    assert.equal(fleet.scanMin2, 3, 'next parameter starts its test value');
+
+    const complete = advance(fleet);
+    assert.equal(complete.complete, true);
+    assert.equal(fleet.scanOptimizationRunEnabled, false);
+    assert.equal(fleet.scanMin, 14);
+    assert.equal(fleet.scanMin2, 6);
+  });
+
   test(`${file} derives proactive nearby movement thresholds without enabling legacy fleets`, () => {
     const { getNearbyAdvantageThreshold } = loadRuntime(file);
     assert.equal(getNearbyAdvantageThreshold(10, 10), 20);
@@ -120,9 +150,10 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
       scanOptimizationBlockScansCompleted: 9
     };
 
-    assert.deepEqual({ ...getCompletedScanTelemetry(fleet) }, {
+    assert.deepEqual(JSON.parse(JSON.stringify(getCompletedScanTelemetry(fleet))), {
       active: true, complete: false, blockIndex: 0, blockScansCompleted: 10,
-      totalBlocks: 2, totalScans: 20, completedScans: 10, value: 12, scansInBlock: 10
+      totalBlocks: 2, totalScans: 20, completedScans: 10, value: 12,
+      values: { scanMin: 12 }, parameters: ['scanMin'], scansInBlock: 10
     });
     assert.equal(fleet.scanOptimizationBlockScansCompleted, 9, 'telemetry projection must not advance control state');
     assert.equal(fleet.scanOptimizationBlockIndex, 0);
@@ -190,7 +221,8 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
     assert.match(source, /overlay\.innerText = 'opt\.'/);
     assert.match(source, /input\.disabled = true/);
     assert.match(source, /scanOptimizationRun\.addEventListener\('change', refreshScanningOptimizationFieldOverlay\)/);
-    assert.match(source, /scanOptimizationParameter\.addEventListener\('change', refreshScanningOptimizationFieldOverlay\)/);
+    assert.match(source, /getScanningOptimizationDraftQueue\(\)/);
+    assert.match(source, /scanOptimizationCombination\.addEventListener\('change'/);
     assert.match(source, /scanRows\[i\]\.querySelector\('\.scan-min'\)\?\.value/);
     assert.match(source, /scanRows2\[i\]\.querySelector\('\.scan-min-3'\)\?\.value/);
     assert.doesNotMatch(source, /scanRows\[i\]\.children\[1\]\.children\[0\]\.children\[1\]\.value/);
