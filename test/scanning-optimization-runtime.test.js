@@ -26,18 +26,21 @@ function loadRuntime(file) {
   const context = {};
   vm.createContext(context);
   vm.runInContext([
+    extractFunction(source, 'buildScanningOptimizationSchedule'),
+    extractFunction(source, 'resolveScanningOptimizationSchedule'),
     extractFunction(source, 'getScanningOptimizationRuntimeState'),
     extractFunction(source, 'getScanningOptimizationDisplayState'),
     extractFunction(source, 'getScanningNearbyAdvantageThreshold'),
     extractFunction(source, 'getScanningOptimizationCompletedScanTelemetryState'),
     extractFunction(source, 'advanceScanningOptimizationRuntime'),
+    'this.resolveSchedule = resolveScanningOptimizationSchedule;',
     'this.getState = getScanningOptimizationRuntimeState;',
     'this.getDisplay = getScanningOptimizationDisplayState;',
     'this.getNearbyAdvantageThreshold = getScanningNearbyAdvantageThreshold;',
     'this.getCompletedScanTelemetry = getScanningOptimizationCompletedScanTelemetryState;',
     'this.advance = advanceScanningOptimizationRuntime;'
   ].join('\n'), context);
-  return { source, getState: context.getState, getDisplay: context.getDisplay, getNearbyAdvantageThreshold: context.getNearbyAdvantageThreshold, getCompletedScanTelemetry: context.getCompletedScanTelemetry, advance: context.advance };
+  return { source, resolveSchedule: context.resolveSchedule, getState: context.getState, getDisplay: context.getDisplay, getNearbyAdvantageThreshold: context.getNearbyAdvantageThreshold, getCompletedScanTelemetry: context.getCompletedScanTelemetry, advance: context.advance };
 }
 
 for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.user.js']) {
@@ -74,6 +77,28 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
     assert.equal(fleet.scanOptimizationRunEnabled, false);
     assert.equal(fleet.scanOptimizationBlockIndex, 2);
     assert.equal(fleet.scanMin, 10, 'completion leaves the final tested value in place');
+  });
+
+  test(`${file} preserves a randomized schedule when its definition is unchanged`, () => {
+    const { resolveSchedule } = loadRuntime(file);
+    const savedSchedule = [{ value: 12, scans: 10 }, { value: 20, scans: 10 }];
+    const saved = {
+      scanOptimizationParameter: 'scanMin',
+      scanOptimizationValues: [12, 20],
+      scanOptimizationScansPerBlock: 10,
+      scanOptimizationScansPerValue: 10,
+      scanOptimizationSchedule: savedSchedule,
+      scanOptimizationBlockIndex: 1,
+      scanOptimizationRunEnabled: true
+    };
+    const unchanged = resolveSchedule(saved, 'scanMin', [12, 20], 10, 10, true, () => 0);
+    assert.deepEqual(unchanged.schedule, savedSchedule);
+    assert.equal(unchanged.changed, false);
+    assert.equal(unchanged.restartingCompletedRun, false);
+
+    const changed = resolveSchedule(saved, 'scanMin', [12, 20, 28], 10, 10, true, () => 0);
+    assert.equal(changed.changed, true);
+    assert.equal(changed.schedule.length, 3);
   });
 
   test(`${file} derives proactive nearby movement thresholds without enabling legacy fleets`, () => {

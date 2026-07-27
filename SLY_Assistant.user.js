@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-212
+// @aephia-version 0.7.35-213
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-212'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-213'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -8528,6 +8528,23 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return schedule;
 	}
 
+	function resolveScanningOptimizationSchedule(savedFleet, parameter, values, scansPerBlock, scansPerValue, runEnabled, random = Math.random) {
+		const savedSchedule = Array.isArray(savedFleet?.scanOptimizationSchedule) ? savedFleet.scanOptimizationSchedule : [];
+		const definitionChanged =
+			String(parameter || '') !== String(savedFleet?.scanOptimizationParameter || '') ||
+			JSON.stringify(values || []) !== JSON.stringify(savedFleet?.scanOptimizationValues || []) ||
+			Number(scansPerBlock) !== Number(savedFleet?.scanOptimizationScansPerBlock || 0) ||
+			Number(scansPerValue) !== Number(savedFleet?.scanOptimizationScansPerValue || 0);
+		const savedBlockIndex = Math.max(0, Math.floor(Number(savedFleet?.scanOptimizationBlockIndex || 0)));
+		const restartingCompletedRun = !!(runEnabled && !savedFleet?.scanOptimizationRunEnabled && savedSchedule.length && savedBlockIndex >= savedSchedule.length);
+		const changed = definitionChanged || !savedSchedule.length || restartingCompletedRun;
+		return {
+			schedule: changed ? buildScanningOptimizationSchedule(values, scansPerBlock, scansPerValue, random) : savedSchedule,
+			changed,
+			restartingCompletedRun
+		};
+	}
+
 	const SCANNING_OPTIMIZATION_PARAMETER_KEYS = new Set(SCANNING_OPTIMIZATION_PARAMETERS.map(([key]) => key));
 
 	function getScanningNearbyAdvantageThreshold(currentProbability, advantagePoints) {
@@ -12750,7 +12767,15 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let scanOptimizationScansPerBlock = Math.max(1, parseInt(row.querySelector('.scan-optimization-scans-per-block')?.value) || 10);
 			let scanOptimizationScansPerValue = Math.max(1, parseInt(row.querySelector('.scan-optimization-scans-per-value')?.value) || 50);
 			let scanOptimizationValues = buildScanningOptimizationValues(scanOptimizationStart, scanOptimizationEnd, scanOptimizationStep);
-			let scanOptimizationSchedule = buildScanningOptimizationSchedule(scanOptimizationValues, scanOptimizationScansPerBlock, scanOptimizationScansPerValue);
+			const resolvedOptimizationSchedule = resolveScanningOptimizationSchedule(
+				fleetParsedData,
+				scanOptimizationParameter,
+				scanOptimizationValues,
+				scanOptimizationScansPerBlock,
+				scanOptimizationScansPerValue,
+				scanOptimizationRunEnabled
+			);
+			let scanOptimizationSchedule = resolvedOptimizationSchedule.schedule;
 			if(scanOptimizationRunEnabled && !scanOptimizationSchedule.length) {
 				scanOptimizationRunEnabled = false;
 				inputError('ERROR: Invalid scanning optimization schedule', 'Use a valid range and make scans/value divisible by block size', 1);
@@ -12760,12 +12785,10 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					? fleetParsedData.scanOptimizationExperimentId
 					: `scan-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`)
 				: '';
-			const scanOptimizationScheduleChanged = JSON.stringify(scanOptimizationSchedule) !== JSON.stringify(fleetParsedData.scanOptimizationSchedule || []) || scanOptimizationParameter !== fleetParsedData.scanOptimizationParameter;
 			const savedOptimizationBlockIndex = Math.max(0, Math.floor(Number(fleetParsedData.scanOptimizationBlockIndex || 0)));
 			const savedOptimizationBlockScansCompleted = Math.max(0, Math.floor(Number(fleetParsedData.scanOptimizationBlockScansCompleted || 0)));
-			const scanOptimizationRestartingCompletedRun = scanOptimizationRunEnabled && !fleetParsedData.scanOptimizationRunEnabled && savedOptimizationBlockIndex >= scanOptimizationSchedule.length;
-			let scanOptimizationBlockIndex = !scanOptimizationScheduleChanged && !scanOptimizationRestartingCompletedRun ? savedOptimizationBlockIndex : 0;
-			let scanOptimizationBlockScansCompleted = !scanOptimizationScheduleChanged && !scanOptimizationRestartingCompletedRun ? savedOptimizationBlockScansCompleted : 0;
+			let scanOptimizationBlockIndex = !resolvedOptimizationSchedule.changed ? savedOptimizationBlockIndex : 0;
+			let scanOptimizationBlockScansCompleted = !resolvedOptimizationSchedule.changed ? savedOptimizationBlockScansCompleted : 0;
 
 			let scanMin3 = parseInt(scanRows2[i].querySelector('.scan-min-3')?.value) || 0;
 			let scanPattern = scanRows2[i].querySelector('select')?.value || '';
