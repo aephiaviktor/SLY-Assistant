@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-203
+// @aephia-version 0.7.35-204
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-203'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-204'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -2470,7 +2470,10 @@
 							out.push({
 								profile,
 								craftingProcess: processKey,
+								starbase: coords,
 								component,
+								recipe: recipe.name,
+								recipeKey: recipe.publicKey.toBase58(),
 								quantity,
 								lp: lpPerUnit * quantity,
 								lpPerUnit,
@@ -2778,6 +2781,29 @@
 		return { sent: sent === true, rows };
 	}
 
+	function formatUpgradeAutomationLpProcessHistoryInfluxLine(processes, faction, now, instanceOverride) {
+		const lines = [];
+		const factionTag = String(faction || '').replaceAll('"', '');
+		const instanceTag = instanceOverride == null ? getSlyaInfluxInstanceTag() : instanceOverride;
+		const ts = Math.floor(now.getTime());
+		for (const row of (processes || [])) {
+			if (!row?.profile || !row?.craftingProcess || !row?.starbase || !row?.component || !row?.recipeKey) continue;
+			const tags = `faction=${influxEscape(factionTag)},instance=${influxEscape(String(instanceTag))},profile=${influxEscape(row.profile)},process=${influxEscape(row.craftingProcess)},starbase=${influxEscape(row.starbase)},component=${influxEscape(row.component)},recipe=${influxEscape(String(row.recipe || ''))},recipeKey=${influxEscape(row.recipeKey)}`;
+			const fields = `quantity=${Math.round(Number(row.quantity || 0))}i,lp=${Math.round(Number(row.lp || 0))},lpPerUnit=${Math.round(Number(row.lpPerUnit || 0))}i,startTime=${Math.round(Number(row.startTime || 0))}i,endTime=${Math.round(Number(row.endTime || 0))}i,durationSeconds=${Math.round(Number(row.durationSeconds || 0))}i,remainingSeconds=${Math.round(Number(row.remainingSeconds || 0))}i,pendingInstallation=${row.pendingInstallation === true},automationAssumed=${row.automationAssumed === true}`;
+			lines.push(`lp_upgrade_process_history,${tags} ${fields} ${ts}`);
+		}
+		return lines.join('\n');
+	}
+
+	async function sendUpgradeAutomationLpProcessHistoryToInflux(processes, faction, now) {
+		const line = formatUpgradeAutomationLpProcessHistoryInfluxLine(processes, faction, now);
+		if (!line) return { sent: true, rows: 0 };
+		const rows = line.split('\n').length;
+		const sent = await sendToInflux(line);
+		if (sent !== true) await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PROCESS-HISTORY] write failed faction=${faction} rows=${rows} detail=${String(upgradeAutomationInfluxDebugStatus || 'unknown').slice(0, 500)}`);
+		return { sent: sent === true, rows };
+	}
+
 	let lastUpgradeAutomationLpPerProfileCycleMs = 0;
 	let upgradeAutomationLpPerProfileCycleInFlight = false;
 
@@ -2814,9 +2840,10 @@
 				const aggregated = aggregateUpgradeAutomationLpPerProfile(allProcesses);
 				upgradeAutomationUninstalledLp = summarizeUpgradeAutomationUninstalledLp(allProcesses);
 				const result = await sendUpgradeAutomationLpPerProfileToInflux(aggregated, faction, now);
+				const processHistory = await sendUpgradeAutomationLpProcessHistoryToInflux(allProcesses, faction, now);
 				const history = await runUpgradeAutomationLpPerProfileRedemptionHistory(faction, allProcesses, now);
 				const total = await recordUpgradeAutomationLpRedemptionTotal(faction, now);
-				await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] faction=${faction} profiles=${Object.keys(aggregated).length} processes=${allProcesses.length} rows=${result.rows} sent=${result.sent} redeemedRows=${history.rows} watchedProfiles=${history.profiles} historyProcessed=${history.processed} historyBacklog=${history.backlog} totalLp=${total.totalLp ?? 'missing'} totalSent=${total.sent} totalErr=${total.error || 'none'}`);
+				await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] faction=${faction} profiles=${Object.keys(aggregated).length} processes=${allProcesses.length} rows=${result.rows} sent=${result.sent} processHistoryRows=${processHistory.rows} processHistorySent=${processHistory.sent} redeemedRows=${history.rows} watchedProfiles=${history.profiles} historyProcessed=${history.processed} historyBacklog=${history.backlog} totalLp=${total.totalLp ?? 'missing'} totalSent=${total.sent} totalErr=${total.error || 'none'}`);
 			}
 		} finally {
 			upgradeAutomationLpPerProfileCycleInFlight = false;

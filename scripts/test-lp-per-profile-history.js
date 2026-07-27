@@ -27,7 +27,10 @@ function extractFunction(name) {
   throw new Error(`unterminated function ${name}`);
 }
 
-const context = { Math, Number, Object, String, Set, Map, Array, BigInt };
+const context = {
+  Math, Number, Object, String, Set, Map, Array, BigInt,
+  influxEscape: val => val.replaceAll('\\', '\\\\').replaceAll(' ', '\\ ').replaceAll(',', '\\,').replaceAll('=', '\\=')
+};
 vm.createContext(context);
 vm.runInContext(`
   ${extractFunction('buildUpgradeAutomationLpPerProfileRpcPlan')}
@@ -38,6 +41,7 @@ vm.runInContext(`
   ${extractFunction('summarizeUpgradeAutomationUninstalledLp')}
   ${extractFunction('buildUpgradeAutomationLpPerProfileTransactionQueue')}
   ${extractFunction('extractUpgradeAutomationLpPerProfileRedemptions')}
+  ${extractFunction('formatUpgradeAutomationLpProcessHistoryInfluxLine')}
   this.buildPlan = buildUpgradeAutomationLpPerProfileRpcPlan;
   this.mergeState = mergeUpgradeAutomationLpPerProfileSignatureState;
   this.updateCohort = updateUpgradeAutomationLpPerProfileWatchCohort;
@@ -46,6 +50,7 @@ vm.runInContext(`
   this.summarizeUninstalled = summarizeUpgradeAutomationUninstalledLp;
   this.buildQueue = buildUpgradeAutomationLpPerProfileTransactionQueue;
   this.extractRedemptions = extractUpgradeAutomationLpPerProfileRedemptions;
+  this.formatProcessHistory = formatUpgradeAutomationLpProcessHistoryInfluxLine;
 `, context);
 
 assert.deepEqual(JSON.parse(JSON.stringify(context.buildPlan(['recipe-a', 'recipe-b', 'recipe-a']))), [
@@ -140,6 +145,23 @@ assert.match(source, />Expected Additional LP by EOD</, 'panel labels the active
 assert.match(source, />Expected Total LP by EOD</, 'panel shows LP Today plus expected additional LP');
 assert.doesNotMatch(source, />Projected LP Today</, 'historical projected LP is removed from the panel');
 assert.match(source, /lpByEod=.*quantityByEod=/, 'conservative in-flight EoD fields remain in telemetry');
+
+const processHistory = context.formatProcessHistory([{
+  profile: 'profile-1', craftingProcess: 'process-1', starbase: '0,-24',
+  component: 'Framework', recipe: 'Upgrade Framework', recipeKey: 'recipe-1',
+  quantity: 42, lp: 1260, lpPerUnit: 30,
+  startTime: 1_000, endTime: 1_600, durationSeconds: 600,
+  remainingSeconds: 100, pendingInstallation: false, automationAssumed: true
+}], 'MUD', new Date('2026-07-27T07:00:00Z'), 'MUD1');
+assert.match(processHistory, /^lp_upgrade_process_history,/, 'individual active jobs use a separate diagnostic measurement');
+assert.match(processHistory, /profile=profile-1/, 'process history retains the player profile');
+assert.match(processHistory, /process=process-1/, 'process history retains the process identity');
+assert.match(processHistory, /starbase=0\\\,-24/, 'process history retains the starbase');
+assert.match(processHistory, /component=Framework/, 'process history retains the component');
+assert.match(processHistory, /recipeKey=recipe-1/, 'process history retains the recipe identity');
+assert.match(processHistory, /quantity=42i/, 'process history retains job quantity');
+assert.match(processHistory, /startTime=1000i,endTime=1600i,durationSeconds=600i/, 'process history retains exact cadence timestamps');
+assert.match(source, /sendUpgradeAutomationLpProcessHistoryToInflux\(allProcesses, faction, now\)/, 'the hourly cycle emits individual process history without changing projections');
 
 const queue = context.buildQueue({
   alpha: { pending: [{ signature: 'a1' }, { signature: 'a2' }] },
