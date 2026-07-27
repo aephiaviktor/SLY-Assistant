@@ -125,6 +125,10 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
     assert.match(source, /scanOptimizationStatus\.innerText = `Pending save/);
     assert.match(source, /scanOptimizationStatus\.innerText = formatScanningOptimizationStatus\(\{\.\.\.fleetParsedData, scanCooldown: fleet\.scanCooldown\}\)/);
     assert.match(source, /const cooldown = Number\(fleet\?\.scanCooldown \|\| 0\)/);
+    assert.match(source, /scan-optimization-field-overlay/);
+    assert.match(source, /overlay\.innerText = 'opt\.'/);
+    assert.match(source, /input\.disabled = true/);
+    assert.match(source, /Controlled by scanning optimization · active value:/);
     assert.doesNotMatch(source, /scanOptimizationStatus.*fleet\.account/);
   });
 }

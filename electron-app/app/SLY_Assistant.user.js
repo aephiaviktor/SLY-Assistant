@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-208
+// @aephia-version 0.7.35-209
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-208'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-209'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -10934,6 +10934,39 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			scanPatternTd.appendChild(scanPatternDiv);
 			scanPatternTd.appendChild(scanAutoDiv);
 			scanRow2.appendChild(scanPatternTd);
+
+			const optimizationRuntime = getScanningOptimizationRuntimeState(fleetParsedData);
+			const optimizationInputs = {
+				scanMin, scanMin2, scanMin3, scanSearchDist, scanClusterFactor, scanNeighborhoodMinGood,
+				scanCheckWhileCooldownLeft, scanBypassPercent, scanHomeAtPercent, scanPatternLength
+			};
+			if(optimizationRuntime.active) {
+				const input = optimizationInputs[fleetParsedData.scanOptimizationParameter];
+				if(input && input.parentNode) {
+					const wrapper = document.createElement('span');
+					wrapper.className = 'scan-optimization-field-overlay';
+					wrapper.style.position = 'relative';
+					wrapper.style.display = 'inline-block';
+					wrapper.style.marginRight = input.style.marginRight;
+					input.style.marginRight = '0';
+					input.parentNode.replaceChild(wrapper, input);
+					wrapper.appendChild(input);
+					input.disabled = true;
+					const overlay = document.createElement('span');
+					overlay.innerText = 'opt.';
+					overlay.title = `Controlled by scanning optimization · active value: ${optimizationRuntime.value}`;
+					overlay.style.position = 'absolute';
+					overlay.style.inset = '0';
+					overlay.style.display = 'flex';
+					overlay.style.alignItems = 'center';
+					overlay.style.justifyContent = 'center';
+					overlay.style.background = 'rgba(160, 160, 160, 0.94)';
+					overlay.style.color = '#b00020';
+					overlay.style.fontWeight = 'bold';
+					overlay.style.cursor = 'help';
+					wrapper.appendChild(overlay);
+				}
+			}
 
 			targetElem.appendChild(scanRow2);
 
