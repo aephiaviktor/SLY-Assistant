@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-205
+// @aephia-version 0.7.35-206
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-205'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-206'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -8548,6 +8548,39 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		};
 	}
 
+	function getScanningOptimizationDisplayState(fleet) {
+		const runtime = getScanningOptimizationRuntimeState(fleet);
+		const remainingScans = Math.max(0, runtime.totalScans - runtime.completedScans);
+		const cooldownSeconds = Math.max(0, Number(fleet?.scanCooldown || 0)) + 2;
+		let status = 'Ready';
+		if(runtime.complete) status = 'Completed';
+		else if(runtime.active) status = 'Running';
+		else if(runtime.completedScans > 0) status = 'Paused';
+		return {
+			status,
+			parameter: String(fleet?.scanOptimizationParameter || ''),
+			value: runtime.value,
+			blockNumber: runtime.complete ? runtime.totalBlocks : Math.min(runtime.totalBlocks, runtime.blockIndex + 1),
+			totalBlocks: runtime.totalBlocks,
+			blockScansCompleted: runtime.blockScansCompleted,
+			scansInBlock: runtime.scansInBlock,
+			completedScans: runtime.completedScans,
+			totalScans: runtime.totalScans,
+			remainingScans,
+			percentComplete: runtime.totalScans ? Math.round(runtime.completedScans / runtime.totalScans * 1000) / 10 : 0,
+			estimatedRemainingSeconds: remainingScans * cooldownSeconds
+		};
+	}
+
+	function formatScanningOptimizationStatus(fleet) {
+		const display = getScanningOptimizationDisplayState(fleet);
+		if(!display.totalScans) return `Recording baseline · ${String(fleet?.scanOptimizationExperimentId || '').slice(-8)}`;
+		if(display.status === 'Completed') return `Completed · ${display.totalScans}/${display.totalScans} scans · ${String(fleet?.scanOptimizationExperimentId || '').slice(-8)}`;
+		const hours = display.estimatedRemainingSeconds / 3600;
+		const eta = hours > 0 ? ` · ~${hours < 10 ? hours.toFixed(1) : Math.round(hours)}h remaining` : '';
+		return `${display.status} · ${display.parameter} ${display.value} · block ${display.blockNumber}/${display.totalBlocks} (${display.blockScansCompleted}/${display.scansInBlock}) · ${display.completedScans}/${display.totalScans} scans (${display.percentComplete}%)${eta}`;
+	}
+
 	function advanceScanningOptimizationRuntime(fleet) {
 		const state = getScanningOptimizationRuntimeState(fleet);
 		if(!state.active) return { advanced: false, complete: state.complete, notRunnable: !!fleet?.scanOptimizationRunEnabled && !state.complete };
@@ -8580,12 +8613,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const result = advanceScanningOptimizationRuntime(fleet);
 		if(!result.advanced) return result;
 		await saveScanningOptimizationRuntime(fleet, result.complete ? 'scan-optimization-complete' : 'scan-optimization-progress');
-		sendScanningOptimizationEvent(fleet, result.complete ? 'optimization_complete' : 'optimization_progress', [
-			`optimizationBlockIndex=${Math.round(Number(fleet.scanOptimizationBlockIndex || 0))}i`,
-			`optimizationBlockScansCompleted=${Math.round(Number(fleet.scanOptimizationBlockScansCompleted || 0))}i`,
-			`optimizationCompletedScans=${Math.round(Number(result.completedScans || result.totalScans || 0))}i`,
-			`optimizationTotalScans=${Math.round(Number(result.totalScans || 0))}i`
-		].join(','));
+		sendScanningOptimizationEvent(fleet, result.complete ? 'optimization_complete' : 'optimization_progress');
 		return result;
 	}
 
@@ -8596,7 +8624,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const phase = fleet.scanOptimizationRunEnabled || runtime.complete ? 'experiment' : 'baseline_collection';
 		const variant = phase === 'experiment' ? 'scheduled' : 'baseline';
 		const tags = `optimization_type=scanning,phase=${influxEscape(phase)},event_type=${influxEscape(eventType)},variant=${influxEscape(variant)},instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(fleet.label || 'unknown')},status=${status}${extraTags}`;
-		const progressFields = `,optimizationBlockIndex=${runtime.blockIndex}i,optimizationBlockScansCompleted=${runtime.blockScansCompleted}i,optimizationCompletedScans=${runtime.completedScans}i,optimizationTotalScans=${runtime.totalScans}i`;
+		const progressFields = `,optimizationParameter=${optimizationInfluxString(fleet.scanOptimizationParameter || '')},optimizationValue=${Number.isFinite(Number(runtime.value)) ? Number(runtime.value) : 0},optimizationBlockNumber=${runtime.complete ? runtime.totalBlocks : Math.min(runtime.totalBlocks, runtime.blockIndex + 1)}i,optimizationTotalBlocks=${runtime.totalBlocks}i,optimizationBlockIndex=${runtime.blockIndex}i,optimizationBlockScansCompleted=${runtime.blockScansCompleted}i,optimizationScansInBlock=${runtime.scansInBlock}i,optimizationCompletedScans=${runtime.completedScans}i,optimizationTotalScans=${runtime.totalScans}i`;
 		const fields = buildScanningOptimizationParameterFields(fleet) + progressFields + (extraFields ? `,${extraFields}` : '');
 		void sendToInflux(`optimization_event,${tags} ${fields}`, 'optimization').catch(error => {
 			cLog(1, `${FleetTimeStamp(fleet.label)} optimization telemetry failed`, error);
@@ -11302,7 +11330,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			if(scanOptimization.checked && fleetParsedData.scanOptimizationExperimentId) {
 				let scanOptimizationStatus = document.createElement('small');
 				scanOptimizationStatus.style.display = 'block';
-				scanOptimizationStatus.innerText = 'Recording · ' + fleetParsedData.scanOptimizationExperimentId.slice(-8);
+				scanOptimizationStatus.innerText = formatScanningOptimizationStatus({...fleetParsedData, scanCooldown: fleet.account.stats.miscStats.scanCoolDown});
 				scanOptimizationDiv.appendChild(scanOptimizationStatus);
 			}
 			fleetLabelTd.appendChild(scanOptimizationDiv);

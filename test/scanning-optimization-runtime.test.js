@@ -27,11 +27,13 @@ function loadRuntime(file) {
   vm.createContext(context);
   vm.runInContext([
     extractFunction(source, 'getScanningOptimizationRuntimeState'),
+    extractFunction(source, 'getScanningOptimizationDisplayState'),
     extractFunction(source, 'advanceScanningOptimizationRuntime'),
     'this.getState = getScanningOptimizationRuntimeState;',
+    'this.getDisplay = getScanningOptimizationDisplayState;',
     'this.advance = advanceScanningOptimizationRuntime;'
   ].join('\n'), context);
-  return { source, getState: context.getState, advance: context.advance };
+  return { source, getState: context.getState, getDisplay: context.getDisplay, advance: context.advance };
 }
 
 for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.user.js']) {
@@ -82,7 +84,33 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
     assert.equal(invalidResult.notRunnable, true);
   });
 
-  test(`${file} persists runtime progress and links it to scan results`, () => {
+  test(`${file} reports running, paused, and completed progress with cooldown ETA`, () => {
+    const { getDisplay } = loadRuntime(file);
+    const fleet = {
+      scanOptimizationEnabled: true,
+      scanOptimizationRunEnabled: true,
+      scanOptimizationParameter: 'scanMin',
+      scanOptimizationSchedule: [{ value: 8, scans: 2 }, { value: 10, scans: 2 }],
+      scanOptimizationBlockIndex: 0,
+      scanOptimizationBlockScansCompleted: 1,
+      scanCooldown: 900
+    };
+
+    assert.deepEqual({ ...getDisplay(fleet) }, {
+      status: 'Running', parameter: 'scanMin', value: 8,
+      blockNumber: 1, totalBlocks: 2, blockScansCompleted: 1, scansInBlock: 2,
+      completedScans: 1, totalScans: 4, remainingScans: 3,
+      percentComplete: 25, estimatedRemainingSeconds: 2706
+    });
+
+    fleet.scanOptimizationRunEnabled = false;
+    assert.equal(getDisplay(fleet).status, 'Paused');
+    fleet.scanOptimizationBlockIndex = 2;
+    fleet.scanOptimizationBlockScansCompleted = 0;
+    assert.equal(getDisplay(fleet).status, 'Completed');
+  });
+
+  test(`${file} persists runtime progress and exposes block/value telemetry`, () => {
     const { source } = loadRuntime(file);
     assert.match(source, /saveScanningOptimizationRuntime/);
     assert.match(source, /await advanceScanningOptimizationAfterCompletedScan\(userFleets\[i\]\)/);
@@ -90,5 +118,10 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
     assert.match(source, /scanOptimizationBlockScansCompleted/);
     assert.match(source, /phase=\$\{influxEscape\(phase\)\}/);
     assert.match(source, /variant=\$\{influxEscape\(variant\)\}/);
+    assert.match(source, /optimizationParameter=/);
+    assert.match(source, /optimizationValue=/);
+    assert.match(source, /optimizationBlockNumber=/);
+    assert.match(source, /optimizationTotalBlocks=/);
+    assert.match(source, /scanOptimizationStatus\.innerText = formatScanningOptimizationStatus/);
   });
 }
