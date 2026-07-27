@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-209
+// @aephia-version 0.7.35-210
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-209'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-210'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -10757,6 +10757,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let scanMinLabel = document.createElement('span');
 			scanMinLabel.innerHTML = 'Minimum Probability:';
 			let scanMin = document.createElement('input');
+			scanMin.className = 'scan-min';
 			scanMin.setAttribute('type', 'text');
 			scanMin.placeholder = '15';
 			scanMin.style.width = '30px';
@@ -10768,6 +10769,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let scanMin2Label = document.createElement('span');
 			scanMin2Label.innerHTML = 'Instant strike out below:';
 			let scanMin2 = document.createElement('input');
+			scanMin2.className = 'scan-min-2';
 			scanMin2.setAttribute('type', 'text');
 			scanMin2.placeholder = '0';
 			scanMin2.style.width = '30px';
@@ -10819,6 +10821,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let scanMin3Label = document.createElement('span');
 			scanMin3Label.innerHTML = 'Instant s/o below (on success):';
 			let scanMin3 = document.createElement('input');
+			scanMin3.className = 'scan-min-3';
 			scanMin3.setAttribute('type', 'text');
 			scanMin3.placeholder = '0';
 			scanMin3.style.width = '30px';
@@ -10842,6 +10845,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let scanPatternLengthLabel = document.createElement('span');
 			scanPatternLengthLabel.innerHTML = 'Override length:';
 			let scanPatternLength = document.createElement('input');
+			scanPatternLength.className = 'scan-pattern-length';
 			scanPatternLength.setAttribute('type', 'text');
 			scanPatternLength.style.width = '30px';
 			scanPatternLength.value = fleetParsedData && fleetParsedData.scanPatternLength ? fleetParsedData.scanPatternLength : '';
@@ -10849,6 +10853,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let scanSearchDistLabel = document.createElement('span');
 			scanSearchDistLabel.innerHTML = 'Search dist:';
 			let scanSearchDist = document.createElement('input');
+			scanSearchDist.className = 'scan-search-dist';
 			scanSearchDist.setAttribute('type', 'text');
 			scanSearchDist.style.width = '25px';
 			scanSearchDist.placeholder = '15';
@@ -10857,6 +10862,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let scanClusterFactorLabel = document.createElement('span');
 			scanClusterFactorLabel.innerHTML = 'Cluster/dist:';
 			let scanClusterFactor = document.createElement('input');
+			scanClusterFactor.className = 'scan-cluster-factor';
 			scanClusterFactor.setAttribute('type', 'text');
 			scanClusterFactor.style.width = '25px';
 			scanClusterFactor.placeholder = '50';
@@ -10865,6 +10871,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let scanNeighborhoodMinGoodLabel = document.createElement('span');
 			scanNeighborhoodMinGoodLabel.innerHTML = 'Neighbor min good:';
 			let scanNeighborhoodMinGood = document.createElement('input');
+			scanNeighborhoodMinGood.className = 'scan-neighborhood-min-good';
 			scanNeighborhoodMinGood.setAttribute('type', 'text');
 			scanNeighborhoodMinGood.style.width = '25px';
 			scanNeighborhoodMinGood.placeholder = '3';
@@ -10873,6 +10880,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let scanCheckWhileCooldownLeftLabel = document.createElement('span');
 			scanCheckWhileCooldownLeftLabel.innerHTML = 'Check % c/d left:';
 			let scanCheckWhileCooldownLeft = document.createElement('input');
+			scanCheckWhileCooldownLeft.className = 'scan-check-while-cooldown-left';
 			scanCheckWhileCooldownLeft.setAttribute('type', 'text');
 			scanCheckWhileCooldownLeft.style.width = '25px';
 			scanCheckWhileCooldownLeft.placeholder = '0';
@@ -10890,6 +10898,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let scanBypassPercentLabel = document.createElement('span');
 			scanBypassPercentLabel.innerHTML = '<br>Bypass %:';
 			let scanBypassPercent = document.createElement('input');
+			scanBypassPercent.className = 'scan-bypass-percent';
 			scanBypassPercent.setAttribute('type', 'text');
 			scanBypassPercent.style.width = '25px';
 			scanBypassPercent.placeholder = '4';
@@ -10898,6 +10907,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let scanHomeAtPercentLabel = document.createElement('span');
 			scanHomeAtPercentLabel.innerHTML = 'Home at fuel/dist %:';
 			let scanHomeAtPercent = document.createElement('input');
+			scanHomeAtPercent.className = 'scan-home-at-percent';
 			scanHomeAtPercent.setAttribute('type', 'text');
 			scanHomeAtPercent.style.width = '30px';
 			scanHomeAtPercent.placeholder = '0';
@@ -10935,38 +10945,56 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			scanPatternTd.appendChild(scanAutoDiv);
 			scanRow2.appendChild(scanPatternTd);
 
-			const optimizationRuntime = getScanningOptimizationRuntimeState(fleetParsedData);
 			const optimizationInputs = {
 				scanMin, scanMin2, scanMin3, scanSearchDist, scanClusterFactor, scanNeighborhoodMinGood,
 				scanCheckWhileCooldownLeft, scanBypassPercent, scanHomeAtPercent, scanPatternLength
 			};
-			if(optimizationRuntime.active) {
-				const input = optimizationInputs[fleetParsedData.scanOptimizationParameter];
-				if(input && input.parentNode) {
-					const wrapper = document.createElement('span');
-					wrapper.className = 'scan-optimization-field-overlay';
-					wrapper.style.position = 'relative';
-					wrapper.style.display = 'inline-block';
-					wrapper.style.marginRight = input.style.marginRight;
-					input.style.marginRight = '0';
-					input.parentNode.replaceChild(wrapper, input);
-					wrapper.appendChild(input);
-					input.disabled = true;
-					const overlay = document.createElement('span');
-					overlay.innerText = 'opt.';
-					overlay.title = `Controlled by scanning optimization · active value: ${optimizationRuntime.value}`;
-					overlay.style.position = 'absolute';
-					overlay.style.inset = '0';
-					overlay.style.display = 'flex';
-					overlay.style.alignItems = 'center';
-					overlay.style.justifyContent = 'center';
-					overlay.style.background = 'rgba(160, 160, 160, 0.94)';
-					overlay.style.color = '#b00020';
-					overlay.style.fontWeight = 'bold';
-					overlay.style.cursor = 'help';
-					wrapper.appendChild(overlay);
+			const refreshScanningOptimizationFieldOverlay = () => {
+				for(const wrapper of scanRow.querySelectorAll('.scan-optimization-field-overlay')) {
+					const input = wrapper.querySelector('input');
+					if(!input) continue;
+					input.disabled = false;
+					input.style.marginRight = wrapper.style.marginRight;
+					wrapper.parentNode.replaceChild(input, wrapper);
 				}
-			}
+				for(const wrapper of scanRow2.querySelectorAll('.scan-optimization-field-overlay')) {
+					const input = wrapper.querySelector('input');
+					if(!input) continue;
+					input.disabled = false;
+					input.style.marginRight = wrapper.style.marginRight;
+					wrapper.parentNode.replaceChild(input, wrapper);
+				}
+				if(!scanOptimization.checked || !scanOptimizationRun.checked) return;
+				const input = optimizationInputs[scanOptimizationParameter.value];
+				if(!input || !input.parentNode) return;
+				const wrapper = document.createElement('span');
+				wrapper.className = 'scan-optimization-field-overlay';
+				wrapper.style.position = 'relative';
+				wrapper.style.display = 'inline-block';
+				wrapper.style.marginRight = input.style.marginRight;
+				input.style.marginRight = '0';
+				input.parentNode.replaceChild(wrapper, input);
+				wrapper.appendChild(input);
+				input.disabled = true;
+				const overlay = document.createElement('span');
+				overlay.innerText = 'opt.';
+				const runtime = getScanningOptimizationRuntimeState(fleetParsedData);
+				overlay.title = runtime.active ? `Controlled by scanning optimization · active value: ${runtime.value}` : 'Controlled by scanning optimization after Save';
+				overlay.style.position = 'absolute';
+				overlay.style.inset = '0';
+				overlay.style.display = 'flex';
+				overlay.style.alignItems = 'center';
+				overlay.style.justifyContent = 'center';
+				overlay.style.background = 'rgba(160, 160, 160, 0.94)';
+				overlay.style.color = '#b00020';
+				overlay.style.fontWeight = 'bold';
+				overlay.style.cursor = 'help';
+				wrapper.appendChild(overlay);
+			};
+			scanOptimization.addEventListener('change', refreshScanningOptimizationFieldOverlay);
+			scanOptimizationRun.addEventListener('change', refreshScanningOptimizationFieldOverlay);
+			scanOptimizationParameter.addEventListener('change', refreshScanningOptimizationFieldOverlay);
+			refreshScanningOptimizationFieldOverlay();
 
 			targetElem.appendChild(scanRow2);
 
@@ -11986,8 +12014,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				}
 			}
 
-			let scanMin = parseInt(scanRows[i].children[1].children[0].children[1].value) || 0;
-			let scanMin2 = parseInt(scanRows[i].children[1].children[0].children[3].value) || 0;
+			let scanMin = parseInt(scanRows[i].querySelector('.scan-min')?.value) || 0;
+			let scanMin2 = parseInt(scanRows[i].querySelector('.scan-min-2')?.value) || 0;
 			let scanMove = scanRows[i].children[2].children[0].children[1].checked;
 			let scanOptimizationEnabled = fleetAssignment == 'Scan' && !!row.querySelector('.scan-optimization-toggle')?.checked;
 			let scanOptimizationRunEnabled = scanOptimizationEnabled && !!row.querySelector('.scan-optimization-run-toggle')?.checked;
@@ -12015,17 +12043,17 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let scanOptimizationBlockIndex = !scanOptimizationScheduleChanged && !scanOptimizationRestartingCompletedRun ? savedOptimizationBlockIndex : 0;
 			let scanOptimizationBlockScansCompleted = !scanOptimizationScheduleChanged && !scanOptimizationRestartingCompletedRun ? savedOptimizationBlockScansCompleted : 0;
 
-			let scanMin3 = parseInt(scanRows2[i].children[1].children[0].children[1].value) || 0;
-			let scanPattern = scanRows2[i].children[1].children[0].children[3].value;
-			let scanPatternLength = parseInt(scanRows2[i].children[1].children[0].children[5].value) || 0;
+			let scanMin3 = parseInt(scanRows2[i].querySelector('.scan-min-3')?.value) || 0;
+			let scanPattern = scanRows2[i].querySelector('select')?.value || '';
+			let scanPatternLength = parseInt(scanRows2[i].querySelector('.scan-pattern-length')?.value) || 0;
 
-			let scanSearchDist = parseInt(scanRows2[i].children[1].children[1].children[1].value) || 15;
-			let scanClusterFactor = parseInt(scanRows2[i].children[1].children[1].children[3].value) || 50;
-			let scanNeighborhoodMinGood = parseInt(scanRows2[i].children[1].children[1].children[5].value) || 3;
-			let scanCheckWhileCooldownLeft = parseInt(scanRows2[i].children[1].children[1].children[7].value) || 0;
+			let scanSearchDist = parseInt(scanRows2[i].querySelector('.scan-search-dist')?.value) || 15;
+			let scanClusterFactor = parseInt(scanRows2[i].querySelector('.scan-cluster-factor')?.value) || 50;
+			let scanNeighborhoodMinGood = parseInt(scanRows2[i].querySelector('.scan-neighborhood-min-good')?.value) || 3;
+			let scanCheckWhileCooldownLeft = parseInt(scanRows2[i].querySelector('.scan-check-while-cooldown-left')?.value) || 0;
 			//let scanCheckWhileCooldownLeftProb = parseInt(scanRows2[i].children[1].children[0].children[15].value) || 0;
-			let scanBypassPercent = parseInt(scanRows2[i].children[1].children[1].children[9].value) || 4;
-			let scanHomeAtPercent = parseInt(scanRows2[i].children[1].children[1].children[11].value) || 0;
+			let scanBypassPercent = parseInt(scanRows2[i].querySelector('.scan-bypass-percent')?.value) || 4;
+			let scanHomeAtPercent = parseInt(scanRows2[i].querySelector('.scan-home-at-percent')?.value) || 0;
 
 			let fleetMineResource = mineRows[i].children[1].children[1].value;
 			fleetMineResource = fleetMineResource !== '' ? cargoItems.find(r => r.name == fleetMineResource).token : '';

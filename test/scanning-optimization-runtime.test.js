@@ -128,7 +128,11 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
     assert.match(source, /scan-optimization-field-overlay/);
     assert.match(source, /overlay\.innerText = 'opt\.'/);
     assert.match(source, /input\.disabled = true/);
-    assert.match(source, /Controlled by scanning optimization · active value:/);
+    assert.match(source, /scanOptimizationRun\.addEventListener\('change', refreshScanningOptimizationFieldOverlay\)/);
+    assert.match(source, /scanOptimizationParameter\.addEventListener\('change', refreshScanningOptimizationFieldOverlay\)/);
+    assert.match(source, /scanRows\[i\]\.querySelector\('\.scan-min'\)\?\.value/);
+    assert.match(source, /scanRows2\[i\]\.querySelector\('\.scan-min-3'\)\?\.value/);
+    assert.doesNotMatch(source, /scanRows\[i\]\.children\[1\]\.children\[0\]\.children\[1\]\.value/);
     assert.doesNotMatch(source, /scanOptimizationStatus.*fleet\.account/);
   });
 }
