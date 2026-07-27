@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-211
+// @aephia-version 0.7.35-212
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-211'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-212'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -7779,6 +7779,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			`checkWhileCooldownLeft=${Number(fleet?.scanCheckWhileCooldownLeft || 0)}`,
 			`bypassPercent=${Number(fleet?.scanBypassPercent || 0)}`,
 			`homeAtFuelDistancePercent=${Number(fleet?.scanHomeAtPercent || 0)}`,
+			`nearbyAdvantagePercent=${Number(fleet?.scanNearbyAdvantage || 0)}`,
 			`scanStrikeCount=${Math.round(Number(globalSettings?.scanStrikeCount || 0))}i`,
 			`scanSectorRegenerationSeconds=${Math.round(Number(globalSettings?.scanSectorRegenTime || 0))}i`,
 			`scanPauseSeconds=${Math.round(Number(globalSettings?.scanPauseTime || 0))}i`,
@@ -7799,6 +7800,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		['scanCheckWhileCooldownLeft', 'Check Cooldown Left %'],
 		['scanBypassPercent', 'Bypass %'],
 		['scanHomeAtPercent', 'Home at Fuel/Distance %'],
+		['scanNearbyAdvantage', 'Move for Nearby Advantage'],
 		['scanPatternLength', 'Override Pattern Length']
 	]);
 
@@ -7834,6 +7836,13 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 	const SCANNING_OPTIMIZATION_PARAMETER_KEYS = new Set(SCANNING_OPTIMIZATION_PARAMETERS.map(([key]) => key));
 
+	function getScanningNearbyAdvantageThreshold(currentProbability, advantagePoints) {
+		const current = Number(currentProbability);
+		const advantage = Number(advantagePoints);
+		if(!Number.isFinite(current) || !Number.isFinite(advantage) || advantage <= 0) return null;
+		return Number((current + advantage).toFixed(8));
+	}
+
 	function getScanningOptimizationRuntimeState(fleet) {
 		const schedule = Array.isArray(fleet?.scanOptimizationSchedule) ? fleet.scanOptimizationSchedule : [];
 		const blockIndex = Math.max(0, Math.floor(Number(fleet?.scanOptimizationBlockIndex || 0)));
@@ -7842,7 +7851,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const completedScans = schedule.slice(0, blockIndex).reduce((sum, block) => sum + Math.max(1, Math.floor(Number(block?.scans || 1))), 0) + blockScansCompleted;
 		const block = schedule[blockIndex];
 		return {
-			active: !!(fleet?.scanOptimizationEnabled && fleet?.scanOptimizationRunEnabled && block && ['scanMin','scanMin2','scanMin3','scanSearchDist','scanClusterFactor','scanNeighborhoodMinGood','scanCheckWhileCooldownLeft','scanBypassPercent','scanHomeAtPercent','scanPatternLength'].includes(fleet?.scanOptimizationParameter)),
+			active: !!(fleet?.scanOptimizationEnabled && fleet?.scanOptimizationRunEnabled && block && ['scanMin','scanMin2','scanMin3','scanSearchDist','scanClusterFactor','scanNeighborhoodMinGood','scanCheckWhileCooldownLeft','scanBypassPercent','scanHomeAtPercent','scanNearbyAdvantage','scanPatternLength'].includes(fleet?.scanOptimizationParameter)),
 			complete: !!schedule.length && blockIndex >= schedule.length,
 			blockIndex,
 			blockScansCompleted,
@@ -10922,6 +10931,15 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			scanHomeAtPercent.style.width = '30px';
 			scanHomeAtPercent.placeholder = '0';
 			scanHomeAtPercent.value = fleetParsedData && fleetParsedData.scanHomeAtPercent ? fleetParsedData.scanHomeAtPercent : '';
+			let scanNearbyAdvantageLabel = document.createElement('span');
+			scanNearbyAdvantageLabel.innerHTML = '<br>Move if nearby + points:';
+			let scanNearbyAdvantage = document.createElement('input');
+			scanNearbyAdvantage.className = 'scan-nearby-advantage';
+			scanNearbyAdvantage.setAttribute('type', 'text');
+			scanNearbyAdvantage.style.width = '30px';
+			scanNearbyAdvantage.placeholder = '0';
+			scanNearbyAdvantage.title = '0 disables proactive movement; evaluated during cooldown map checks';
+			scanNearbyAdvantage.value = fleetParsedData && fleetParsedData.scanNearbyAdvantage ? fleetParsedData.scanNearbyAdvantage : '';
 
 			let scanPatternDiv = document.createElement('div');
 			scanPatternDiv.appendChild(scanMin3Label);
@@ -10949,6 +10967,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			scanAutoDiv.appendChild(scanBypassPercent);
 			scanAutoDiv.appendChild(scanHomeAtPercentLabel);
 			scanAutoDiv.appendChild(scanHomeAtPercent);
+			scanAutoDiv.appendChild(scanNearbyAdvantageLabel);
+			scanAutoDiv.appendChild(scanNearbyAdvantage);
 			let scanPatternTd = document.createElement('td');
 			scanPatternTd.setAttribute('colspan', '7');
 			scanPatternTd.appendChild(scanPatternDiv);
@@ -10957,7 +10977,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 			const optimizationInputs = {
 				scanMin, scanMin2, scanMin3, scanSearchDist, scanClusterFactor, scanNeighborhoodMinGood,
-				scanCheckWhileCooldownLeft, scanBypassPercent, scanHomeAtPercent, scanPatternLength
+				scanCheckWhileCooldownLeft, scanBypassPercent, scanHomeAtPercent, scanNearbyAdvantage, scanPatternLength
 			};
 			const refreshScanningOptimizationFieldOverlay = () => {
 				for(const wrapper of scanRow.querySelectorAll('.scan-optimization-field-overlay')) {
@@ -12064,6 +12084,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			//let scanCheckWhileCooldownLeftProb = parseInt(scanRows2[i].children[1].children[0].children[15].value) || 0;
 			let scanBypassPercent = parseInt(scanRows2[i].querySelector('.scan-bypass-percent')?.value) || 4;
 			let scanHomeAtPercent = parseInt(scanRows2[i].querySelector('.scan-home-at-percent')?.value) || 0;
+			let scanNearbyAdvantage = parseFloat(scanRows2[i].querySelector('.scan-nearby-advantage')?.value) || 0;
 
 			let fleetMineResource = mineRows[i].children[1].children[1].value;
 			fleetMineResource = fleetMineResource !== '' ? cargoItems.find(r => r.name == fleetMineResource).token : '';
@@ -12203,6 +12224,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					scanCheckWhileCooldownLeft: scanCheckWhileCooldownLeft,
 					scanBypassPercent: scanBypassPercent,
 					scanHomeAtPercent: scanHomeAtPercent,
+					scanNearbyAdvantage: scanNearbyAdvantage,
 					scanPattern: scanPattern,
 					scanPatternLength: scanPatternLength,
 					scanMove: scanMove,
@@ -12254,6 +12276,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				//userFleets[userFleetIndex].scanCheckWhileCooldownLeftProb = scanCheckWhileCooldownLeftProb;
 				userFleets[userFleetIndex].scanBypassPercent = scanBypassPercent;
 				userFleets[userFleetIndex].scanHomeAtPercent = scanHomeAtPercent;
+				userFleets[userFleetIndex].scanNearbyAdvantage = scanNearbyAdvantage;
 				userFleets[userFleetIndex].scanPattern = scanPattern;
 				userFleets[userFleetIndex].scanPatternLength = scanPatternLength;
 				userFleets[userFleetIndex].scanMove = scanMove;
@@ -15740,6 +15763,13 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			cLog(3,`${FleetTimeStamp(userFleets[i].label)} SAM scan coord`,scanX,`/`,scanY,`turned bad while waiting for the cooldown.`);
 			return false;
 		}
+
+		const nearbyAdvantageThreshold = getScanningNearbyAdvantageThreshold(scan?.c * 100, userFleets[i].scanNearbyAdvantage);
+		if(nearbyAdvantageThreshold !== null) {
+			userFleets[i].scanProactiveMoveThreshold = nearbyAdvantageThreshold;
+			cLog(3, `${FleetTimeStamp(userFleets[i].label)} SAM checking for sector at least ${nearbyAdvantageThreshold}% (${userFleets[i].scanNearbyAdvantage} points better).`);
+			return false;
+		}
 		cLog(3,`${FleetTimeStamp(userFleets[i].label)} SAM scan coord`,scanX,`/`,scanY,`still valid.`);
 		return true;
 	}
@@ -15761,7 +15791,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 		return hasEnoughFuel;
 	}
 
-	async function handleScanAutoMovement($,o){let _=!1,t=parseInt(userFleets[$].destCoord.split(",")[0].trim()),n=parseInt(userFleets[$].destCoord.split(",")[1].trim());if(!userFleets[$].scanAutoMoveTo){let e=ConvertCoords(userFleets[$].starbaseCoord);CoordsEqual(o,e)?userFleets[$].scanAutoMoveTo=[t,n]:userFleets[$].scanAutoMoveTo=[o[0],o[1]];return}userFleets[$].scanAutoMoveTo=null,_=await readScanMap();let s=globalSettings.scanBlockLength;userFleets[$].scanPatternLength&&(s=userFleets[$].scanPatternLength);let a=globalSettings.scanBlockPattern;userFleets[$].scanPattern&&(a=userFleets[$].scanPattern),s<5&&(s=5);let l=t-s,u=t+s,r=n-s,i=n+s,c=userFleets[$].scanNeighborhoodMinGood,f=parseInt(userFleets[$].scanClusterFactor),h=parseInt(userFleets[$].scanSearchDist);if(_){let d=0,p=[0,0],b=await scanAutoHasEnoughFuel($,o),v=1,g=1;a.includes("2hv")&&(v=2,g=2);let M=0,m=[];if(b){for(let A=o[0]-2;A<=o[0]+2;A++)for(let y=o[1]-2;y<=o[1]+2;y++){if(A==o[0]&&y==o[1]||A<l||A>u||y<r||y>i)continue;let T=_.find($=>$.x==A&&$.y==y);T&&100*T.c>=userFleets[$].scanMin&&M++}if(M>=c){let x=[];for(let S=0-v;S<=0+v;S++)for(let P=0-g;P<=0+g;P++){let B=[o[0]+S,o[1]+P];if(!(a.includes("2hv")&&(Math.abs(S)>=2&&0!=P||Math.abs(P)>=2&&0!=S))&&!(B[0]<l)&&!(B[0]>u)&&!(B[1]<r)&&!(B[1]>i)){if(0!=S||0!=P){let C=_.find($=>$.x==B[0]&&$.y==B[1]);C&&100*C.c>=userFleets[$].scanMin&&m.push([S,P]),C&&C.c>d&&(d=C.c,p=[S,P])}x.push([S,P])}}if(m.length){.5>Math.random()&&(p=m[Math.floor(Math.random()*m.length)]),m=[];let k=[];if(Math.abs(p[0])>=1&&Math.abs(p[1])>=1)k.push([o[0]+p[0],o[1]+p[1]]),k.push([o[0]+p[0],o[1]]),k.push([o[0]+p[0],o[1]+-1*p[1]]),k.push([o[0],o[1]+p[1]]),k.push([o[0]+-1*p[0],o[1]+p[1]]),a.includes("2hv")&&(k.push([o[0],o[1]+2*p[1]]),k.push([o[0]+2*p[0],o[1]]));else for(let w of x)(0!=w[0]||0!=w[1])&&(Math.abs(p[0])>=1&&(0==w[0]||Math.sign(w[0])==Math.sign(p[0]))||Math.abs(p[1])>=1&&(0==w[1]||Math.sign(w[1])==Math.sign(p[1])))&&k.push([o[0]+w[0],o[1]+w[1]]);for(let L of k){if(L[0]<l||L[0]>u||L[1]<r||L[1]>i)continue;let q=_.find($=>$.x==L[0]&&$.y==L[1]);(!q||100*q.c>=userFleets[$].scanMin)&&m.push([L[0],L[1]])}}}}if(M>=c&&m.length>0){let F=m[Math.floor(Math.random()*m.length)];userFleets[$].scanAutoMoveTo=F}else{let D=0,G=0,N=[0,0],R=0;if(b){let j=2.85,z=3;for(;z<2*s-2&&z<=h;){for(let E=-1;E<=1;E+=.2)for(let H=-1;H<=1;H+=.2){if(10!=Math.round(10*Math.abs(E))&&10!=Math.round(10*Math.abs(H)))continue;let I=E,J=H,K=[o[0]+Math.round(I*z),o[1]+Math.round(J*z)];if(K[0]<l||K[0]>u||K[1]<r||K[1]>i)continue;let O=Math.round(j),Q=0,U=0,V=0,W=j*j;for(let X=Math.floor(0-j);X<=Math.ceil(j);X++)for(let Y=Math.floor(0-j);Y<=Math.ceil(j);Y++)if(X*X+Y*Y<=W){if(K[0]+X<l||K[0]+X>u||K[1]+Y<r||K[1]+Y>i)continue;let Z=_.find($=>$.x==K[0]+X&&$.y==K[1]+Y);Z&&100*Z.c>userFleets[$].scanMin&&(Q++,U+=Z.c),V++}Q>=2&&U/Math.pow(Q,f/100)/Math.sqrt(V)>G&&(D=Q,G=U/Math.pow(Q,f/100)/Math.sqrt(V),N=[Math.round(I),Math.round(J)],R=V)}j+=.4,z+=1}}else{let $$=ConvertCoords(userFleets[$].starbaseCoord),$o=[$$[0]-o[0],$$[1]-o[1]];if(0!=$o[0]||0!=$o[1]){if(2>=Math.abs($o[0])&&2>=Math.abs($o[1])){userFleets[$].scanAutoMoveTo=$$,userFleets[$].scanForceResupply=!0,cLog(3,`${FleetTimeStamp(userFleets[$].label)} SAM heading back and near the SB, moving to SB`);return}let $_=[$o[0],$o[1]].map($=>$/Math.max(Math.abs($o[0]),Math.abs($o[1])));N=[Math.round($_[0]),Math.round($_[1])],D=1,a="auto(1,2hv++)",cLog(3,`${FleetTimeStamp(userFleets[$].label)} SAM heading back, direction`,N[0],"/",N[1])}}if(D>0){let $t=N[0],$n=N[1];("auto(1,2hv++)"==a||("auto(1,2hv)"==a||"auto(1,2hv+)"==a)&&(0==N[0]||0==N[1]))&&($t=2*N[0],$n=2*N[1]),p=[o[0]+$t,o[1]+$n];let $e=[],$s=_.find($=>$.x==p[0]&&$.y==p[1]);if($s){m=[],1>=Math.abs($t)&&1>=Math.abs($n)?"auto(1+)"==a&&(0==$t||0==$n)?m.push([o[0]+2*$t,o[1]+2*$n]):0==$t?(m.push([o[0]-1,o[1]+$n]),m.push([o[0]+1,o[1]+$n])):0==$n?(m.push([o[0]+$t,o[1]-1]),m.push([o[0]+$t,o[1]+1])):"auto(1,2hv+)"==a?(m.push([o[0]+2*$t,o[1]+$n]),m.push([o[0]+$t,o[1]+2*$n])):(m.push([o[0],o[1]+$n]),m.push([o[0]+$t,o[1]])):"auto(1,2hv++)"==a&&Math.abs($t)>=2&&Math.abs($n)>=2?(m.push([o[0]+$t,o[1]+$n/2]),m.push([o[0]+$t/2,o[1]+$n])):"auto(1,2hv)"==a?m.push([o[0]+N[0],o[1]+N[1]]):0==$t?(m.push([o[0]-1,o[1]+$n]),m.push([o[0]+1,o[1]+$n])):0==$n&&(m.push([o[0]+$t,o[1]-1]),m.push([o[0]+$t,o[1]+1]));let $a=1;for(let $l of m){let $u=_.find($=>$.x==$l[0]&&$.y==$l[1]);$u&&$u.c>=$s.c+userFleets[$].scanBypassPercent/100&&($e.push([$l[0],$l[1]]),$a>$u.c&&($a=$u.c))}if($e.length>=2)for(let $r of $e){let $i=_.find($=>$.x==$r[0]&&$.y==$r[1]);$i&&$i.c>=$a+userFleets[$].scanBypassPercent/100&&($e=[[$r[0],$r[1]]])}}$e.length?userFleets[$].scanAutoMoveTo=$e[Math.floor(Math.random()*$e.length)]:userFleets[$].scanAutoMoveTo=p}}}if(!userFleets[$].scanAutoMoveTo){let $c=o[0],$f=o[1];$c>t-4&&$c<t+4&&$f>n-4&&$f<n+4?(.5>Math.random()?.5>Math.random()?$c++:$c--:.5>Math.random()?$f++:$f--,cLog(3,`${FleetTimeStamp(userFleets[$].label)} SAM found no best sector and no good direction, moving random to`,$c,"/",$f)):($c<t&&$c++,$c>t&&$c--,$f<n&&$f++,$f>n&&$f--,cLog(3,`${FleetTimeStamp(userFleets[$].label)} SAM found no best sector and no good direction, moving back to start to`,$c,"/",$f)),userFleets[$].scanAutoMoveTo=[$c,$f]}_||(userFleets[$].fontColor="yellow",updateAssistStatus(userFleets[$]))}
+	async function handleScanAutoMovement($,o){let proactiveThreshold=Number(userFleets[$].scanProactiveMoveThreshold),stayIfNoTarget=Number.isFinite(proactiveThreshold)&&proactiveThreshold>0,candidateMin=stayIfNoTarget?proactiveThreshold:Number(userFleets[$].scanMin||0);userFleets[$].scanProactiveMoveThreshold=null;let _=!1,t=parseInt(userFleets[$].destCoord.split(",")[0].trim()),n=parseInt(userFleets[$].destCoord.split(",")[1].trim());if(!userFleets[$].scanAutoMoveTo&&!stayIfNoTarget){let e=ConvertCoords(userFleets[$].starbaseCoord);CoordsEqual(o,e)?userFleets[$].scanAutoMoveTo=[t,n]:userFleets[$].scanAutoMoveTo=[o[0],o[1]];return}userFleets[$].scanAutoMoveTo=null,_=await readScanMap();let s=globalSettings.scanBlockLength;userFleets[$].scanPatternLength&&(s=userFleets[$].scanPatternLength);let a=globalSettings.scanBlockPattern;userFleets[$].scanPattern&&(a=userFleets[$].scanPattern),s<5&&(s=5);let l=t-s,u=t+s,r=n-s,i=n+s,c=userFleets[$].scanNeighborhoodMinGood,f=parseInt(userFleets[$].scanClusterFactor),h=parseInt(userFleets[$].scanSearchDist);if(_){let d=0,p=[0,0],b=await scanAutoHasEnoughFuel($,o),v=1,g=1;a.includes("2hv")&&(v=2,g=2);let M=0,m=[];if(b){for(let A=o[0]-2;A<=o[0]+2;A++)for(let y=o[1]-2;y<=o[1]+2;y++){if(A==o[0]&&y==o[1]||A<l||A>u||y<r||y>i)continue;let T=_.find($=>$.x==A&&$.y==y);T&&100*T.c>=candidateMin&&M++}if(M>=c){let x=[];for(let S=0-v;S<=0+v;S++)for(let P=0-g;P<=0+g;P++){let B=[o[0]+S,o[1]+P];if(!(a.includes("2hv")&&(Math.abs(S)>=2&&0!=P||Math.abs(P)>=2&&0!=S))&&!(B[0]<l)&&!(B[0]>u)&&!(B[1]<r)&&!(B[1]>i)){if(0!=S||0!=P){let C=_.find($=>$.x==B[0]&&$.y==B[1]);C&&100*C.c>=candidateMin&&m.push([S,P]),C&&C.c>d&&(d=C.c,p=[S,P])}x.push([S,P])}}if(m.length){.5>Math.random()&&(p=m[Math.floor(Math.random()*m.length)]),m=[];let k=[];if(Math.abs(p[0])>=1&&Math.abs(p[1])>=1)k.push([o[0]+p[0],o[1]+p[1]]),k.push([o[0]+p[0],o[1]]),k.push([o[0]+p[0],o[1]+-1*p[1]]),k.push([o[0],o[1]+p[1]]),k.push([o[0]+-1*p[0],o[1]+p[1]]),a.includes("2hv")&&(k.push([o[0],o[1]+2*p[1]]),k.push([o[0]+2*p[0],o[1]]));else for(let w of x)(0!=w[0]||0!=w[1])&&(Math.abs(p[0])>=1&&(0==w[0]||Math.sign(w[0])==Math.sign(p[0]))||Math.abs(p[1])>=1&&(0==w[1]||Math.sign(w[1])==Math.sign(p[1])))&&k.push([o[0]+w[0],o[1]+w[1]]);for(let L of k){if(L[0]<l||L[0]>u||L[1]<r||L[1]>i)continue;let q=_.find($=>$.x==L[0]&&$.y==L[1]);(q?100*q.c>=candidateMin:!stayIfNoTarget)&&m.push([L[0],L[1]])}}}}if(M>=c&&m.length>0){let F=m[Math.floor(Math.random()*m.length)];userFleets[$].scanAutoMoveTo=F}else{let D=0,G=0,N=[0,0],R=0;if(b){let j=2.85,z=3;for(;z<2*s-2&&z<=h;){for(let E=-1;E<=1;E+=.2)for(let H=-1;H<=1;H+=.2){if(10!=Math.round(10*Math.abs(E))&&10!=Math.round(10*Math.abs(H)))continue;let I=E,J=H,K=[o[0]+Math.round(I*z),o[1]+Math.round(J*z)];if(K[0]<l||K[0]>u||K[1]<r||K[1]>i)continue;let O=Math.round(j),Q=0,U=0,V=0,W=j*j;for(let X=Math.floor(0-j);X<=Math.ceil(j);X++)for(let Y=Math.floor(0-j);Y<=Math.ceil(j);Y++)if(X*X+Y*Y<=W){if(K[0]+X<l||K[0]+X>u||K[1]+Y<r||K[1]+Y>i)continue;let Z=_.find($=>$.x==K[0]+X&&$.y==K[1]+Y);Z&&100*Z.c>candidateMin&&(Q++,U+=Z.c),V++}Q>=2&&U/Math.pow(Q,f/100)/Math.sqrt(V)>G&&(D=Q,G=U/Math.pow(Q,f/100)/Math.sqrt(V),N=[Math.round(I),Math.round(J)],R=V)}j+=.4,z+=1}}else{let $$=ConvertCoords(userFleets[$].starbaseCoord),$o=[$$[0]-o[0],$$[1]-o[1]];if(0!=$o[0]||0!=$o[1]){if(2>=Math.abs($o[0])&&2>=Math.abs($o[1])){userFleets[$].scanAutoMoveTo=$$,userFleets[$].scanForceResupply=!0,cLog(3,`${FleetTimeStamp(userFleets[$].label)} SAM heading back and near the SB, moving to SB`);return}let $_=[$o[0],$o[1]].map($=>$/Math.max(Math.abs($o[0]),Math.abs($o[1])));N=[Math.round($_[0]),Math.round($_[1])],D=1,a="auto(1,2hv++)",cLog(3,`${FleetTimeStamp(userFleets[$].label)} SAM heading back, direction`,N[0],"/",N[1])}}if(D>0){let $t=N[0],$n=N[1];("auto(1,2hv++)"==a||("auto(1,2hv)"==a||"auto(1,2hv+)"==a)&&(0==N[0]||0==N[1]))&&($t=2*N[0],$n=2*N[1]),p=[o[0]+$t,o[1]+$n];let $e=[],$s=_.find($=>$.x==p[0]&&$.y==p[1]);if($s){m=[],1>=Math.abs($t)&&1>=Math.abs($n)?"auto(1+)"==a&&(0==$t||0==$n)?m.push([o[0]+2*$t,o[1]+2*$n]):0==$t?(m.push([o[0]-1,o[1]+$n]),m.push([o[0]+1,o[1]+$n])):0==$n?(m.push([o[0]+$t,o[1]-1]),m.push([o[0]+$t,o[1]+1])):"auto(1,2hv+)"==a?(m.push([o[0]+2*$t,o[1]+$n]),m.push([o[0]+$t,o[1]+2*$n])):(m.push([o[0],o[1]+$n]),m.push([o[0]+$t,o[1]])):"auto(1,2hv++)"==a&&Math.abs($t)>=2&&Math.abs($n)>=2?(m.push([o[0]+$t,o[1]+$n/2]),m.push([o[0]+$t/2,o[1]+$n])):"auto(1,2hv)"==a?m.push([o[0]+N[0],o[1]+N[1]]):0==$t?(m.push([o[0]-1,o[1]+$n]),m.push([o[0]+1,o[1]+$n])):0==$n&&(m.push([o[0]+$t,o[1]-1]),m.push([o[0]+$t,o[1]+1]));let $a=1;for(let $l of m){let $u=_.find($=>$.x==$l[0]&&$.y==$l[1]);$u&&$u.c>=$s.c+userFleets[$].scanBypassPercent/100&&($e.push([$l[0],$l[1]]),$a>$u.c&&($a=$u.c))}if($e.length>=2)for(let $r of $e){let $i=_.find($=>$.x==$r[0]&&$.y==$r[1]);$i&&$i.c>=$a+userFleets[$].scanBypassPercent/100&&($e=[[$r[0],$r[1]]])}}$e.length?userFleets[$].scanAutoMoveTo=$e[Math.floor(Math.random()*$e.length)]:userFleets[$].scanAutoMoveTo=p}}}if(!userFleets[$].scanAutoMoveTo&&stayIfNoTarget){userFleets[$].scanAutoMoveTo=[o[0],o[1]],cLog(3,`${FleetTimeStamp(userFleets[$].label)} SAM found no sector meeting proactive threshold; staying put`)}else if(!userFleets[$].scanAutoMoveTo){let $c=o[0],$f=o[1];$c>t-4&&$c<t+4&&$f>n-4&&$f<n+4?(.5>Math.random()?.5>Math.random()?$c++:$c--:.5>Math.random()?$f++:$f--,cLog(3,`${FleetTimeStamp(userFleets[$].label)} SAM found no best sector and no good direction, moving random to`,$c,"/",$f)):($c<t&&$c++,$c>t&&$c--,$f<n&&$f++,$f>n&&$f--,cLog(3,`${FleetTimeStamp(userFleets[$].label)} SAM found no best sector and no good direction, moving back to start to`,$c,"/",$f)),userFleets[$].scanAutoMoveTo=[$c,$f]}_||(userFleets[$].fontColor="yellow",updateAssistStatus(userFleets[$]))}
 
 	async function operateFleet(i) {
         if (globalErrorTracker.errorCount > 9) toggleAssistant('ERROR');
@@ -17059,6 +17089,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				//let fleetScanCheckWhileCooldownLeftProb = fleetParsedData && fleetParsedData.scanCheckWhileCooldownLeftProb ? fleetParsedData.scanCheckWhileCooldownLeftProb : 0;
 				let fleetScanBypassPercent = fleetParsedData && fleetParsedData.scanBypassPercent ? fleetParsedData.scanBypassPercent : 4;
 				let fleetScanHomeAtPercent = fleetParsedData && fleetParsedData.scanHomeAtPercent ? fleetParsedData.scanHomeAtPercent : 0;
+				let fleetScanNearbyAdvantage = fleetParsedData && fleetParsedData.scanNearbyAdvantage ? fleetParsedData.scanNearbyAdvantage : 0;
 				//let fleetScanMove = fleetParsedData && fleetParsedData.scanMove == 'false' || false ? false : true;
 				let fleetScanMove = fleetParsedData && fleetParsedData.scanMove;
 				let fleetScanOptimizationEnabled = !!(fleetParsedData && fleetParsedData.assignment == 'Scan' && fleetParsedData.scanOptimizationEnabled);
@@ -17180,6 +17211,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					//scanCheckWhileCooldownLeftProb: fleetScanCheckWhileCooldownLeftProb,
 					scanBypassPercent: fleetScanBypassPercent,
 					scanHomeAtPercent: fleetScanHomeAtPercent,
+					scanNearbyAdvantage: fleetScanNearbyAdvantage,
 					scanMove: fleetScanMove,
 					scanOptimizationEnabled: fleetScanOptimizationEnabled,
 					scanOptimizationExperimentId: fleetScanOptimizationExperimentId,

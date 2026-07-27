@@ -28,14 +28,16 @@ function loadRuntime(file) {
   vm.runInContext([
     extractFunction(source, 'getScanningOptimizationRuntimeState'),
     extractFunction(source, 'getScanningOptimizationDisplayState'),
+    extractFunction(source, 'getScanningNearbyAdvantageThreshold'),
     extractFunction(source, 'getScanningOptimizationCompletedScanTelemetryState'),
     extractFunction(source, 'advanceScanningOptimizationRuntime'),
     'this.getState = getScanningOptimizationRuntimeState;',
     'this.getDisplay = getScanningOptimizationDisplayState;',
+    'this.getNearbyAdvantageThreshold = getScanningNearbyAdvantageThreshold;',
     'this.getCompletedScanTelemetry = getScanningOptimizationCompletedScanTelemetryState;',
     'this.advance = advanceScanningOptimizationRuntime;'
   ].join('\n'), context);
-  return { source, getState: context.getState, getDisplay: context.getDisplay, getCompletedScanTelemetry: context.getCompletedScanTelemetry, advance: context.advance };
+  return { source, getState: context.getState, getDisplay: context.getDisplay, getNearbyAdvantageThreshold: context.getNearbyAdvantageThreshold, getCompletedScanTelemetry: context.getCompletedScanTelemetry, advance: context.advance };
 }
 
 for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.user.js']) {
@@ -72,6 +74,14 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
     assert.equal(fleet.scanOptimizationRunEnabled, false);
     assert.equal(fleet.scanOptimizationBlockIndex, 2);
     assert.equal(fleet.scanMin, 10, 'completion leaves the final tested value in place');
+  });
+
+  test(`${file} derives proactive nearby movement thresholds without enabling legacy fleets`, () => {
+    const { getNearbyAdvantageThreshold } = loadRuntime(file);
+    assert.equal(getNearbyAdvantageThreshold(10, 10), 20);
+    assert.equal(getNearbyAdvantageThreshold(14.2282, 5), 19.2282);
+    assert.equal(getNearbyAdvantageThreshold(10, 0), null);
+    assert.equal(getNearbyAdvantageThreshold(undefined, 10), null);
   });
 
   test(`${file} reports the just-completed scan before mutating runtime progress`, () => {
@@ -143,6 +153,11 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
     assert.match(source, /optimizationValue=/);
     assert.match(source, /optimizationBlockNumber=/);
     assert.match(source, /optimizationTotalBlocks=/);
+    assert.match(source, /nearbyAdvantagePercent=/);
+    assert.match(source, /scanNearbyAdvantage/);
+    assert.match(source, /stayIfNoTarget/);
+    assert.match(source, /candidateMin=stayIfNoTarget\?proactiveThreshold:Number\(userFleets\[\$\]\.scanMin\|\|0\)/);
+    assert.doesNotMatch(source, /Number\(candidateMin\|\|0\)/);
     assert.match(source, /scanOptimizationStatus\.innerText = `Pending save/);
     assert.match(source, /scanOptimizationStatus\.innerText = formatScanningOptimizationStatus\(\{\.\.\.fleetParsedData, scanCooldown: fleet\.scanCooldown\}\)/);
     assert.match(source, /const cooldown = Number\(fleet\?\.scanCooldown \|\| 0\)/);
