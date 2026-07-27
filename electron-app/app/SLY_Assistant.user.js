@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-210
+// @aephia-version 0.7.35-211
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-210'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-211'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -7887,6 +7887,16 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return `${display.status} · ${display.parameter} ${display.value} · block ${display.blockNumber}/${display.totalBlocks} (${display.blockScansCompleted}/${display.scansInBlock}) · ${display.completedScans}/${display.totalScans} scans (${display.percentComplete}%)${eta}`;
 	}
 
+	function getScanningOptimizationCompletedScanTelemetryState(fleet) {
+		const runtime = getScanningOptimizationRuntimeState(fleet);
+		if(!runtime.active) return runtime;
+		return {
+			...runtime,
+			blockScansCompleted: Math.min(runtime.scansInBlock, runtime.blockScansCompleted + 1),
+			completedScans: Math.min(runtime.totalScans, runtime.completedScans + 1)
+		};
+	}
+
 	function advanceScanningOptimizationRuntime(fleet) {
 		const state = getScanningOptimizationRuntimeState(fleet);
 		if(!state.active) return { advanced: false, complete: state.complete, notRunnable: !!fleet?.scanOptimizationRunEnabled && !state.complete };
@@ -7923,10 +7933,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return result;
 	}
 
-	function sendScanningOptimizationEvent(fleet, eventType, extraFields = '', extraTags = '') {
+	function sendScanningOptimizationEvent(fleet, eventType, extraFields = '', extraTags = '', runtimeOverride = null) {
 		if(!fleet?.scanOptimizationEnabled || !fleet?.scanOptimizationExperimentId) return;
 		const status = eventType === 'transaction' && extraFields.includes('success=false') ? 'error' : 'ok';
-		const runtime = getScanningOptimizationRuntimeState(fleet);
+		const runtime = runtimeOverride || getScanningOptimizationRuntimeState(fleet);
 		const phase = fleet.scanOptimizationRunEnabled || runtime.complete ? 'experiment' : 'baseline_collection';
 		const variant = phase === 'experiment' ? 'scheduled' : 'baseline';
 		const tags = `optimization_type=scanning,phase=${influxEscape(phase)},event_type=${influxEscape(eventType)},variant=${influxEscape(variant)},instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(fleet.label || 'unknown')},status=${status}${extraTags}`;
@@ -13487,6 +13497,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			const sduStarbaseCoords = ConvertCoords(userFleets[i].starbaseCoord);
 			const sduStarbaseContext = await getTelemetryStarbaseContextFromCoords(sduStarbaseCoords[0], sduStarbaseCoords[1]);
 			await sendToInflux(`sdu,instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},starbase=${influxEscape(sduStarbaseContext.starbaseName || 'unknown')},fleet=${influxEscape(userFleets[i].label)},sectorX=${fleetCoords[0]},sectorY=${fleetCoords[1]} amount=${sduFound},burnedFood=${burnedFood},chance=${scanCondition},cargoRoomLeft=${userFleets[i].cargoCapacity - cargoCnt - sduFound}${buildSlyaTxCostInfluxFields(scanResult)}`);
+			const completedScanTelemetryState = getScanningOptimizationCompletedScanTelemetryState(userFleets[i]);
 			sendScanningOptimizationEvent(userFleets[i], 'scan_result', [
 				`signature=${optimizationInfluxString(scanResult?.slyaTxHash || '')}`,
 				`success=${scanResult && !scanResult?.meta?.err ? 'true' : 'false'}`,
@@ -13502,7 +13513,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				`scanStrikes=${Math.round(Number(userFleets[i].scanStrikes || 0))}i`,
 				`resultSectorX=${Number(fleetCoords[0] || 0)}`,
 				`resultSectorY=${Number(fleetCoords[1] || 0)}`
-			].join(','), ',operation=SCAN');
+			].join(','), ',operation=SCAN', scanResult && !scanResult?.meta?.err ? completedScanTelemetryState : null);
 			if(scanResult && !scanResult?.meta?.err) await advanceScanningOptimizationAfterCompletedScan(userFleets[i]);
 
 		}

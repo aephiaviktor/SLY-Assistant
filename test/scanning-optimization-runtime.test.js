@@ -28,12 +28,14 @@ function loadRuntime(file) {
   vm.runInContext([
     extractFunction(source, 'getScanningOptimizationRuntimeState'),
     extractFunction(source, 'getScanningOptimizationDisplayState'),
+    extractFunction(source, 'getScanningOptimizationCompletedScanTelemetryState'),
     extractFunction(source, 'advanceScanningOptimizationRuntime'),
     'this.getState = getScanningOptimizationRuntimeState;',
     'this.getDisplay = getScanningOptimizationDisplayState;',
+    'this.getCompletedScanTelemetry = getScanningOptimizationCompletedScanTelemetryState;',
     'this.advance = advanceScanningOptimizationRuntime;'
   ].join('\n'), context);
-  return { source, getState: context.getState, getDisplay: context.getDisplay, advance: context.advance };
+  return { source, getState: context.getState, getDisplay: context.getDisplay, getCompletedScanTelemetry: context.getCompletedScanTelemetry, advance: context.advance };
 }
 
 for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.user.js']) {
@@ -70,6 +72,25 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
     assert.equal(fleet.scanOptimizationRunEnabled, false);
     assert.equal(fleet.scanOptimizationBlockIndex, 2);
     assert.equal(fleet.scanMin, 10, 'completion leaves the final tested value in place');
+  });
+
+  test(`${file} reports the just-completed scan before mutating runtime progress`, () => {
+    const { getCompletedScanTelemetry } = loadRuntime(file);
+    const fleet = {
+      scanOptimizationEnabled: true,
+      scanOptimizationRunEnabled: true,
+      scanOptimizationParameter: 'scanMin',
+      scanOptimizationSchedule: [{ value: 12, scans: 10 }, { value: 20, scans: 10 }],
+      scanOptimizationBlockIndex: 0,
+      scanOptimizationBlockScansCompleted: 9
+    };
+
+    assert.deepEqual({ ...getCompletedScanTelemetry(fleet) }, {
+      active: true, complete: false, blockIndex: 0, blockScansCompleted: 10,
+      totalBlocks: 2, totalScans: 20, completedScans: 10, value: 12, scansInBlock: 10
+    });
+    assert.equal(fleet.scanOptimizationBlockScansCompleted, 9, 'telemetry projection must not advance control state');
+    assert.equal(fleet.scanOptimizationBlockIndex, 0);
   });
 
   test(`${file} keeps paused and invalid runs inert`, () => {

@@ -51,7 +51,7 @@ assert.match(transactionHook, /`,operation=\$\{influxEscape/, 'operation remains
 assert.match(source, /sendScanningOptimizationEvent\(userFleets\[i\], 'scan_result'/, 'scan outcomes emit linked result events');
 const scanResultHook = source.slice(
   source.indexOf("sendScanningOptimizationEvent(userFleets[i], 'scan_result'"),
-  source.indexOf("].join(','), ',operation=SCAN');", source.indexOf("sendScanningOptimizationEvent(userFleets[i], 'scan_result'")) + 34
+  source.indexOf("if(scanResult && !scanResult?.meta?.err)", source.indexOf("sendScanningOptimizationEvent(userFleets[i], 'scan_result'"))
 );
 assert.match(scanResultHook, /durationMs=/, 'scan results include transaction duration');
 assert.match(scanResultHook, /txFeeLamports=/, 'scan results include transaction fees');
