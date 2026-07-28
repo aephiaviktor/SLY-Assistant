@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-216
+// @aephia-version 0.7.35-217
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -8672,9 +8672,14 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 	function formatScanningOptimizationStatus(fleet) {
 		const display = getScanningOptimizationDisplayState(fleet);
-		if(!display.totalScans) return `Recording baseline · ${String(fleet?.scanOptimizationExperimentId || '').slice(-8)}`;
-		if(display.status === 'Completed') return `Completed · ${display.totalScans}/${display.totalScans} scans · ${String(fleet?.scanOptimizationExperimentId || '').slice(-8)}`;
+		const experimentSuffix = String(fleet?.scanOptimizationExperimentId || '').slice(-8);
+		if(display.status === 'Completed') return `Completed · ${display.totalScans}/${display.totalScans} scans · ${experimentSuffix}`;
 		const hours = display.estimatedRemainingSeconds / 3600;
+		if(fleet?.scanOptimizationEnabled && !fleet?.scanOptimizationRunEnabled && display.completedScans === 0) {
+			const schedule = display.totalScans ? ` · schedule ready: ${display.totalScans} scans${hours > 0 ? ` (~${hours < 10 ? hours.toFixed(1) : Math.round(hours)}h)` : ''}` : '';
+			return `Recording baseline${schedule} · ${experimentSuffix}`;
+		}
+		if(!display.totalScans) return `Recording baseline · ${experimentSuffix}`;
 		const eta = hours > 0 ? ` · ~${hours < 10 ? hours.toFixed(1) : Math.round(hours)}h remaining` : '';
 		return `${display.status} · ${display.parameter} ${display.value} · block ${display.blockNumber}/${display.totalBlocks} (${display.blockScansCompleted}/${display.scansInBlock}) · ${display.completedScans}/${display.totalScans} scans (${display.percentComplete}%)${eta}`;
 	}

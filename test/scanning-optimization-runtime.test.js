@@ -31,17 +31,19 @@ function loadRuntime(file) {
     extractFunction(source, 'resolveScanningOptimizationSchedule'),
     extractFunction(source, 'getScanningOptimizationRuntimeState'),
     extractFunction(source, 'getScanningOptimizationDisplayState'),
+    extractFunction(source, 'formatScanningOptimizationStatus'),
     extractFunction(source, 'getScanningNearbyAdvantageThreshold'),
     extractFunction(source, 'getScanningOptimizationCompletedScanTelemetryState'),
     extractFunction(source, 'advanceScanningOptimizationRuntime'),
     'this.resolveSchedule = resolveScanningOptimizationSchedule;',
     'this.getState = getScanningOptimizationRuntimeState;',
     'this.getDisplay = getScanningOptimizationDisplayState;',
+    'this.formatStatus = formatScanningOptimizationStatus;',
     'this.getNearbyAdvantageThreshold = getScanningNearbyAdvantageThreshold;',
     'this.getCompletedScanTelemetry = getScanningOptimizationCompletedScanTelemetryState;',
     'this.advance = advanceScanningOptimizationRuntime;'
   ].join('\n'), context);
-  return { source, resolveSchedule: context.resolveSchedule, getState: context.getState, getDisplay: context.getDisplay, getNearbyAdvantageThreshold: context.getNearbyAdvantageThreshold, getCompletedScanTelemetry: context.getCompletedScanTelemetry, advance: context.advance };
+  return { source, resolveSchedule: context.resolveSchedule, getState: context.getState, getDisplay: context.getDisplay, formatStatus: context.formatStatus, getNearbyAdvantageThreshold: context.getNearbyAdvantageThreshold, getCompletedScanTelemetry: context.getCompletedScanTelemetry, advance: context.advance };
 }
 
 for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.user.js']) {
@@ -195,6 +197,26 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
     fleet.scanOptimizationBlockIndex = 2;
     fleet.scanOptimizationBlockScansCompleted = 0;
     assert.equal(getDisplay(fleet).status, 'Completed');
+  });
+
+  test(`${file} labels record-only scanning as baseline collection without implying the schedule is active`, () => {
+    const { formatStatus } = loadRuntime(file);
+    const fleet = {
+      scanOptimizationEnabled: true,
+      scanOptimizationRunEnabled: false,
+      scanOptimizationExperimentId: 'scan-record-only',
+      scanOptimizationSchedule: [{ values: { scanMin: 16 }, scans: 60 }],
+      scanOptimizationBlockIndex: 0,
+      scanOptimizationBlockScansCompleted: 0,
+      scanCooldown: 300
+    };
+
+    const status = formatStatus(fleet);
+    assert.match(status, /^Recording baseline/);
+    assert.match(status, /schedule ready: 60 scans/);
+    assert.match(status, /~5\.0h/);
+    assert.doesNotMatch(status, /scanMin 16/);
+    assert.doesNotMatch(status, /remaining/);
   });
 
   test(`${file} persists runtime progress and exposes block/value telemetry`, () => {
