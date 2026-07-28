@@ -36,7 +36,43 @@ function loadScheduleHelpers(file) {
   return { source, buildValues: context.buildValues, buildQueue: context.buildQueue };
 }
 
+function loadExperimentIdHelper(file) {
+  const source = fs.readFileSync(path.join(ROOT, file), 'utf8');
+  const context = {};
+  vm.createContext(context);
+  vm.runInContext([
+    extractFunction(source, 'buildScanningOptimizationExperimentId'),
+    'this.buildId = buildScanningOptimizationExperimentId;'
+  ].join('\n'), context);
+  return context.buildId;
+}
+
+function loadTelemetryParameterHelper(file) {
+  const source = fs.readFileSync(path.join(ROOT, file), 'utf8');
+  const context = {};
+  vm.createContext(context);
+  vm.runInContext([
+    extractFunction(source, 'getScanningOptimizationTelemetryParameterName'),
+    'this.name = getScanningOptimizationTelemetryParameterName;'
+  ].join('\n'), context);
+  return context.name;
+}
+
 for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.user.js']) {
+  test(`${file} creates readable stable scanning experiment IDs`, () => {
+    const buildId = loadExperimentIdHelper(file);
+    assert.equal(buildId('SF01-OPOD', 290, new Date('2026-07-27T23:59:00Z')), 'scan-20260727-SF01_OPOD-290');
+    assert.equal(buildId(' Fleet / Alpha ', 20, new Date('2026-01-02T00:00:00Z')), 'scan-20260102-Fleet_Alpha-20');
+  });
+
+  test(`${file} emits semantic scanning optimization parameter names`, () => {
+    const name = loadTelemetryParameterHelper(file);
+    assert.equal(name('scanMin'), 'minProb');
+    assert.equal(name('scanMin2'), 'instantStrikeoutProb');
+    assert.equal(name('scanMin3'), 'successStrikeoutProb');
+    assert.equal(name('scanSearchDist'), 'searchDist');
+  });
+
   test(`${file} builds independent and combination scanning optimization schedules`, () => {
     const { source, buildValues, buildQueue } = loadScheduleHelpers(file);
     assert.deepEqual(Array.from(buildValues(8, 18, 2)), [8, 10, 12, 14, 16, 18]);

@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-214
+// @aephia-version 0.7.35-215
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-214'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-215'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -8498,6 +8498,18 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		['scanPatternLength', 'Override Pattern Length']
 	]);
 
+	function getScanningOptimizationTelemetryParameterName(parameter) {
+		return ({ scanMin: 'minProb', scanMin2: 'instantStrikeoutProb', scanMin3: 'successStrikeoutProb' })[String(parameter || '')]
+			|| String(parameter || '').replace(/^scan/, '').replace(/^./, character => character.toLowerCase());
+	}
+
+	function buildScanningOptimizationExperimentId(fleetName, totalScans, now = new Date()) {
+		const date = now instanceof Date ? now : new Date(now);
+		const datePart = Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10).replaceAll('-', '') : 'unknown';
+		const fleetPart = String(fleetName || 'unknown').trim().replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '') || 'unknown';
+		return `scan-${datePart}-${fleetPart}-${Math.max(0, Math.floor(Number(totalScans) || 0))}`;
+	}
+
 	function buildScanningOptimizationValues(start, end, step) {
 		const first = Number(start);
 		const last = Number(end);
@@ -8722,9 +8734,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const phase = fleet.scanOptimizationRunEnabled || runtime.complete ? 'experiment' : 'baseline_collection';
 		const variant = phase === 'experiment' ? 'scheduled' : 'baseline';
 		const tags = `optimization_type=scanning,phase=${influxEscape(phase)},event_type=${influxEscape(eventType)},variant=${influxEscape(variant)},instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(fleet.label || 'unknown')},status=${status}${extraTags}`;
-		const optimizationParameter = runtime.parameters.join('+') || String(fleet.scanOptimizationParameter || '');
+		const telemetryValues = Object.fromEntries(Object.entries(runtime.values || {}).map(([parameter, value]) => [getScanningOptimizationTelemetryParameterName(parameter), value]));
+		const optimizationParameter = runtime.parameters.map(getScanningOptimizationTelemetryParameterName).join('+') || getScanningOptimizationTelemetryParameterName(fleet.scanOptimizationParameter || '');
 		const optimizationValue = runtime.parameters.length === 1 ? runtime.values[runtime.parameters[0]] : runtime.value;
-		const progressFields = `,optimizationParameter=${optimizationInfluxString(optimizationParameter)},optimizationValue=${Number.isFinite(Number(optimizationValue)) ? Number(optimizationValue) : 0},optimizationValues=${optimizationInfluxString(JSON.stringify(runtime.values || {}))},optimizationBlockNumber=${runtime.complete ? runtime.totalBlocks : Math.min(runtime.totalBlocks, runtime.blockIndex + 1)}i,optimizationTotalBlocks=${runtime.totalBlocks}i,optimizationBlockIndex=${runtime.blockIndex}i,optimizationBlockScansCompleted=${runtime.blockScansCompleted}i,optimizationScansInBlock=${runtime.scansInBlock}i,optimizationCompletedScans=${runtime.completedScans}i,optimizationTotalScans=${runtime.totalScans}i`;
+		const progressFields = `,optimizationParameter=${optimizationInfluxString(optimizationParameter)},optimizationValue=${Number.isFinite(Number(optimizationValue)) ? Number(optimizationValue) : 0},optimizationValues=${optimizationInfluxString(JSON.stringify(telemetryValues))},optimizationBlockNumber=${runtime.complete ? runtime.totalBlocks : Math.min(runtime.totalBlocks, runtime.blockIndex + 1)}i,optimizationTotalBlocks=${runtime.totalBlocks}i,optimizationBlockIndex=${runtime.blockIndex}i,optimizationBlockScansCompleted=${runtime.blockScansCompleted}i,optimizationScansInBlock=${runtime.scansInBlock}i,optimizationCompletedScans=${runtime.completedScans}i,optimizationTotalScans=${runtime.totalScans}i`;
 		const fields = buildScanningOptimizationParameterFields(fleet) + progressFields + (extraFields ? `,${extraFields}` : '');
 		void sendToInflux(`optimization_event,${tags} ${fields}`, 'optimization').catch(error => {
 			cLog(1, `${FleetTimeStamp(fleet.label)} optimization telemetry failed`, error);
@@ -12882,7 +12895,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let scanOptimizationExperimentId = scanOptimizationEnabled
 				? (!resolvedOptimizationSchedule.changed && fleetParsedData.scanOptimizationEnabled && fleetParsedData.scanOptimizationExperimentId
 					? fleetParsedData.scanOptimizationExperimentId
-					: `scan-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`)
+					: buildScanningOptimizationExperimentId(userFleets[userFleetIndex]?.label || fleetParsedData.label || fleetPK, scanOptimizationSchedule.reduce((sum, block) => sum + Math.max(0, Number(block?.scans || 0)), 0)))
 				: '';
 			const savedOptimizationBlockIndex = Math.max(0, Math.floor(Number(fleetParsedData.scanOptimizationBlockIndex || 0)));
 			const savedOptimizationBlockScansCompleted = Math.max(0, Math.floor(Number(fleetParsedData.scanOptimizationBlockScansCompleted || 0)));
