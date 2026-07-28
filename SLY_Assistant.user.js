@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-217
+// @aephia-version 0.7.35-218
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -8510,8 +8510,34 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return `scan-${datePart}-${fleetPart}-${Math.max(0, Math.floor(Number(totalScans) || 0))}`;
 	}
 
+	function buildScanningRecordingId(fleetName, now = new Date()) {
+		const date = now instanceof Date ? now : new Date(now);
+		const datePart = Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10).replaceAll('-', '') : 'unknown';
+		const fleetPart = String(fleetName || 'unknown').trim().replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '') || 'unknown';
+		return `record-${datePart}-${fleetPart}`;
+	}
+
 	function isLegacyScanningOptimizationExperimentId(experimentId) {
 		return /^scan-[a-z0-9]{6,}-[a-z0-9]{4,}$/i.test(String(experimentId || ''));
+	}
+
+	function resolveScanningExperimentIds(savedFleet, fleetName, totalScans, scheduleChanged, optimizationEnabled, runEnabled, now = new Date()) {
+		if(!optimizationEnabled) return { experimentId: '', previousExperimentId: '' };
+		const savedId = String(savedFleet?.scanOptimizationExperimentId || '');
+		const savedBlockIndex = Math.max(0, Math.floor(Number(savedFleet?.scanOptimizationBlockIndex || 0)));
+		const continuingOptimization = !!(runEnabled || savedFleet?.scanOptimizationRunEnabled || savedBlockIndex > 0);
+		if(!continuingOptimization) {
+			return {
+				experimentId: savedId.startsWith('record-') ? savedId : buildScanningRecordingId(fleetName, now),
+				previousExperimentId: ''
+			};
+		}
+		const readableId = buildScanningOptimizationExperimentId(fleetName, totalScans, now);
+		const preserveSavedId = !scheduleChanged && savedFleet?.scanOptimizationEnabled && savedId.startsWith('scan-') && !isLegacyScanningOptimizationExperimentId(savedId);
+		return {
+			experimentId: preserveSavedId ? savedId : readableId,
+			previousExperimentId: savedId && isLegacyScanningOptimizationExperimentId(savedId) && savedId !== readableId ? savedId : ''
+		};
 	}
 
 	function buildScanningOptimizationValues(start, end, step) {
@@ -12903,16 +12929,16 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				inputError('ERROR: Invalid scanning optimization schedule', scanOptimizationCombinationMode ? 'Combination mode requires exactly two unique, valid parameters' : 'Use unique parameters with valid ranges', 1);
 			}
 			const scanOptimizationTotalScans = scanOptimizationSchedule.reduce((sum, block) => sum + Math.max(0, Number(block?.scans || 0)), 0);
-			const savedScanOptimizationExperimentId = String(fleetParsedData.scanOptimizationExperimentId || '');
-			const readableScanOptimizationExperimentId = buildScanningOptimizationExperimentId(userFleets[userFleetIndex]?.label || fleetParsedData.label || fleetPK, scanOptimizationTotalScans);
-			let scanOptimizationPreviousExperimentId = String(fleetParsedData.scanOptimizationPreviousExperimentId || '');
-			let scanOptimizationExperimentId = scanOptimizationEnabled
-				? (!resolvedOptimizationSchedule.changed && fleetParsedData.scanOptimizationEnabled && savedScanOptimizationExperimentId && !isLegacyScanningOptimizationExperimentId(savedScanOptimizationExperimentId)
-					? savedScanOptimizationExperimentId
-					: readableScanOptimizationExperimentId)
-				: '';
-			if(scanOptimizationEnabled && savedScanOptimizationExperimentId && savedScanOptimizationExperimentId !== scanOptimizationExperimentId) scanOptimizationPreviousExperimentId = savedScanOptimizationExperimentId;
-			if(!scanOptimizationEnabled) scanOptimizationPreviousExperimentId = '';
+			const resolvedExperimentIds = resolveScanningExperimentIds(
+				fleetParsedData,
+				userFleets[userFleetIndex]?.label || fleetParsedData.label || fleetPK,
+				scanOptimizationTotalScans,
+				resolvedOptimizationSchedule.changed,
+				scanOptimizationEnabled,
+				scanOptimizationRunEnabled
+			);
+			let scanOptimizationExperimentId = resolvedExperimentIds.experimentId;
+			let scanOptimizationPreviousExperimentId = resolvedExperimentIds.previousExperimentId;
 			const savedOptimizationBlockIndex = Math.max(0, Math.floor(Number(fleetParsedData.scanOptimizationBlockIndex || 0)));
 			const savedOptimizationBlockScansCompleted = Math.max(0, Math.floor(Number(fleetParsedData.scanOptimizationBlockScansCompleted || 0)));
 			let scanOptimizationBlockIndex = !resolvedOptimizationSchedule.changed ? savedOptimizationBlockIndex : 0;

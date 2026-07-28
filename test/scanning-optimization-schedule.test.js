@@ -42,9 +42,14 @@ function loadExperimentIdHelper(file) {
   vm.createContext(context);
   vm.runInContext([
     extractFunction(source, 'buildScanningOptimizationExperimentId'),
-    'this.buildId = buildScanningOptimizationExperimentId;'
+    extractFunction(source, 'buildScanningRecordingId'),
+    extractFunction(source, 'isLegacyScanningOptimizationExperimentId'),
+    extractFunction(source, 'resolveScanningExperimentIds'),
+    'this.buildId = buildScanningOptimizationExperimentId;',
+    'this.buildRecordingId = buildScanningRecordingId;',
+    'this.resolveIds = resolveScanningExperimentIds;'
   ].join('\n'), context);
-  return context.buildId;
+  return { buildId: context.buildId, buildRecordingId: context.buildRecordingId, resolveIds: context.resolveIds };
 }
 
 function loadTelemetryParameterHelper(file) {
@@ -60,9 +65,31 @@ function loadTelemetryParameterHelper(file) {
 
 for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.user.js']) {
   test(`${file} creates readable stable scanning experiment IDs`, () => {
-    const buildId = loadExperimentIdHelper(file);
+    const { buildId, buildRecordingId } = loadExperimentIdHelper(file);
     assert.equal(buildId('SF01-OPOD', 290, new Date('2026-07-27T23:59:00Z')), 'scan-20260727-SF01_OPOD-290');
     assert.equal(buildId(' Fleet / Alpha ', 20, new Date('2026-01-02T00:00:00Z')), 'scan-20260102-Fleet_Alpha-20');
+    assert.equal(buildRecordingId('SF02-RANGER', new Date('2026-07-28T00:00:00Z')), 'record-20260728-SF02_RANGER');
+  });
+
+  test(`${file} keeps record-only IDs separate from optimization experiments`, () => {
+    const { resolveIds } = loadExperimentIdHelper(file);
+    const now = new Date('2026-07-28T00:00:00Z');
+
+    assert.deepEqual({ ...resolveIds({}, 'SF02-RANGER', 60, false, true, false, now) }, {
+      experimentId: 'record-20260728-SF02_RANGER', previousExperimentId: ''
+    });
+    assert.deepEqual({ ...resolveIds({ scanOptimizationExperimentId: 'record-20260728-SF02_RANGER' }, 'SF02-RANGER', 60, false, true, true, now) }, {
+      experimentId: 'scan-20260728-SF02_RANGER-60', previousExperimentId: ''
+    });
+    assert.deepEqual({ ...resolveIds({ scanOptimizationEnabled: true, scanOptimizationRunEnabled: true, scanOptimizationExperimentId: 'scan-20260728-SF01_OPOD-290' }, 'SF01-OPOD', 290, false, true, true, now) }, {
+      experimentId: 'scan-20260728-SF01_OPOD-290', previousExperimentId: ''
+    });
+    assert.deepEqual({ ...resolveIds({ scanOptimizationEnabled: true, scanOptimizationRunEnabled: true, scanOptimizationExperimentId: 'scan-ms3j1zln-2j0r7l' }, 'SF01-OPOD', 290, false, true, true, now) }, {
+      experimentId: 'scan-20260728-SF01_OPOD-290', previousExperimentId: 'scan-ms3j1zln-2j0r7l'
+    });
+    assert.deepEqual({ ...resolveIds({ scanOptimizationEnabled: true, scanOptimizationRunEnabled: true, scanOptimizationExperimentId: 'scan-20260728-SF01_OPOD-290', scanOptimizationBlockIndex: 12 }, 'SF01-OPOD', 290, false, true, false, now) }, {
+      experimentId: 'scan-20260728-SF01_OPOD-290', previousExperimentId: ''
+    });
   });
 
   test(`${file} emits semantic scanning optimization parameter names`, () => {
