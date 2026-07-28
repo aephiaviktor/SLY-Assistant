@@ -67,16 +67,6 @@ function updateFile(text, file, version) {
     next = next.replace(/^(\/\/\s*@version\s+.*)$/m, `$1\n// @aephia-version ${version}`);
   }
 
-  if (/const\s+AEPHIA_SLYA_VERSION\s*=\s*['"][^'"]+['"];/.test(next)) {
-    next = next.replace(/const\s+AEPHIA_SLYA_VERSION\s*=\s*['"][^'"]+['"];\s*\/\/[^\n]*/,
-      `const AEPHIA_SLYA_VERSION = '${version}'; // Aephia build version; bump with scripts/bump-aephia-version.js`);
-    next = next.replace(/const\s+AEPHIA_SLYA_VERSION\s*=\s*['"][^'"]+['"];(?!\s*\/\/)/,
-      `const AEPHIA_SLYA_VERSION = '${version}';`);
-  } else {
-    next = next.replace(/(const\s+AEPHIA_TOKEN_VALIDATE_URL\s*=\s*'[^']+';)/,
-      `$1\n    const AEPHIA_SLYA_VERSION = '${version}'; // Aephia build version; bump with scripts/bump-aephia-version.js`);
-  }
-
   if (next === text) throw new Error(`${file}: no changes applied`);
   return next;
 }

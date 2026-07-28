@@ -20,7 +20,7 @@ const version = urlParams.get('version');
 const aephiaVersion = urlParams.get('aephiaVersion');
 const appInstanceName = urlParams.get('appInstanceName') || '';
 const loadingVersionLabel = aephiaVersion && aephiaVersion !== 'unknown' ? (appInstanceName + ' - AEP v' + aephiaVersion) : (appInstanceName + ' - SLYA v' + version);
-window.GM_info = { script: { version: version } };
+window.GM_info = { script: { version: version, aephiaVersion: aephiaVersion } };
 
 </script>
 

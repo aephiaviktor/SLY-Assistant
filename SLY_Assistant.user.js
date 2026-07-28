@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-218
+// @aephia-version 0.7.35-219
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,14 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-216'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    function readAephiaSlyaVersion() {
+        const standaloneVersion = String(globalThis.GM_info?.script?.aephiaVersion || '').trim();
+        if (/^\d+\.\d+\.\d+-\d+$/.test(standaloneVersion)) return standaloneVersion;
+        const userscriptMetadata = String(globalThis.GM_info?.scriptMetaStr || '');
+        const metadataMatch = userscriptMetadata.match(/^\/\/\s*@aephia-version\s+(\d+\.\d+\.\d+-\d+)\s*$/m);
+        return metadataMatch ? metadataMatch[1] : 'unknown';
+    }
+    const AEPHIA_SLYA_VERSION = readAephiaSlyaVersion();
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
