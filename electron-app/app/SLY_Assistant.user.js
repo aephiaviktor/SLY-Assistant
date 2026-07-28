@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-219
+// @aephia-version 0.7.35-220
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -3068,7 +3068,7 @@
 		const perfNeutralDebugRaw = await fetchUpgradeAutomationPerfFieldHistory('neutral_lp_target_full_day', now, historyStartIso);
 		let aephiaLpDebug = { rows: [], latestToday: null, latestYesterday: null, latestTime: '', query: 'aephia_summary_unavailable', error: '' };
 		try {
-			aephiaLpDebug = await fetchUpgradeAutomationAephiaLpHistory(lpInstanceKey, now, historyStartIso);
+			aephiaLpDebug = await fetchUpgradeAutomationAephiaLpHistory(lpInstanceKey, now, historyStartIso, userProfileAcct?.toBase58?.() || '');
 		} catch (e) {
 			aephiaLpDebug.error = String(e?.message || e || 'aephia_summary_failed');
 		}
@@ -3091,7 +3091,6 @@
 		const aggrNeutralYday = await fetchUpgradeAutomationAggrFieldHistory('neutral_lp_target', new Date(todayStartMs - 1), yesterdayStartIso);
 		const aggrRequestedYday = await fetchUpgradeAutomationAggrFieldHistory('requested_lp_target', new Date(todayStartMs - 1), yesterdayStartIso);
 		const aggrOptimizerYday = await fetchUpgradeAutomationAggrFieldHistory('achievable_lp_target', new Date(todayStartMs - 1), yesterdayStartIso);
-		const aggrInstalledYday = await fetchUpgradeAutomationAggrFieldHistory('installed_lp_today', new Date(todayStartMs - 1), yesterdayStartIso);
 		const perfNeutralYday = perfNeutralYdayRaw.rows.length ? perfNeutralYdayRaw : aggrNeutralYday;
 		const perfRequestedYday = perfRequestedYdayRaw.rows.length ? perfRequestedYdayRaw : aggrRequestedYday;
 		const perfOptimizerYday = perfOptimizerYdayRaw.rows.length ? perfOptimizerYdayRaw : aggrOptimizerYday;
@@ -3396,7 +3395,7 @@
 			neutralLpYesterday: perfNeutralYday.latestValue,
 			requestedLpYesterday: perfRequestedYday.latestValue,
 			optimizerLpYesterday: perfOptimizerYday.latestValue,
-			installedYesterday: aggrInstalledYday.latestValue,
+			installedYesterday: aephiaLpDebug.playerYesterday,
 			componentPerformanceMetrics: componentPerformanceMetrics.rows,
 			componentPerformanceMetricsError: componentPerformanceMetrics.error,
 			aephiaLpTodayLatest: aephiaLpDebug.latestToday,
@@ -4186,14 +4185,38 @@
 		return data;
 	}
 
-	function getUpgradeAutomationAephiaFactionRows(data, faction) {
+	function getUpgradeAutomationAephiaFactionKeys(faction) {
 		const normalizedFaction = normalizeUpgradeAutomationLpInstance(faction || globalSettings?.upgradeAutomationLpInstance || 'MUD');
-		const factionKeys = normalizedFaction === 'UST' ? ['UST', 'USTUR', 'Ustur'] : [normalizedFaction];
+		return {
+			normalizedFaction,
+			factionKeys: normalizedFaction === 'UST' ? ['UST', 'USTUR', 'Ustur'] : [normalizedFaction]
+		};
+	}
+
+	function getUpgradeAutomationAephiaFactionRows(data, faction) {
+		const { normalizedFaction, factionKeys } = getUpgradeAutomationAephiaFactionKeys(faction);
 		for (const key of factionKeys) {
 			const rows = data?.interval?.factions?.[key] || [];
 			if (Array.isArray(rows) && rows.length) return { rows, matchedFactionKey: key, normalizedFaction };
 		}
 		return { rows: [], matchedFactionKey: '', normalizedFaction };
+	}
+
+	function getUpgradeAutomationAephiaDailyFinal(data, faction, date, playerProfile) {
+		const { factionKeys } = getUpgradeAutomationAephiaFactionKeys(faction);
+		for (const source of ['dailyFinal', 'dailyFinalFromIntervals']) {
+			for (const key of factionKeys) {
+				const rows = data?.[source]?.factions?.[key] || [];
+				const row = Array.isArray(rows) ? rows.find((entry) => String(entry?.date || '') === String(date || '')) : null;
+				if (!row) continue;
+				const factionLp = Number(row.redeemedLp);
+				if (!Number.isFinite(factionLp)) continue;
+				const profileRow = (Array.isArray(row.playerProfiles) ? row.playerProfiles : []).find((entry) => String(entry?.profile || '') === String(playerProfile || ''));
+				const playerLp = Number(profileRow?.contribution || 0);
+				return { factionLp, playerLp: Number.isFinite(playerLp) ? playerLp : 0, source, matchedFactionKey: key };
+			}
+		}
+		return null;
 	}
 
 	function parseUpgradeAutomationAephiaDayIndexes(value) {
@@ -4222,7 +4245,7 @@
 		return Number.isFinite(dayIndex) ? new Date(dayIndex * 86400000).toISOString().slice(0, 10) : '';
 	}
 
-	async function fetchUpgradeAutomationAephiaLpHistory(faction, now = new Date(), startIso = '') {
+	async function fetchUpgradeAutomationAephiaLpHistory(faction, now = new Date(), startIso = '', playerProfile = '') {
 		const data = await fetchUpgradeAutomationAephiaSummary();
 		const { rows, matchedFactionKey, normalizedFaction } = getUpgradeAutomationAephiaFactionRows(data, faction);
 		if (!Array.isArray(rows) || !rows.length) throw new Error('aephia_summary_faction_series_missing');
@@ -4254,12 +4277,14 @@
 			.sort((a, b) => String(a[0]).localeCompare(String(b[0])))
 			.map(([, entry]) => ({ _time: entry._time, _value: entry._value }));
 		const latestEntry = [...latestByDay.values()].sort((a, b) => (a.sortMs - b.sortMs) || (a.index - b.index)).at(-1);
+		const yesterdayFinal = getUpgradeAutomationAephiaDailyFinal(data, faction, yesterdayKey, playerProfile);
 		return {
 			rows: completedRows,
 			latestToday: latestByDay.has(todayKey) ? Number(latestByDay.get(todayKey)._value) : null,
-			latestYesterday: latestByDay.has(yesterdayKey) ? Number(latestByDay.get(yesterdayKey)._value) : null,
+			latestYesterday: yesterdayFinal?.factionLp ?? (latestByDay.has(yesterdayKey) ? Number(latestByDay.get(yesterdayKey)._value) : null),
+			playerYesterday: yesterdayFinal?.playerLp ?? null,
 			latestTime: latestEntry?._time || '',
-			query: `aephia_summary_interval faction=${matchedFactionKey || normalizedFaction}`,
+			query: yesterdayFinal ? `aephia_summary_${yesterdayFinal.source} faction=${yesterdayFinal.matchedFactionKey}` : `aephia_summary_interval faction=${matchedFactionKey || normalizedFaction}`,
 			error: ''
 		};
 	}
