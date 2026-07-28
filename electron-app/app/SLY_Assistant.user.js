@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-215
+// @aephia-version 0.7.35-216
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -32,7 +32,7 @@
 
     const DEFAULT_HELIUS_RPC_URL_PLACEHOLDER = 'https://mainnet.helius-rpc.com/?api-key=<YOUR API KEY>';
     const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
-    const AEPHIA_SLYA_VERSION = '0.7.35-215'; // Aephia build version; bump with scripts/bump-aephia-version.js
+    const AEPHIA_SLYA_VERSION = '0.7.35-216'; // Aephia build version; bump with scripts/bump-aephia-version.js
     let saRPCs = [
         'https://rpc.ironforge.network/mainnet?apiKey=01KM93S12XQ3NK0EVDB9J1V36D',
     ];
@@ -7816,6 +7816,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return `scan-${datePart}-${fleetPart}-${Math.max(0, Math.floor(Number(totalScans) || 0))}`;
 	}
 
+	function isLegacyScanningOptimizationExperimentId(experimentId) {
+		return /^scan-[a-z0-9]{6,}-[a-z0-9]{4,}$/i.test(String(experimentId || ''));
+	}
+
 	function buildScanningOptimizationValues(start, end, step) {
 		const first = Number(start);
 		const last = Number(end);
@@ -8043,7 +8047,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const telemetryValues = Object.fromEntries(Object.entries(runtime.values || {}).map(([parameter, value]) => [getScanningOptimizationTelemetryParameterName(parameter), value]));
 		const optimizationParameter = runtime.parameters.map(getScanningOptimizationTelemetryParameterName).join('+') || getScanningOptimizationTelemetryParameterName(fleet.scanOptimizationParameter || '');
 		const optimizationValue = runtime.parameters.length === 1 ? runtime.values[runtime.parameters[0]] : runtime.value;
-		const progressFields = `,optimizationParameter=${optimizationInfluxString(optimizationParameter)},optimizationValue=${Number.isFinite(Number(optimizationValue)) ? Number(optimizationValue) : 0},optimizationValues=${optimizationInfluxString(JSON.stringify(telemetryValues))},optimizationBlockNumber=${runtime.complete ? runtime.totalBlocks : Math.min(runtime.totalBlocks, runtime.blockIndex + 1)}i,optimizationTotalBlocks=${runtime.totalBlocks}i,optimizationBlockIndex=${runtime.blockIndex}i,optimizationBlockScansCompleted=${runtime.blockScansCompleted}i,optimizationScansInBlock=${runtime.scansInBlock}i,optimizationCompletedScans=${runtime.completedScans}i,optimizationTotalScans=${runtime.totalScans}i`;
+		const previousExperimentField = fleet.scanOptimizationPreviousExperimentId ? `,previousExperimentId=${optimizationInfluxString(fleet.scanOptimizationPreviousExperimentId)}` : '';
+		const progressFields = `,optimizationParameter=${optimizationInfluxString(optimizationParameter)},optimizationValue=${Number.isFinite(Number(optimizationValue)) ? Number(optimizationValue) : 0},optimizationValues=${optimizationInfluxString(JSON.stringify(telemetryValues))}${previousExperimentField},optimizationBlockNumber=${runtime.complete ? runtime.totalBlocks : Math.min(runtime.totalBlocks, runtime.blockIndex + 1)}i,optimizationTotalBlocks=${runtime.totalBlocks}i,optimizationBlockIndex=${runtime.blockIndex}i,optimizationBlockScansCompleted=${runtime.blockScansCompleted}i,optimizationScansInBlock=${runtime.scansInBlock}i,optimizationCompletedScans=${runtime.completedScans}i,optimizationTotalScans=${runtime.totalScans}i`;
 		const fields = buildScanningOptimizationParameterFields(fleet) + progressFields + (extraFields ? `,${extraFields}` : '');
 		void sendToInflux(`optimization_event,${tags} ${fields}`, 'optimization').catch(error => {
 			cLog(1, `${FleetTimeStamp(fleet.label)} optimization telemetry failed`, error);
@@ -12198,11 +12203,17 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				scanOptimizationRunEnabled = false;
 				inputError('ERROR: Invalid scanning optimization schedule', scanOptimizationCombinationMode ? 'Combination mode requires exactly two unique, valid parameters' : 'Use unique parameters with valid ranges', 1);
 			}
+			const scanOptimizationTotalScans = scanOptimizationSchedule.reduce((sum, block) => sum + Math.max(0, Number(block?.scans || 0)), 0);
+			const savedScanOptimizationExperimentId = String(fleetParsedData.scanOptimizationExperimentId || '');
+			const readableScanOptimizationExperimentId = buildScanningOptimizationExperimentId(userFleets[userFleetIndex]?.label || fleetParsedData.label || fleetPK, scanOptimizationTotalScans);
+			let scanOptimizationPreviousExperimentId = String(fleetParsedData.scanOptimizationPreviousExperimentId || '');
 			let scanOptimizationExperimentId = scanOptimizationEnabled
-				? (!resolvedOptimizationSchedule.changed && fleetParsedData.scanOptimizationEnabled && fleetParsedData.scanOptimizationExperimentId
-					? fleetParsedData.scanOptimizationExperimentId
-					: buildScanningOptimizationExperimentId(userFleets[userFleetIndex]?.label || fleetParsedData.label || fleetPK, scanOptimizationSchedule.reduce((sum, block) => sum + Math.max(0, Number(block?.scans || 0)), 0)))
+				? (!resolvedOptimizationSchedule.changed && fleetParsedData.scanOptimizationEnabled && savedScanOptimizationExperimentId && !isLegacyScanningOptimizationExperimentId(savedScanOptimizationExperimentId)
+					? savedScanOptimizationExperimentId
+					: readableScanOptimizationExperimentId)
 				: '';
+			if(scanOptimizationEnabled && savedScanOptimizationExperimentId && savedScanOptimizationExperimentId !== scanOptimizationExperimentId) scanOptimizationPreviousExperimentId = savedScanOptimizationExperimentId;
+			if(!scanOptimizationEnabled) scanOptimizationPreviousExperimentId = '';
 			const savedOptimizationBlockIndex = Math.max(0, Math.floor(Number(fleetParsedData.scanOptimizationBlockIndex || 0)));
 			const savedOptimizationBlockScansCompleted = Math.max(0, Math.floor(Number(fleetParsedData.scanOptimizationBlockScansCompleted || 0)));
 			let scanOptimizationBlockIndex = !resolvedOptimizationSchedule.changed ? savedOptimizationBlockIndex : 0;
@@ -12365,6 +12376,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					scanMove: scanMove,
 					scanOptimizationEnabled: scanOptimizationEnabled,
 					scanOptimizationExperimentId: scanOptimizationExperimentId,
+					scanOptimizationPreviousExperimentId: scanOptimizationPreviousExperimentId,
 					scanOptimizationRunEnabled: scanOptimizationRunEnabled,
 					scanOptimizationQueue: scanOptimizationQueue,
 					scanOptimizationCombinationMode: scanOptimizationCombinationMode,
@@ -17226,6 +17238,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				let fleetScanMove = fleetParsedData && fleetParsedData.scanMove;
 				let fleetScanOptimizationEnabled = !!(fleetParsedData && fleetParsedData.assignment == 'Scan' && fleetParsedData.scanOptimizationEnabled);
 				let fleetScanOptimizationExperimentId = fleetScanOptimizationEnabled ? String(fleetParsedData.scanOptimizationExperimentId || '') : '';
+				let fleetScanOptimizationPreviousExperimentId = fleetScanOptimizationEnabled ? String(fleetParsedData.scanOptimizationPreviousExperimentId || '') : '';
 				let fleetScanOptimizationRunEnabled = !!(fleetScanOptimizationEnabled && fleetParsedData.scanOptimizationRunEnabled);
 				let fleetScanOptimizationParameter = String(fleetParsedData.scanOptimizationParameter || 'scanMin');
 				let fleetScanOptimizationStart = Number(fleetParsedData.scanOptimizationStart ?? 0);
@@ -17350,6 +17363,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					scanMove: fleetScanMove,
 					scanOptimizationEnabled: fleetScanOptimizationEnabled,
 					scanOptimizationExperimentId: fleetScanOptimizationExperimentId,
+					scanOptimizationPreviousExperimentId: fleetScanOptimizationPreviousExperimentId,
 					scanOptimizationRunEnabled: fleetScanOptimizationRunEnabled,
 					scanOptimizationParameter: fleetScanOptimizationParameter,
 					scanOptimizationStart: fleetScanOptimizationStart,
