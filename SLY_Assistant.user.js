@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-221
+// @aephia-version 0.7.35-222
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -13034,7 +13034,9 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				}
 				let scanBlock = buildScanBlock(destCoords[0], destCoords[1], scanPattern, scanPatternLength);
 
+				const scanTargetChanged = fleetAssignment === 'Scan' && String(fleetParsedData?.dest || '') !== String(fleetDestCoord || '');
 				let fleetScanEnd = fleetParsedData && fleetParsedData.scanEnd ? fleetParsedData.scanEnd : 0;
+				if(scanTargetChanged) fleetScanEnd = Date.now();
 				const getLegacyCargoDispatched = (prefix, entry) => {
 					const totalContext = getLegacyTransportTotalContext(prefix, fleetStarbaseCoord, fleetDestCoord);
 					const key = getTransportTotalKey(entry.res, entry.amt, totalContext.sourceCoord, totalContext.destCoord, totalContext.routePrefix);
@@ -13191,6 +13193,16 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				userFleets[userFleetIndex].scanOptimizationSchedule = scanOptimizationSchedule;
 				userFleets[userFleetIndex].scanOptimizationBlockIndex = scanOptimizationBlockIndex;
 				userFleets[userFleetIndex].scanOptimizationBlockScansCompleted = scanOptimizationBlockScansCompleted;
+				if(scanTargetChanged) {
+					userFleets[userFleetIndex].scanEnd = fleetScanEnd;
+					userFleets[userFleetIndex].scanAutoMoveTo = null;
+					userFleets[userFleetIndex].lastScanCoord = null;
+					userFleets[userFleetIndex].startupScanBlockCheck = false;
+					userFleets[userFleetIndex].scanBlockIdx = 0;
+					userFleets[userFleetIndex].scanSkipCnt = 0;
+					userFleets[userFleetIndex].scanStrikes = 0;
+					cLog(1, `${FleetTimeStamp(userFleets[userFleetIndex].label)} Scanning target changed; expired pause and cleared movement target`);
+				}
 				if(scanOptimizationRunEnabled && scanOptimizationSchedule[scanOptimizationBlockIndex]) {
 					for(const [parameter, value] of Object.entries(scanOptimizationOriginalValues)) userFleets[userFleetIndex][parameter] = value;
 					for(const [parameter, value] of Object.entries(scanOptimizationSchedule[scanOptimizationBlockIndex].values || {})) userFleets[userFleetIndex][parameter] = value;
