@@ -2,6 +2,8 @@ const { ipcMain, session, app, BrowserWindow, powerSaveBlocker, safeStorage } = 
 const path = require('node:path')
 const fs = require('node:fs')
 const crypto = require('node:crypto')
+const os = require('node:os')
+const { performance } = require('node:perf_hooks')
 
 // SLYA is a 24/7 automation process. Chromium otherwise throttles timers when
 // its window is covered, minimized, or inactive on Windows.
@@ -65,9 +67,192 @@ function readInstanceConfig()
 }
 
 const instanceConfig = readInstanceConfig()
+const MAIN_PROCESS_DIAGNOSTICS_ENABLED = instanceConfig.mainProcessDiagnostics === true
+const MAIN_PROCESS_DIAGNOSTICS_INTERVAL_MS = 5 * 60 * 1000
+const MAIN_PROCESS_DIAGNOSTICS_PATH = path.join(APP_ROOT, 'analysis', 'main-process-diagnostics.jsonl')
 const APP_INSTANCE_NAME = String(instanceConfig.instanceName || getInstallInstanceName()).replace(/[<>]/g, '').trim()
 const APP_NAME = APP_INSTANCE_NAME ? `SLYA - ${APP_INSTANCE_NAME}` : 'SLYA'
 const APP_ID = APP_INSTANCE_NAME ? `slya.${APP_INSTANCE_NAME.toLowerCase().replace(/[^a-z0-9]+/g, '')}` : 'slya'
+
+function createMainProcessDiagnostics(options)
+{
+	if (!options.enabled) {
+		return {
+			increment() {},
+			begin() { return null },
+			finish() {},
+			start() { return null },
+			report() { return false }
+		}
+	}
+
+	const counters = {}
+	const sessionId = options.crypto.randomUUID()
+	const logicalCpuCount = Math.max(1, options.os.cpus().length)
+	let started = false
+	let previousWallMs = 0
+	let previousCpuUsage = null
+	let previousEventLoopUtilization = null
+
+	function round(value)
+	{
+		return Number(Math.max(0, Number(value) || 0).toFixed(3))
+	}
+
+	function append(record)
+	{
+		try {
+			options.fs.mkdirSync(options.path.dirname(options.outputPath), { recursive: true })
+			options.fs.appendFileSync(options.outputPath, `${JSON.stringify(record)}\n`, 'utf8')
+			return true
+		} catch (error) {
+			options.logError(error)
+			return false
+		}
+	}
+
+	function increment(name, amount = 1)
+	{
+		if (!Number.isFinite(amount)) return
+		counters[name] = Number(counters[name] || 0) + amount
+	}
+
+	function begin()
+	{
+		return options.process.hrtime.bigint()
+	}
+
+	function finish(name, operationStarted, success, extra = {})
+	{
+		if (typeof operationStarted !== 'bigint') return
+		const durationMs = Number(options.process.hrtime.bigint() - operationStarted) / 1e6
+		const current = counters[name] && typeof counters[name] === 'object' ? counters[name] : {
+			calls: 0,
+			successes: 0,
+			failures: 0,
+			totalMs: 0,
+			maxMs: 0
+		}
+		current.calls += 1
+		if (success) current.successes += 1
+		else current.failures += 1
+		current.totalMs += durationMs
+		current.maxMs = Math.max(current.maxMs, durationMs)
+		for (const [key, value] of Object.entries(extra)) {
+			if (Number.isFinite(value)) current[key] = Number(current[key] || 0) + value
+		}
+		counters[name] = current
+	}
+
+	function report()
+	{
+		if (!started) return false
+		const currentWallMs = options.now()
+		const wallMs = Math.max(0, currentWallMs - previousWallMs)
+		const cpuDelta = options.process.cpuUsage(previousCpuUsage)
+		const eventLoopDelta = options.performance.eventLoopUtilization(previousEventLoopUtilization)
+		const userMs = Number(cpuDelta.user || 0) / 1000
+		const systemMs = Number(cpuDelta.system || 0) / 1000
+		const totalMs = userMs + systemMs
+		const coresUsed = wallMs > 0 ? totalMs / wallMs : 0
+		const roundedCounters = {}
+		for (const [name, value] of Object.entries(counters)) {
+			if (typeof value === 'number') {
+				roundedCounters[name] = value
+				continue
+			}
+			roundedCounters[name] = {}
+			for (const [key, entry] of Object.entries(value)) {
+				roundedCounters[name][key] = key.endsWith('Ms') ? round(entry) : entry
+			}
+		}
+		const record = {
+			type: 'interval',
+			timestamp: options.isoNow(),
+			sessionId,
+			app: options.appName,
+			instance: options.instanceName || null,
+			pid: options.process.pid,
+			wallMs: round(wallMs),
+			logicalCpuCount,
+			processCpu: {
+				userMs: round(userMs),
+				systemMs: round(systemMs),
+				totalMs: round(totalMs),
+				coresUsed: round(coresUsed),
+				machinePercent: round((coresUsed / logicalCpuCount) * 100)
+			},
+			eventLoop: {
+				activeMs: round(eventLoopDelta.active),
+				idleMs: round(eventLoopDelta.idle),
+				utilization: round(eventLoopDelta.utilization)
+			},
+			counters: roundedCounters
+		}
+		if (!append(record)) return false
+		for (const name of Object.keys(counters)) delete counters[name]
+		previousWallMs = currentWallMs
+		previousCpuUsage = options.process.cpuUsage()
+		previousEventLoopUtilization = options.performance.eventLoopUtilization()
+		return true
+	}
+
+	function start()
+	{
+		if (started) return null
+		started = true
+		previousWallMs = options.now()
+		previousCpuUsage = options.process.cpuUsage()
+		previousEventLoopUtilization = options.performance.eventLoopUtilization()
+		append({
+			type: 'start',
+			timestamp: options.isoNow(),
+			sessionId,
+			app: options.appName,
+			instance: options.instanceName || null,
+			pid: options.process.pid
+		})
+		const timer = options.setInterval(report, options.intervalMs)
+		timer.unref()
+		return timer
+	}
+
+	return { increment, begin, finish, start, report }
+}
+
+async function runMainProcessDiagnosticOperation(diagnostics, name, operation, extraFromResult = null)
+{
+	const operationStarted = diagnostics.begin()
+	try {
+		const result = await operation()
+		const success = !(result && typeof result === 'object' && result.ok === false)
+		const extra = typeof extraFromResult === 'function' ? extraFromResult(result) : {}
+		diagnostics.finish(name, operationStarted, success, extra)
+		return result
+	} catch (error) {
+		diagnostics.finish(name, operationStarted, false)
+		throw error
+	}
+}
+
+const mainProcessDiagnostics = createMainProcessDiagnostics({
+	enabled: MAIN_PROCESS_DIAGNOSTICS_ENABLED,
+	appRoot: APP_ROOT,
+	outputPath: MAIN_PROCESS_DIAGNOSTICS_PATH,
+	appName: APP_NAME,
+	instanceName: APP_INSTANCE_NAME,
+	intervalMs: MAIN_PROCESS_DIAGNOSTICS_INTERVAL_MS,
+	fs,
+	path,
+	os,
+	performance,
+	process,
+	crypto,
+	now: () => Date.now(),
+	isoNow: () => new Date().toISOString(),
+	setInterval,
+	logError: error => console.error('[SLYA] failed to write main-process diagnostics:', String(error?.message || error))
+})
 
 
 const ORIGINAL_UPDATE_URL = 'https://raw.githubusercontent.com/Swift42/SLY-Assistant/refs/heads/patch-collection-for-0.7.0/SLY_Assistant.user.js'
@@ -417,10 +602,19 @@ function leveldbTimestamp()
 
 function logToUpgradeLog(line)
 {
+	const diagnosticStarted = mainProcessDiagnostics.begin()
+	let diagnosticSuccess = false
+	let diagnosticBytes = 0
 	try {
 		const logPath = path.join(APP_ROOT, 'data', 'upgrade-automation.log')
-		fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${String(line || '')}\n`, 'utf8')
-	} catch (e) {}
+		const stamped = `[${new Date().toISOString()}] ${String(line || '')}\n`
+		diagnosticBytes = Buffer.byteLength(stamped, 'utf8')
+		fs.appendFileSync(logPath, stamped, 'utf8')
+		diagnosticSuccess = true
+	} catch (e) {
+	} finally {
+		mainProcessDiagnostics.finish('upgradeLogWrite', diagnosticStarted, diagnosticSuccess, { bytes: diagnosticBytes })
+	}
 }
 
 function atomicWriteJson(targetPath, payload)
@@ -844,6 +1038,7 @@ const filter = {
   urls: ['https://rpc.ironforge.network/*']
 }
 session.defaultSession.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
+  mainProcessDiagnostics.increment('ironforgeRequests')
   details.requestHeaders['Origin'] = 'https://based.staratlas.com'
   callback({ requestHeaders: details.requestHeaders })
 })
@@ -925,12 +1120,17 @@ scheduleDailyAepUpdateCheck(win, aephiaVersion !== 'unknown' ? aephiaVersion : v
   })
 
   ipcMain.handle('appendUpgradeAutomationLogFile', async (event, line) => {
+	const diagnosticStarted = mainProcessDiagnostics.begin()
+	let diagnosticBytes = 0
 	try {
 		const logPath = path.join(APP_ROOT, 'data', 'upgrade-automation.log');
 		const stamped = `[${new Date().toISOString()}] ${String(line || '')}\n`;
+		diagnosticBytes = Buffer.byteLength(stamped, 'utf8');
 		fs.appendFileSync(logPath, stamped, 'utf8');
+		mainProcessDiagnostics.finish('appendUpgradeLogIpc', diagnosticStarted, true, { bytes: diagnosticBytes });
 		return { ok: true, path: logPath };
 	} catch (error) {
+		mainProcessDiagnostics.finish('appendUpgradeLogIpc', diagnosticStarted, false, { bytes: diagnosticBytes });
 		return { ok: false, error: String(error?.message || error) };
 	}
   })
@@ -959,41 +1159,48 @@ scheduleDailyAepUpdateCheck(win, aephiaVersion !== 'unknown' ? aephiaVersion : v
   })
 
   ipcMain.handle('walletSecret:sign', async (_event, messageBytes) => {
+	const diagnosticStarted = mainProcessDiagnostics.begin()
+	const diagnosticMessageBytes = Array.isArray(messageBytes) ? messageBytes.length : 0
 	try {
 		if (!Array.isArray(messageBytes) || messageBytes.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 255)) throw new Error('Invalid transaction message')
 		const { privateKey, publicKey } = readEncryptedWalletSecretKey()
 		const signature = crypto.sign(null, Buffer.from(messageBytes), privateKey)
+		mainProcessDiagnostics.finish('walletSign', diagnosticStarted, true, { messageBytes: diagnosticMessageBytes })
 		return { ok: true, publicKey: Array.from(publicKey), signature: Array.from(signature) }
 	} catch (error) {
+		mainProcessDiagnostics.finish('walletSign', diagnosticStarted, false, { messageBytes: diagnosticMessageBytes })
 		return { ok: false, error: String(error?.message || error) }
 	}
   })
 
   ipcMain.handle('snapshotLeveldbToBackup', async () => {
-	return snapshotLeveldbToBackup();
+	return runMainProcessDiagnosticOperation(mainProcessDiagnostics, 'snapshotLeveldbToBackup', () => snapshotLeveldbToBackup());
   })
 
   ipcMain.handle('writeSlyaStateBackup', async (event, payload) => {
-	return writeSlyaStateBackup(payload);
+	return runMainProcessDiagnosticOperation(mainProcessDiagnostics, 'writeSlyaStateBackup', () => writeSlyaStateBackup(payload), result => ({ bytes: Number(result?.bytes || 0) }));
   })
 
   ipcMain.handle('readSlyaStateBackup', async () => {
-	return readSlyaStateBackup();
+	return runMainProcessDiagnosticOperation(mainProcessDiagnostics, 'readSlyaStateBackup', () => readSlyaStateBackup());
   })
 
   ipcMain.handle('restoreLeveldbFromBackup', async () => {
-	return restoreLeveldbFromBackup();
+	return runMainProcessDiagnosticOperation(mainProcessDiagnostics, 'restoreLeveldbFromBackup', () => restoreLeveldbFromBackup());
   })
 
   ipcMain.handle('auditLeveldb', async () => {
-	const live = auditLeveldb(LEVELDB_DIR);
-	const bak = auditLeveldb(LEVELDB_BAK_DIR);
-	const prev = auditLeveldb(LEVELDB_PREV_BAK_DIR);
-	const liveHealth = getLeveldbSettingsHealth(LEVELDB_DIR);
-	const bakHealth = getLeveldbSettingsHealth(LEVELDB_BAK_DIR);
-	const prevHealth = getLeveldbSettingsHealth(LEVELDB_PREV_BAK_DIR);
-	return { live, bak, prev, liveHealth, bakHealth, prevHealth, latestBackup: findLatestUsableBackup()?.label || null };
+	return runMainProcessDiagnosticOperation(mainProcessDiagnostics, 'auditLeveldb', () => {
+		const live = auditLeveldb(LEVELDB_DIR);
+		const bak = auditLeveldb(LEVELDB_BAK_DIR);
+		const prev = auditLeveldb(LEVELDB_PREV_BAK_DIR);
+		const liveHealth = getLeveldbSettingsHealth(LEVELDB_DIR);
+		const bakHealth = getLeveldbSettingsHealth(LEVELDB_BAK_DIR);
+		const prevHealth = getLeveldbSettingsHealth(LEVELDB_PREV_BAK_DIR);
+		return { live, bak, prev, liveHealth, bakHealth, prevHealth, latestBackup: findLatestUsableBackup()?.label || null };
+	});
   })
-  
+
+  mainProcessDiagnostics.start()
   
 })
