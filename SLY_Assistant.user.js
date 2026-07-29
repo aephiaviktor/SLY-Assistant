@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-220
+// @aephia-version 0.7.35-221
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -14390,10 +14390,13 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				(struckOut && !userFleets[i].scanMove) ||
 				(userFleets[i].scanMove && userFleets[i].scanSkipCnt >= userFleets[i].scanBlock.length - 1 && !scanBlockPattern.includes('auto'))
 
+			let pauseTelemetryFields = '';
             let newState;
 			if (needPause) {
 				//userFleets[i].scanEnd = Date.now() + (globalSettings.scanPauseTime * 1000);
-				userFleets[i].scanEnd = Date.now() + Math.max(globalSettings.scanPauseTime * 1000, userFleets[i].scanCooldown * 1000 + 2000);
+				const pauseDurationMs = Math.max(globalSettings.scanPauseTime * 1000, userFleets[i].scanCooldown * 1000 + 2000);
+				userFleets[i].scanEnd = Date.now() + pauseDurationMs;
+				pauseTelemetryFields = `,pauseCount=1i,pauseSeconds=${Math.ceil(pauseDurationMs / 1000)}i`;
 				//userFleets[i].state = `Scanning Paused [${TimeToStr(new Date(userFleets[i].scanEnd))}]`;
                 newState = `Scanning Paused [${TimeToStr(new Date(userFleets[i].scanEnd))}]`;
 				cLog(1,`${FleetTimeStamp(userFleets[i].label)} Scanning Paused due to low probability [${TimeToStr(new Date(userFleets[i].scanEnd))}]`);
@@ -14420,7 +14423,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let burnedFood = changesFood.preBalance - changesFood.postBalance;
 			const sduStarbaseCoords = ConvertCoords(userFleets[i].starbaseCoord);
 			const sduStarbaseContext = await getTelemetryStarbaseContextFromCoords(sduStarbaseCoords[0], sduStarbaseCoords[1]);
-			await sendToInflux(`sdu,instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},starbase=${influxEscape(sduStarbaseContext.starbaseName || 'unknown')},fleet=${influxEscape(userFleets[i].label)},sectorX=${fleetCoords[0]},sectorY=${fleetCoords[1]} amount=${sduFound},burnedFood=${burnedFood},chance=${scanCondition},cargoRoomLeft=${userFleets[i].cargoCapacity - cargoCnt - sduFound}${buildSlyaTxCostInfluxFields(scanResult)}`);
+			await sendToInflux(`sdu,instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},starbase=${influxEscape(sduStarbaseContext.starbaseName || 'unknown')},fleet=${influxEscape(userFleets[i].label)},sectorX=${fleetCoords[0]},sectorY=${fleetCoords[1]} amount=${sduFound},burnedFood=${burnedFood},chance=${scanCondition},cargoRoomLeft=${userFleets[i].cargoCapacity - cargoCnt - sduFound}${pauseTelemetryFields}${buildSlyaTxCostInfluxFields(scanResult)}`);
 			const completedScanTelemetryState = getScanningOptimizationCompletedScanTelemetryState(userFleets[i]);
 			sendScanningOptimizationEvent(userFleets[i], 'scan_result', [
 				`signature=${optimizationInfluxString(scanResult?.slyaTxHash || '')}`,
