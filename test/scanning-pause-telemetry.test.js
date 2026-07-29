@@ -11,7 +11,12 @@ assert.match(
 );
 assert.match(
   source,
-  /pauseTelemetryFields = `,pauseCount=1i,pauseSeconds=\$\{Math\.ceil\(pauseDurationMs \/ 1000\)\}i`;/,
+  /pauseDurationSeconds = Math\.ceil\(pauseDurationMs \/ 1000\);/,
+  'pause duration should be normalized into a single seconds value'
+);
+assert.match(
+  source,
+  /pauseTelemetryFields = `,pauseCount=1i,pauseSeconds=\$\{pauseDurationSeconds\}i`;/,
   'a pause should add count and duration fields using Influx integer syntax'
 );
 assert.match(

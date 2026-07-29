@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-224
+// @aephia-version 0.7.35-225
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -8175,11 +8175,27 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			`toSectorY=${Number(context.toY)}`,
 			`movementDistance=${Number(context.distance || 0)}`,
 			`expectedTravelSeconds=${Number(context.expectedTravelSeconds || 0)}`,
+			`movementSeconds=${Number(context.movementSeconds || 0)}`,
+			`cooldownOverlapSeconds=${Number(context.cooldownOverlapSeconds || 0)}`,
+			`opportunityCostMovementSeconds=${Number(context.opportunityCostMovementSeconds || 0)}`,
 			`movementMode=${optimizationInfluxString(context.mode || '')}`,
 			`movementPhase=${optimizationInfluxString(isExit ? 'exit' : 'start')}`
 		];
 		if(!isExit) fields.push(`burnedFuel=${Number(context.burnedFuel || 0)}`);
 		return fields;
+	}
+
+	function calculateScanningMovementOpportunityCost(moveStartMs, movementSeconds, scanCooldownEndMs) {
+		const startMs = Number(moveStartMs || 0);
+		const durationSeconds = Math.max(0, Number(movementSeconds || 0));
+		const endMs = startMs + durationSeconds * 1000;
+		const cooldownEndMs = Math.max(startMs, Number(scanCooldownEndMs || 0));
+		const cooldownOverlapSeconds = Math.max(0, Math.min(endMs, cooldownEndMs) - startMs) / 1000;
+		return {
+			movementSeconds: durationSeconds,
+			cooldownOverlapSeconds,
+			opportunityCostMovementSeconds: Math.max(0, durationSeconds - cooldownOverlapSeconds)
+		};
 	}
 
 	function getCustomInstructionErrorCode(instructionError, logMessages) {
@@ -13484,10 +13500,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 					}
 
 					moveTime = calculateWarpTime(userFleets[i], moveDist);
+					const scanningMovementTime = calculateScanningMovementOpportunityCost(Date.now(), moveTime, userFleets[i].scanEnd);
 					userFleets[i].scanOptimizationMovementContext = {
 						fromX: extra[0], fromY: extra[1], toX: moveX, toY: moveY,
 						distance: moveDist, expectedTravelSeconds: moveTime,
-						burnedFuel: moveDist*(userFleets[i].warpFuelConsumptionRate/100), mode: 'warp'
+						burnedFuel: moveDist*(userFleets[i].warpFuelConsumptionRate/100), mode: 'warp',
+						...scanningMovementTime
 					};
 					const warpResult = await execWarp(userFleets[i], moveX, moveY, moveTime);
 					if(warpResult && warpResult.warpCooldownRetry) return warpResult.warpCooldownFinished;
@@ -13506,10 +13524,12 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 						warpCooldownFinished = warpResult.warpCooldownFinished;
 				} else if (currentFuelCnt + currentCargoFuelCnt >= subwarpCost) {
 					moveTime = calculateSubwarpTime(userFleets[i], moveDist);
+					const scanningMovementTime = calculateScanningMovementOpportunityCost(Date.now(), moveTime, userFleets[i].scanEnd);
 					userFleets[i].scanOptimizationMovementContext = {
 						fromX: extra[0], fromY: extra[1], toX: moveX, toY: moveY,
 						distance: moveDist, expectedTravelSeconds: moveTime,
-						burnedFuel: moveDist*(userFleets[i].subwarpFuelConsumptionRate/100), mode: 'subwarp'
+						burnedFuel: moveDist*(userFleets[i].subwarpFuelConsumptionRate/100), mode: 'subwarp',
+						...scanningMovementTime
 					};
 					const subwarpResult = await execSubwarp(userFleets[i], moveX, moveY, moveTime);
 					const fleetPK = userFleets[i].publicKey.toString();
@@ -13741,10 +13761,15 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				(struckOut && !userFleets[i].scanMove) ||
 				(userFleets[i].scanMove && userFleets[i].scanSkipCnt >= userFleets[i].scanBlock.length - 1 && !scanBlockPattern.includes('auto'))
 
+			let pauseTelemetryFields = '';
+			let pauseDurationSeconds = 0;
             let newState;
 			if (needPause) {
 				//userFleets[i].scanEnd = Date.now() + (globalSettings.scanPauseTime * 1000);
-				userFleets[i].scanEnd = Date.now() + Math.max(globalSettings.scanPauseTime * 1000, userFleets[i].scanCooldown * 1000 + 2000);
+				const pauseDurationMs = Math.max(globalSettings.scanPauseTime * 1000, userFleets[i].scanCooldown * 1000 + 2000);
+				pauseDurationSeconds = Math.ceil(pauseDurationMs / 1000);
+				userFleets[i].scanEnd = Date.now() + pauseDurationMs;
+				pauseTelemetryFields = `,pauseCount=1i,pauseSeconds=${pauseDurationSeconds}i`;
 				//userFleets[i].state = `Scanning Paused [${TimeToStr(new Date(userFleets[i].scanEnd))}]`;
                 newState = `Scanning Paused [${TimeToStr(new Date(userFleets[i].scanEnd))}]`;
 				cLog(1,`${FleetTimeStamp(userFleets[i].label)} Scanning Paused due to low probability [${TimeToStr(new Date(userFleets[i].scanEnd))}]`);
@@ -13771,7 +13796,7 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 			let burnedFood = changesFood.preBalance - changesFood.postBalance;
 			const sduStarbaseCoords = ConvertCoords(userFleets[i].starbaseCoord);
 			const sduStarbaseContext = await getTelemetryStarbaseContextFromCoords(sduStarbaseCoords[0], sduStarbaseCoords[1]);
-			await sendToInflux(`sdu,instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},starbase=${influxEscape(sduStarbaseContext.starbaseName || 'unknown')},fleet=${influxEscape(userFleets[i].label)},sectorX=${fleetCoords[0]},sectorY=${fleetCoords[1]} amount=${sduFound},burnedFood=${burnedFood},chance=${scanCondition},cargoRoomLeft=${userFleets[i].cargoCapacity - cargoCnt - sduFound}${buildSlyaTxCostInfluxFields(scanResult)}`);
+			await sendToInflux(`sdu,instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},starbase=${influxEscape(sduStarbaseContext.starbaseName || 'unknown')},fleet=${influxEscape(userFleets[i].label)},sectorX=${fleetCoords[0]},sectorY=${fleetCoords[1]} amount=${sduFound},burnedFood=${burnedFood},chance=${scanCondition},cargoRoomLeft=${userFleets[i].cargoCapacity - cargoCnt - sduFound}${pauseTelemetryFields}${buildSlyaTxCostInfluxFields(scanResult)}`);
 			const completedScanTelemetryState = getScanningOptimizationCompletedScanTelemetryState(userFleets[i]);
 			sendScanningOptimizationEvent(userFleets[i], 'scan_result', [
 				`signature=${optimizationInfluxString(scanResult?.slyaTxHash || '')}`,
@@ -13785,6 +13810,8 @@ if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].ch
 				`chance=${Number(scanCondition || 0)}`,
 				`cargoRoomLeft=${Number(userFleets[i].cargoCapacity - cargoCnt - sduFound)}`,
 				`struckOut=${struckOut ? 'true' : 'false'}`,
+				`pauseCount=${needPause ? 1 : 0}i`,
+				`pauseSeconds=${pauseDurationSeconds}i`,
 				`scanStrikes=${Math.round(Number(userFleets[i].scanStrikes || 0))}i`,
 				`resultSectorX=${Number(fleetCoords[0] || 0)}`,
 				`resultSectorY=${Number(fleetCoords[1] || 0)}`
