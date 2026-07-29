@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-222
+// @aephia-version 0.7.35-223
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -1961,11 +1961,27 @@
 		if (!Number.isFinite(hourLocal) || !Number.isFinite(minuteLocal)) return '';
 		const candidateLocal = new Date(now.getTime());
 		candidateLocal.setHours(hourLocal, minuteLocal, 0, 0);
-		const sixHoursMs = 6 * 3600 * 1000;
-		if (candidateLocal.getTime() < now.getTime() - sixHoursMs) {
-			candidateLocal.setDate(candidateLocal.getDate() + 1);
+		if (candidateLocal.getTime() < now.getTime()) {
+			const nextOccurrence = new Date(candidateLocal.getTime());
+			nextOccurrence.setDate(nextOccurrence.getDate() + 1);
+			// An HH:mm-only panel state is ambiguous across midnight. Permit the
+			// coming night only while it is reasonably near; otherwise an overdue
+			// ghost (for example 00:58 observed at 07:00) becomes tomorrow's job.
+			if (nextOccurrence.getTime() - now.getTime() > 12 * 3600 * 1000) return '';
+			candidateLocal.setTime(nextOccurrence.getTime());
 		}
 		return candidateLocal.toISOString();
+	}
+
+	function shouldClearMissingUpgradeAutomationProcess(snapshotSlot = {}, currentSlot = {}, onChainIds = new Set()) {
+		const snapshotId = String(snapshotSlot?.craftingId || '');
+		const currentId = String(currentSlot?.craftingId || '');
+		return !!(
+			snapshotSlot?.lpAutomationManaged &&
+			snapshotId && snapshotId !== '0' &&
+			currentId === snapshotId &&
+			!onChainIds.has(snapshotId)
+		);
 	}
 
 	function parseUpgradeAutomationLiveRemainingMinutes(stateText = '') {
@@ -2860,6 +2876,7 @@
 	async function reconcileUpgradeAutomationLpProcesses(settings = {}, reason = 'scheduler') {
 		const managedCraftLabels = getUpgradeAutomationManagedCraftLabels(settings);
 		const attachedLabels = new Set();
+		const slotSnapshot = new Map();
 		const result = {
 			ok: false,
 			reason,
@@ -2869,10 +2886,14 @@
 			unbound: [],
 			activeCount: 0,
 			completedCount: 0,
+			cleared: [],
 			error: ''
 		};
 
 		try {
+			for (const craftLabel of managedCraftLabels) {
+				slotSnapshot.set(craftLabel, await getUpgradeAutomationCraftSlotState(craftLabel));
+			}
 			const context = await getUpgradeAutomationLpStarbaseContext(settings);
 			if (context?.error) {
 				result.error = context.error;
@@ -2881,6 +2902,7 @@
 			}
 
 			const processes = await getUpgradeAutomationLpUpgradeProcesses(context, settings);
+			const onChainIds = new Set(processes.map(process => String(process.craftingId || '')).filter(Boolean));
 			result.activeCount = processes.filter(process => !process.completed).length;
 			result.completedCount = processes.filter(process => process.completed).length;
 
@@ -2916,6 +2938,26 @@
 				result.bound.push({ craftLabel, craftingId: process.craftingId, component: process.component, completed: process.completed });
 			}
 
+			// Runtime equivalent of startCraft's process_not_found recovery. Compare
+			// against the pre-query snapshot as well as the current value so a process
+			// created concurrently with reconciliation is never cleared.
+			for (const craftLabel of managedCraftLabels) {
+				const snapshotSlot = slotSnapshot.get(craftLabel) || {};
+				const currentSlot = await getUpgradeAutomationCraftSlotState(craftLabel);
+				if (!shouldClearMissingUpgradeAutomationProcess(snapshotSlot, currentSlot, onChainIds)) continue;
+				const missingCraftingId = currentSlot.craftingId;
+				await saveCraftConfig(craftLabel, {
+					...currentSlot,
+					craftingId: 0,
+					state: 'Idle',
+					errorCount: 0,
+					lpAutomationRecoveredAt: new Date().toISOString(),
+					lpAutomationRecoveredReason: 'process_not_found_runtime'
+				}, 'lp-auto-reconcile-clear-missing');
+				recoveredCraftingProcessSlots.delete(String(missingCraftingId));
+				result.cleared.push({ craftLabel, craftingId: missingCraftingId, reason: 'process_not_found' });
+			}
+
 			result.ok = true;
 			result.attachedLabels = Array.from(attachedLabels);
 			await logUpgradeAutomationSchedulerEvent('LP reconcile complete', {
@@ -2924,6 +2966,7 @@
 				completedCount: result.completedCount,
 				attachedLabels: result.attachedLabels,
 				bound: result.bound,
+				cleared: result.cleared,
 				unbound: result.unbound
 			});
 			return result;
