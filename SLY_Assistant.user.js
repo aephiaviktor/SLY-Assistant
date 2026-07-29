@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-225
+// @aephia-version 0.7.35-226
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -12526,20 +12526,33 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	}
 
 
+	function setInnerHtmlIfChanged(element, nextValue) {
+		if (!element) return false;
+
+		const nextHtml = String(nextValue);
+		if (element.innerHTML === nextHtml) return false;
+
+		element.innerHTML = nextHtml;
+		return true;
+	}
+
+
 	function updateAssistStatus(fleet) {
         let rowPK = fleet.publicKey ? fleet.publicKey.toString() : fleet.label;
 		let targetRow = document.querySelectorAll('#assistStatus .assist-fleet-row[pk="' + rowPK + '"]');
 
 		if (targetRow.length > 0) {
+			const statusRow = targetRow[0];
+
 			if(fleet.publicKey) {
-				targetRow[0].children[1].firstChild.innerHTML = fleet.foodCnt || 0;
-				targetRow[0].children[2].firstChild.innerHTML = fleet.sduCnt || 0;
-				targetRow[0].children[3].firstChild.innerHTML = fleet.state;
+				setInnerHtmlIfChanged(statusRow.children[1].firstChild, fleet.foodCnt || 0);
+				setInnerHtmlIfChanged(statusRow.children[2].firstChild, fleet.sduCnt || 0);
+				setInnerHtmlIfChanged(statusRow.children[3].firstChild, fleet.state);
 			} else {
 				//targetRow[0].children[0].firstChild.innerHTML = fleet.label + " [" + fleet.coordinates + "]";
 				let target = fleet.craftingId ? validTargets.find(target => (target.x + ',' + target.y) == fleet.craftingCoords) : validTargets.find(target => (target.x + ',' + target.y) == fleet.coordinates);
-				targetRow[0].children[0].firstChild.innerHTML = fleet.label + " " + (target ? target.name : '');
-				targetRow[0].children[1].firstChild.innerHTML = fleet.state;
+				setInnerHtmlIfChanged(statusRow.children[0].firstChild, fleet.label + " " + (target ? target.name : ''));
+				setInnerHtmlIfChanged(statusRow.children[1].firstChild, fleet.state);
 			}
 		} else {
 			if((globalSettings.fleetsPerColumn <= 0 && fleetStatusCount == 0) || (globalSettings.fleetsPerColumn > 0 && (fleetStatusCount % globalSettings.fleetsPerColumn) == 0)) {
@@ -12658,8 +12671,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			}
 		} catch(e) {}
 		// END OPENCLAW SLYA STATUS EXPORT
-if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].children.length > 0)
-			targetRow[0].children[0].firstChild.style.color=fleet.fontColor ? fleet.fontColor : 'white';
+		if(targetRow && targetRow.length > 0 && targetRow[0].children && targetRow[0].children.length > 0) {
+			const labelElement = targetRow[0].children[0].firstChild;
+			const nextColor = fleet.fontColor ? fleet.fontColor : 'white';
+			if(labelElement.style.color !== nextColor) labelElement.style.color = nextColor;
+		}
 	}
 
     async function updateAssistStarbaseStatus(starbases) {
