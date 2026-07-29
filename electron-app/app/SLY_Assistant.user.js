@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-223
+// @aephia-version 0.7.35-224
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -302,6 +302,7 @@
 	const UPGRADE_AUTOMATION_AEPHIA_SUMMARY_API = 'https://store-sage-lp.aephia.workers.dev/summary';
 	const UPGRADE_AUTOMATION_AEPHIA_RESOURCE_API = 'https://get-ship-data.aephia.workers.dev/gm/resource';
 	const UPGRADE_AUTOMATION_POINTS_CATEGORY = LPCategory.toString();
+	const UPGRADE_AUTOMATION_ATLAS_POOL_OVERRIDES = Object.freeze({ MUD: 1991250 });
 	const UPGRADE_AUTOMATION_FACTION_CONFIG = {
 		MUD: { lpInstance: 1, phantomCrewCoords: '0,-24' },
 		ONI: { lpInstance: 2, phantomCrewCoords: '-28,21' },
@@ -3687,7 +3688,8 @@
 				if (!Number.isFinite(rowDayIndex) || rowDayIndex > utcDayIndex || rowDayIndex < minDayIndex) continue;
 				const day = new Date(rowDayIndex * 86400000).toISOString().slice(0, 10);
 				const lpRedemption = Number(row.totalPoints || 0);
-				const atlasPool = Number(row.totalTokens || 0) / 100000000;
+				const apiAtlasPool = Number(row.totalTokens || 0) / 100000000;
+				const atlasPool = UPGRADE_AUTOMATION_ATLAS_POOL_OVERRIDES[normalizedFaction] ?? apiAtlasPool;
 				rows.push({
 					day,
 					lpRedemption,
@@ -3938,7 +3940,7 @@
 				redemptionByDay[day] = {
 					time: day + 'T23:59:59Z',
 					value: Number(row.totalPoints || 0),
-					atlasPool: Number(row.totalTokens || 0) / 100000000
+					atlasPool: UPGRADE_AUTOMATION_ATLAS_POOL_OVERRIDES[normalizedFaction] ?? (Number(row.totalTokens || 0) / 100000000)
 				};
 			}
 			const days = Object.keys(targetsByDay).sort();
