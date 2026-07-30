@@ -69,6 +69,7 @@ function readInstanceConfig()
 const instanceConfig = readInstanceConfig()
 const MAIN_PROCESS_DIAGNOSTICS_ENABLED = instanceConfig.mainProcessDiagnostics === true
 const MAIN_PROCESS_DIAGNOSTICS_INTERVAL_MS = 5 * 60 * 1000
+const LEVELDB_SNAPSHOT_MIN_INTERVAL_MS = 30 * 1000
 const MAIN_PROCESS_DIAGNOSTICS_PATH = path.join(APP_ROOT, 'analysis', 'main-process-diagnostics.jsonl')
 const APP_INSTANCE_NAME = String(instanceConfig.instanceName || getInstallInstanceName()).replace(/[<>]/g, '').trim()
 const APP_NAME = APP_INSTANCE_NAME ? `SLYA - ${APP_INSTANCE_NAME}` : 'SLYA'
@@ -233,6 +234,93 @@ async function runMainProcessDiagnosticOperation(diagnostics, name, operation, e
 		diagnostics.finish(name, operationStarted, false)
 		throw error
 	}
+}
+
+function createLeveldbSnapshotCoordinator(options)
+{
+	let currentSnapshotPromise = null
+	let lastPhysicalSnapshotStartedAt = Number.NEGATIVE_INFINITY
+	let trailingSnapshotRequired = false
+	let trailingTimer = null
+	let trailingPromise = null
+	let resolveTrailingPromise = null
+	let rejectTrailingPromise = null
+
+	function ensureTrailingPromise()
+	{
+		if (!trailingPromise) {
+			trailingPromise = new Promise((resolve, reject) => {
+				resolveTrailingPromise = resolve
+				rejectTrailingPromise = reject
+			})
+		}
+		return trailingPromise
+	}
+
+	function settleTrailingPromise(error, result)
+	{
+		const resolve = resolveTrailingPromise
+		const reject = rejectTrailingPromise
+		trailingPromise = null
+		resolveTrailingPromise = null
+		rejectTrailingPromise = null
+		if (error) reject(error)
+		else if (resolve) resolve(result)
+	}
+
+	function scheduleTrailingSnapshot()
+	{
+		if (!trailingSnapshotRequired || currentSnapshotPromise || trailingTimer) return
+		const delayMs = Math.max(0, lastPhysicalSnapshotStartedAt + options.minIntervalMs - options.now())
+		trailingTimer = options.setTimeout(() => {
+			trailingTimer = null
+			if (!trailingSnapshotRequired || currentSnapshotPromise) {
+				scheduleTrailingSnapshot()
+				return
+			}
+			trailingSnapshotRequired = false
+			startPhysicalSnapshot(true).then(
+				result => settleTrailingPromise(null, result),
+				error => settleTrailingPromise(error),
+			)
+		}, delayMs)
+		trailingTimer.unref()
+	}
+
+	function startPhysicalSnapshot(isTrailing = false)
+	{
+		lastPhysicalSnapshotStartedAt = options.now()
+		if (isTrailing) options.diagnostics.increment('snapshotLeveldbTrailingRuns')
+		const promise = Promise.resolve().then(options.performSnapshot)
+		currentSnapshotPromise = promise
+		promise.finally(() => {
+			if (currentSnapshotPromise === promise) currentSnapshotPromise = null
+			scheduleTrailingSnapshot()
+		}).catch(() => {})
+		return promise
+	}
+
+	function requestImmediateSnapshot()
+	{
+		if (!currentSnapshotPromise) return startPhysicalSnapshot(false)
+		return currentSnapshotPromise.catch(() => {}).then(requestImmediateSnapshot)
+	}
+
+	function request({ immediate = false } = {})
+	{
+		options.diagnostics.increment('snapshotLeveldbRequests')
+		if (immediate) return requestImmediateSnapshot()
+		if (!currentSnapshotPromise && options.now() - lastPhysicalSnapshotStartedAt >= options.minIntervalMs) {
+			return startPhysicalSnapshot(false)
+		}
+		options.diagnostics.increment('snapshotLeveldbCoalesced')
+		trailingSnapshotRequired = true
+		const promise = ensureTrailingPromise()
+		scheduleTrailingSnapshot()
+		return promise
+	}
+
+	return { request }
 }
 
 const mainProcessDiagnostics = createMainProcessDiagnostics({
@@ -934,7 +1022,7 @@ function preserveLeveldbBeforeUpdate()
 	}
 }
 
-function snapshotLeveldbToBackup()
+function performLeveldbSnapshotNow()
 {
 	try {
 		if (!fs.existsSync(LEVELDB_DIR)) return { ok: false, error: 'leveldb dir missing' }
@@ -959,6 +1047,19 @@ function snapshotLeveldbToBackup()
 		logToUpgradeLog(`[ELECTRON][LEVELDB-BAK] snapshot error=${String(e?.message || e)}`)
 		return { ok: false, error: String(e?.message || e) }
 	}
+}
+
+const leveldbSnapshotCoordinator = createLeveldbSnapshotCoordinator({
+	minIntervalMs: LEVELDB_SNAPSHOT_MIN_INTERVAL_MS,
+	now: () => Date.now(),
+	setTimeout,
+	diagnostics: mainProcessDiagnostics,
+	performSnapshot: () => runMainProcessDiagnosticOperation(mainProcessDiagnostics, 'snapshotLeveldbToBackup', performLeveldbSnapshotNow)
+})
+
+function requestLeveldbSnapshot(options)
+{
+	return leveldbSnapshotCoordinator.request(options)
 }
 
 function restoreLeveldbFromBackup(sourceDir = null, sourceLabel = 'backup')
@@ -1174,7 +1275,7 @@ scheduleDailyAepUpdateCheck(win, aephiaVersion !== 'unknown' ? aephiaVersion : v
   })
 
   ipcMain.handle('snapshotLeveldbToBackup', async () => {
-	return runMainProcessDiagnosticOperation(mainProcessDiagnostics, 'snapshotLeveldbToBackup', () => snapshotLeveldbToBackup());
+	return requestLeveldbSnapshot();
   })
 
   ipcMain.handle('writeSlyaStateBackup', async (event, payload) => {

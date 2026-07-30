@@ -232,7 +232,9 @@ test('main-process instrumentation is confined to approved paths and starts afte
   assert.match(SOURCE, /onBeforeSendHeaders[\s\S]*?increment\(['"]ironforgeRequests['"]\)[\s\S]*?details\.requestHeaders\['Origin'\]/);
   assert.match(SOURCE, /walletSecret:sign[\s\S]*?begin\(\)[\s\S]*?messageBytes/);
   assert.match(SOURCE, /appendUpgradeAutomationLogFile[\s\S]*?appendUpgradeLogIpc/);
-  for (const name of ['snapshotLeveldbToBackup', 'writeSlyaStateBackup', 'readSlyaStateBackup', 'restoreLeveldbFromBackup', 'auditLeveldb']) {
+  assert.match(SOURCE, /performSnapshot: \(\) => runMainProcessDiagnosticOperation\(mainProcessDiagnostics, 'snapshotLeveldbToBackup', performLeveldbSnapshotNow\)/);
+  assert.match(SOURCE, /ipcMain\.handle\('snapshotLeveldbToBackup'[\s\S]*?requestLeveldbSnapshot\(\)/);
+  for (const name of ['writeSlyaStateBackup', 'readSlyaStateBackup', 'restoreLeveldbFromBackup', 'auditLeveldb']) {
     assert.match(SOURCE, new RegExp(`ipcMain\\.handle\\('${name}'[\\s\\S]*?['\"]${name}['\"]`));
   }
   const lastHandler = SOURCE.lastIndexOf("ipcMain.handle('auditLeveldb'");
