@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-228
+// @aephia-version 0.7.35-229
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -610,6 +610,28 @@
 		} catch (error) {
 			try { await appendUpgradeAutomationLog('[SLYA-STATE-BAK] leveldb periodic snapshot error=' + String(error?.message || error)); } catch (e) {}
 		}
+	}
+
+	function queueLeveldbSafetyBackup(reason, options)
+	{
+		if (typeof window === 'undefined' || !window.electronAPI?.snapshotLeveldbToBackup) return;
+		const tag = String(options?.tag || 'BAK');
+		const backupEnqueuedAt = slyaPerfNowMs();
+		const invoke = (delayMs) => {
+			const start = () => {
+				const backupStart = slyaPerfNowMs();
+				try { emitSlyaTiming('[' + tag + '][LEVELDB-BACKUP-TIMING] reason=' + String(reason || 'unknown') + ' queue-delay=' + Math.round((backupStart - backupEnqueuedAt) * 10) / 10 + 'ms start'); } catch (e) {}
+				window.electronAPI.snapshotLeveldbToBackup().then(result => {
+					try { emitSlyaTiming('[' + tag + '][LEVELDB-BACKUP-TIMING] reason=' + String(reason || 'unknown') + ' duration=' + Math.round((slyaPerfNowMs() - backupStart) * 10) / 10 + 'ms ok=' + !!result?.ok + ' skipped=' + !!result?.skipped); } catch (e) {}
+				}).catch(async e => {
+					try { await appendUpgradeAutomationLog('[' + tag + '][BAK-ERROR] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {}
+				});
+			};
+			if (delayMs > 0) setTimeout(start, delayMs);
+			else setTimeout(start, 0);
+		};
+		try { invoke(options?.delayMs || 0); }
+		catch (e) { try { appendUpgradeAutomationLog('[' + tag + '][BAK-ERROR] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)).catch(() => {}); } catch (e2) {} }
 	}
 
 	function startSlyaStateBackupHeartbeat() {
@@ -5475,23 +5497,8 @@
 		slyaLastConfigSaveAtMs = Date.now();
 		timingMarks.push('gm-set-settings=' + Math.round((slyaPerfNowMs() - gmSetStart) * 10) / 10 + 'ms');
 		const backupScheduleStart = slyaPerfNowMs();
-		try {
-			if (typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
-				const backupQueuedAt = slyaPerfNowMs();
-				setTimeout(() => {
-					try {
-						const backupStart = slyaPerfNowMs();
-						emitSlyaTiming('[SETTINGS][LEVELDB-BACKUP-TIMING] reason=' + String(reason || 'unknown') + ' timer-delay=' + Math.round((backupStart - backupQueuedAt) * 10) / 10 + 'ms start');
-						window.electronAPI.snapshotLeveldbToBackup().then(result => {
-							emitSlyaTiming('[SETTINGS][LEVELDB-BACKUP-TIMING] reason=' + String(reason || 'unknown') + ' duration=' + Math.round((slyaPerfNowMs() - backupStart) * 10) / 10 + 'ms ok=' + !!result?.ok + ' skipped=' + !!result?.skipped);
-						}).catch(async e => {
-							try { await appendUpgradeAutomationLog('[SETTINGS][BAK-ERROR-POST] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {}
-						});
-					} catch (e) { appendUpgradeAutomationLog('[SETTINGS][BAK-ERROR-POST] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)).catch(() => {}); }
-				}, 2500);
-			}
-		} catch (e) { try { await appendUpgradeAutomationLog('[SETTINGS][BAK-ERROR-POST] reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
-		timingMarks.push('schedule-leveldb-backup=' + Math.round((slyaPerfNowMs() - backupScheduleStart) * 10) / 10 + 'ms');
+		queueLeveldbSafetyBackup(reason, { tag: 'SETTINGS', delayMs: 2500 });
+		timingMarks.push('leveldb-snapshot-queued=' + Math.round((slyaPerfNowMs() - backupScheduleStart) * 10) / 10 + 'ms');
 		scheduleSlyaStateBackup('settings-' + String(reason || 'unknown'));
 		slyaTimingMark(timingMarks, timingStart, 'saveGlobalSettings-total');
 		emitSlyaTiming('[SETTINGS][SAVE-TIMING] reason=' + String(reason || 'unknown') + ' ' + timingMarks.join(' '));
@@ -5517,15 +5524,10 @@
 		await GM.setValue(fleetPK, dataStr);
 		slyaLastConfigSaveAtMs = Date.now();
 		timingMarks.push('gm-set=' + Math.round((slyaPerfNowMs() - gmSetStart) * 10) / 10 + 'ms');
-		try {
-			if (!skipLeveldbSnapshot && typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
-				const backupStart = slyaPerfNowMs();
-				await window.electronAPI.snapshotLeveldbToBackup();
-				timingMarks.push('leveldb-snapshot=' + Math.round((slyaPerfNowMs() - backupStart) * 10) / 10 + 'ms');
-			} else if (skipLeveldbSnapshot) {
-				timingMarks.push('leveldb-snapshot=skipped');
-			}
-		} catch (e) { try { await appendUpgradeAutomationLog('[FLEET][BAK-ERROR] fleet=' + fleetLabel + '... reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
+		const backupEnqueueStart = slyaPerfNowMs();
+		if (!skipLeveldbSnapshot) queueLeveldbSafetyBackup('fleet-' + String(reason || 'unknown'), { tag: 'FLEET' });
+		else timingMarks.push('leveldb-snapshot=skipped');
+		timingMarks.push('leveldb-snapshot-queued=' + Math.round((slyaPerfNowMs() - backupEnqueueStart) * 10) / 10 + 'ms');
 		scheduleSlyaStateBackup('fleet-' + String(reason || 'unknown'));
 		slyaTimingMark(timingMarks, timingStart, 'total');
 		emitSlyaTiming('[FLEET][SAVE-TIMING] fleet=' + fleetLabel + '... reason=' + String(reason || 'unknown') + ' dataLen=' + dataLen + ' ' + timingMarks.join(' '));
@@ -5560,15 +5562,10 @@
 		await GM.setValue(key, dataStr);
 		slyaLastConfigSaveAtMs = Date.now();
 		timingMarks.push('gm-set=' + Math.round((slyaPerfNowMs() - gmSetStart) * 10) / 10 + 'ms');
-		try {
-			if (!skipLeveldbSnapshot && typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
-				const backupStart = slyaPerfNowMs();
-				await window.electronAPI.snapshotLeveldbToBackup();
-				timingMarks.push('leveldb-snapshot=' + Math.round((slyaPerfNowMs() - backupStart) * 10) / 10 + 'ms');
-			} else if (skipLeveldbSnapshot) {
-				timingMarks.push('leveldb-snapshot=skipped');
-			}
-		} catch (e) { try { await appendUpgradeAutomationLog('[CRAFT][BAK-ERROR] slot=' + slotLabel + ' reason=' + String(reason || 'unknown') + ' err=' + String(e?.message || e)); } catch (e2) {} }
+		const backupEnqueueStart = slyaPerfNowMs();
+		if (!skipLeveldbSnapshot) queueLeveldbSafetyBackup('craft-' + String(reason || 'unknown'), { tag: 'CRAFT' });
+		else timingMarks.push('leveldb-snapshot=skipped');
+		timingMarks.push('leveldb-snapshot-queued=' + Math.round((slyaPerfNowMs() - backupEnqueueStart) * 10) / 10 + 'ms');
 		scheduleSlyaStateBackup('craft-' + String(reason || 'unknown'));
 		slyaTimingMark(timingMarks, timingStart, 'total');
 		emitSlyaTiming('[CRAFT][SAVE-TIMING] slot=' + slotLabel + ' reason=' + String(reason || 'unknown') + ' dataLen=' + dataLen + ' ' + timingMarks.join(' '));
@@ -12638,22 +12635,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const stateBackupStart = slyaPerfNowMs();
 		await writeSlyaStateBackup('config-modal-save');
 		timingMarks.push('state-backup=' + Math.round((slyaPerfNowMs() - stateBackupStart) * 10) / 10 + 'ms');
-		try {
-			if (typeof window !== 'undefined' && window.electronAPI?.snapshotLeveldbToBackup) {
-				const backupQueuedAt = slyaPerfNowMs();
-				setTimeout(() => {
-					try {
-						const backupStart = slyaPerfNowMs();
-						emitSlyaTiming('[CONFIG][LEVELDB-BACKUP-TIMING] reason=config-modal-save timer-delay=' + Math.round((backupStart - backupQueuedAt) * 10) / 10 + 'ms start');
-						window.electronAPI.snapshotLeveldbToBackup().then(result => {
-							emitSlyaTiming('[CONFIG][LEVELDB-BACKUP-TIMING] reason=config-modal-save duration=' + Math.round((slyaPerfNowMs() - backupStart) * 10) / 10 + 'ms ok=' + !!result?.ok + ' skipped=' + !!result?.skipped);
-						}).catch(async e => {
-							try { await appendUpgradeAutomationLog('[CONFIG][BAK-ERROR] reason=config-modal-save err=' + String(e?.message || e)); } catch (e2) {}
-						});
-					} catch (e) { appendUpgradeAutomationLog('[CONFIG][BAK-ERROR] reason=config-modal-save err=' + String(e?.message || e)).catch(() => {}); }
-				}, 2500);
-			}
-		} catch (e) { try { await appendUpgradeAutomationLog('[CONFIG][BAK-ERROR] reason=config-modal-save err=' + String(e?.message || e)); } catch (e2) {} }
+		const configBackupEnqueueStart = slyaPerfNowMs();
+		queueLeveldbSafetyBackup('config-modal-save', { tag: 'CONFIG', delayMs: 2500 });
+		timingMarks.push('leveldb-snapshot-queued=' + Math.round((slyaPerfNowMs() - configBackupEnqueueStart) * 10) / 10 + 'ms');
 
 		if (errBool === false) {
 			errElem[0].innerHTML = '';
