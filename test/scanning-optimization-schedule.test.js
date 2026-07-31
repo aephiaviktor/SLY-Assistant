@@ -90,6 +90,9 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
     assert.deepEqual({ ...resolveIds({ scanOptimizationEnabled: true, scanOptimizationRunEnabled: true, scanOptimizationExperimentId: 'scan-20260728-SF01_OPOD-290', scanOptimizationBlockIndex: 12 }, 'SF01-OPOD', 290, false, true, false, now) }, {
       experimentId: 'scan-20260728-SF01_OPOD-290', previousExperimentId: ''
     });
+    assert.deepEqual({ ...resolveIds({ scanOptimizationEnabled: false, scanOptimizationRunEnabled: false, scanOptimizationExperimentId: 'scan-20260728-SF01_OPOD-290', scanOptimizationBlockIndex: 29 }, 'SF01-OPOD', 290, false, true, false, now) }, {
+      experimentId: 'record-20260728-SF01_OPOD', previousExperimentId: ''
+    }, 're-enabling Record Data after a completed/stopped optimization starts a new recording session');
   });
 
   test(`${file} emits semantic scanning optimization parameter names`, () => {

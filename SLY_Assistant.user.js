@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-230
+// @aephia-version 0.7.35-231
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -8599,7 +8599,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		if(!optimizationEnabled) return { experimentId: '', previousExperimentId: '' };
 		const savedId = String(savedFleet?.scanOptimizationExperimentId || '');
 		const savedBlockIndex = Math.max(0, Math.floor(Number(savedFleet?.scanOptimizationBlockIndex || 0)));
-		const continuingOptimization = !!(runEnabled || savedFleet?.scanOptimizationRunEnabled || savedBlockIndex > 0);
+		const continuingOptimization = !!(runEnabled || savedFleet?.scanOptimizationRunEnabled || (savedFleet?.scanOptimizationEnabled && savedId.startsWith('scan-') && savedBlockIndex > 0));
 		if(!continuingOptimization) {
 			return {
 				experimentId: savedId.startsWith('record-') ? savedId : buildScanningRecordingId(fleetName, now),
