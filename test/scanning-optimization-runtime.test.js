@@ -53,6 +53,7 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
       scanOptimizationEnabled: true,
       scanOptimizationRunEnabled: true,
       scanOptimizationParameter: 'scanMin',
+      scanOptimizationOriginalValues: { scanMin: 14 },
       scanOptimizationSchedule: [{ value: 8, scans: 2 }, { value: 10, scans: 2 }],
       scanOptimizationBlockIndex: 0,
       scanOptimizationBlockScansCompleted: 0
@@ -79,8 +80,9 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
     const complete = advance(fleet);
     assert.equal(complete.complete, true);
     assert.equal(fleet.scanOptimizationRunEnabled, false);
+    assert.equal(fleet.scanOptimizationEnabled, false, 'completion stops Record Data');
     assert.equal(fleet.scanOptimizationBlockIndex, 2);
-    assert.equal(fleet.scanMin, 10, 'completion leaves the final tested value in place');
+    assert.equal(fleet.scanMin, 14, 'completion restores the pre-optimization fleet-config value');
   });
 
   test(`${file} preserves a randomized schedule when its definition is unchanged`, () => {
@@ -129,6 +131,7 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
     const complete = advance(fleet);
     assert.equal(complete.complete, true);
     assert.equal(fleet.scanOptimizationRunEnabled, false);
+    assert.equal(fleet.scanOptimizationEnabled, false);
     assert.equal(fleet.scanMin, 14);
     assert.equal(fleet.scanMin2, 6);
   });
@@ -222,6 +225,8 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
   test(`${file} persists runtime progress and exposes block/value telemetry`, () => {
     const { source } = loadRuntime(file);
     assert.match(source, /saveScanningOptimizationRuntime/);
+    assert.match(source, /for\(const key of \['scanOptimizationEnabled', 'scanOptimizationRunEnabled', 'scanOptimizationBlockIndex', 'scanOptimizationBlockScansCompleted'\]\)/);
+    assert.match(source, /eventType !== 'optimization_complete'/);
     assert.match(source, /await advanceScanningOptimizationAfterCompletedScan\(userFleets\[i\]\)/);
     assert.match(source, /scanOptimizationBlockIndex/);
     assert.match(source, /scanOptimizationBlockScansCompleted/);

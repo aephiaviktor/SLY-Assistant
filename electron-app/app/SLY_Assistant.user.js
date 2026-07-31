@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-229
+// @aephia-version 0.7.35-230
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -8114,6 +8114,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const next = getScanningOptimizationRuntimeState(fleet);
 			if(next.complete) {
 				fleet.scanOptimizationRunEnabled = false;
+				fleet.scanOptimizationEnabled = false;
 				for(const [parameter, value] of Object.entries(originals)) if(SCANNING_OPTIMIZATION_PARAMETER_KEYS.has(parameter)) fleet[parameter] = value;
 			}
 			else {
@@ -8129,7 +8130,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	async function saveScanningOptimizationRuntime(fleet, reason = 'scan-optimization-progress') {
 		const fleetPK = fleet.publicKey.toString();
 		const saved = JSON.parse(await GM.getValue(fleetPK, '{}'));
-		for(const key of ['scanOptimizationRunEnabled', 'scanOptimizationBlockIndex', 'scanOptimizationBlockScansCompleted']) saved[key] = fleet[key];
+		for(const key of ['scanOptimizationEnabled', 'scanOptimizationRunEnabled', 'scanOptimizationBlockIndex', 'scanOptimizationBlockScansCompleted']) saved[key] = fleet[key];
 		for(const key of SCANNING_OPTIMIZATION_PARAMETER_KEYS) if(Object.prototype.hasOwnProperty.call(fleet, key)) saved[key] = fleet[key];
 		await saveFleetConfig(fleetPK, saved, reason, { skipLeveldbSnapshot: true });
 	}
@@ -8143,7 +8144,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	}
 
 	function sendScanningOptimizationEvent(fleet, eventType, extraFields = '', extraTags = '', runtimeOverride = null) {
-		if(!fleet?.scanOptimizationEnabled || !fleet?.scanOptimizationExperimentId) return;
+		if((!fleet?.scanOptimizationEnabled && eventType !== 'optimization_complete') || !fleet?.scanOptimizationExperimentId) return;
 		const status = eventType === 'transaction' && extraFields.includes('success=false') ? 'error' : 'ok';
 		const runtime = runtimeOverride || getScanningOptimizationRuntimeState(fleet);
 		const phase = fleet.scanOptimizationRunEnabled || runtime.complete ? 'experiment' : 'baseline_collection';
