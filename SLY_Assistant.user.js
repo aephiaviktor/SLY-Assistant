@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-231
+// @aephia-version 0.7.35-232
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -8794,6 +8794,23 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		};
 	}
 
+	function getScanningOptimizationTelemetryState(fleet, runtime = getScanningOptimizationRuntimeState(fleet)) {
+		if(fleet?.scanOptimizationRunEnabled || runtime.complete) {
+			return { parameters: runtime.parameters, values: runtime.values, value: runtime.value };
+		}
+		const scheduledParameters = Array.isArray(runtime.parameters) ? runtime.parameters : [];
+		const configuredParameter = String(fleet?.scanOptimizationParameter || '');
+		const parameters = scheduledParameters.length
+			? scheduledParameters
+			: (SCANNING_OPTIMIZATION_PARAMETER_KEYS.has(configuredParameter) ? [configuredParameter] : []);
+		const values = Object.fromEntries(parameters.map(parameter => [parameter, fleet?.[parameter]]));
+		return {
+			parameters,
+			values,
+			value: parameters.length === 1 ? values[parameters[0]] : undefined
+		};
+	}
+
 	function advanceScanningOptimizationRuntime(fleet) {
 		const state = getScanningOptimizationRuntimeState(fleet);
 		if(!state.active) return { advanced: false, complete: state.complete, notRunnable: !!fleet?.scanOptimizationRunEnabled && !state.complete };
@@ -8844,9 +8861,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const phase = fleet.scanOptimizationRunEnabled || runtime.complete ? 'experiment' : 'baseline_collection';
 		const variant = phase === 'experiment' ? 'scheduled' : 'baseline';
 		const tags = `optimization_type=scanning,phase=${influxEscape(phase)},event_type=${influxEscape(eventType)},variant=${influxEscape(variant)},instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(fleet.label || 'unknown')},status=${status}${extraTags}`;
-		const telemetryValues = Object.fromEntries(Object.entries(runtime.values || {}).map(([parameter, value]) => [getScanningOptimizationTelemetryParameterName(parameter), value]));
-		const optimizationParameter = runtime.parameters.map(getScanningOptimizationTelemetryParameterName).join('+') || getScanningOptimizationTelemetryParameterName(fleet.scanOptimizationParameter || '');
-		const optimizationValue = runtime.parameters.length === 1 ? runtime.values[runtime.parameters[0]] : runtime.value;
+		const telemetryState = getScanningOptimizationTelemetryState(fleet, runtime);
+		const telemetryValues = Object.fromEntries(Object.entries(telemetryState.values || {}).map(([parameter, value]) => [getScanningOptimizationTelemetryParameterName(parameter), value]));
+		const optimizationParameter = telemetryState.parameters.map(getScanningOptimizationTelemetryParameterName).join('+') || getScanningOptimizationTelemetryParameterName(fleet.scanOptimizationParameter || '');
+		const optimizationValue = telemetryState.parameters.length === 1 ? telemetryState.values[telemetryState.parameters[0]] : telemetryState.value;
 		const previousExperimentField = fleet.scanOptimizationPreviousExperimentId ? `,previousExperimentId=${optimizationInfluxString(fleet.scanOptimizationPreviousExperimentId)}` : '';
 		const progressFields = `,optimizationParameter=${optimizationInfluxString(optimizationParameter)},optimizationValue=${Number.isFinite(Number(optimizationValue)) ? Number(optimizationValue) : 0},optimizationValues=${optimizationInfluxString(JSON.stringify(telemetryValues))}${previousExperimentField},optimizationBlockNumber=${runtime.complete ? runtime.totalBlocks : Math.min(runtime.totalBlocks, runtime.blockIndex + 1)}i,optimizationTotalBlocks=${runtime.totalBlocks}i,optimizationBlockIndex=${runtime.blockIndex}i,optimizationBlockScansCompleted=${runtime.blockScansCompleted}i,optimizationScansInBlock=${runtime.scansInBlock}i,optimizationCompletedScans=${runtime.completedScans}i,optimizationTotalScans=${runtime.totalScans}i`;
 		const fields = buildScanningOptimizationParameterFields(fleet) + progressFields + (extraFields ? `,${extraFields}` : '');

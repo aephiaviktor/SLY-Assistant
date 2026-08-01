@@ -34,6 +34,7 @@ function loadRuntime(file) {
     extractFunction(source, 'formatScanningOptimizationStatus'),
     extractFunction(source, 'getScanningNearbyAdvantageThreshold'),
     extractFunction(source, 'getScanningOptimizationCompletedScanTelemetryState'),
+    extractFunction(source, 'getScanningOptimizationTelemetryState'),
     extractFunction(source, 'advanceScanningOptimizationRuntime'),
     'this.resolveSchedule = resolveScanningOptimizationSchedule;',
     'this.getState = getScanningOptimizationRuntimeState;',
@@ -41,9 +42,10 @@ function loadRuntime(file) {
     'this.formatStatus = formatScanningOptimizationStatus;',
     'this.getNearbyAdvantageThreshold = getScanningNearbyAdvantageThreshold;',
     'this.getCompletedScanTelemetry = getScanningOptimizationCompletedScanTelemetryState;',
+    'this.getTelemetryState = getScanningOptimizationTelemetryState;',
     'this.advance = advanceScanningOptimizationRuntime;'
   ].join('\n'), context);
-  return { source, resolveSchedule: context.resolveSchedule, getState: context.getState, getDisplay: context.getDisplay, formatStatus: context.formatStatus, getNearbyAdvantageThreshold: context.getNearbyAdvantageThreshold, getCompletedScanTelemetry: context.getCompletedScanTelemetry, advance: context.advance };
+  return { source, resolveSchedule: context.resolveSchedule, getState: context.getState, getDisplay: context.getDisplay, formatStatus: context.formatStatus, getNearbyAdvantageThreshold: context.getNearbyAdvantageThreshold, getCompletedScanTelemetry: context.getCompletedScanTelemetry, getTelemetryState: context.getTelemetryState, advance: context.advance };
 }
 
 for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.user.js']) {
@@ -220,6 +222,24 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
     assert.match(status, /~5\.0h/);
     assert.doesNotMatch(status, /scanMin 16/);
     assert.doesNotMatch(status, /remaining/);
+  });
+
+  test(`${file} records the configured minimum probability during record-only baseline collection`, () => {
+    const { getState, getTelemetryState } = loadRuntime(file);
+    const fleet = {
+      scanOptimizationEnabled: true,
+      scanOptimizationRunEnabled: false,
+      scanOptimizationParameter: 'scanMin',
+      scanOptimizationSchedule: [],
+      scanMin: 19
+    };
+
+    const telemetry = getTelemetryState(fleet, getState(fleet));
+    assert.deepEqual(JSON.parse(JSON.stringify(telemetry)), {
+      parameters: ['scanMin'],
+      values: { scanMin: 19 },
+      value: 19
+    });
   });
 
   test(`${file} persists runtime progress and exposes block/value telemetry`, () => {
