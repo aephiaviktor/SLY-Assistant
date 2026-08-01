@@ -37,6 +37,8 @@ vm.runInContext(`
   ${extractFunction('mergeUpgradeAutomationLpPerProfileSignatureState')}
   ${extractFunction('updateUpgradeAutomationLpPerProfileWatchCohort')}
   ${extractFunction('computeUpgradeAutomationSageEodSeconds')}
+  ${extractFunction('classifyUpgradeAutomationRepeatEligibility')}
+  ${extractFunction('applyUpgradeAutomationRepeatEligibility')}
   ${extractFunction('computeUpgradeAutomationLpProcessEodProjection')}
   ${extractFunction('summarizeUpgradeAutomationUninstalledLp')}
   ${extractFunction('buildUpgradeAutomationLpPerProfileTransactionQueue')}
@@ -46,6 +48,8 @@ vm.runInContext(`
   this.mergeState = mergeUpgradeAutomationLpPerProfileSignatureState;
   this.updateCohort = updateUpgradeAutomationLpPerProfileWatchCohort;
   this.sageEod = computeUpgradeAutomationSageEodSeconds;
+  this.classifyRepeat = classifyUpgradeAutomationRepeatEligibility;
+  this.applyRepeat = applyUpgradeAutomationRepeatEligibility;
   this.projectEod = computeUpgradeAutomationLpProcessEodProjection;
   this.summarizeUninstalled = summarizeUpgradeAutomationUninstalledLp;
   this.buildQueue = buildUpgradeAutomationLpPerProfileTransactionQueue;
@@ -82,7 +86,27 @@ assert.equal(cohort.profiles['profile-new'].firstSeenAt, now, 'new profile backf
 assert.equal(cohort.profiles['profile-old'].cursor, 'old-cursor', 'restart cursor survives cohort refresh');
 assert.equal(cohort.profiles['profile-new'].expiresAt, (Math.floor(now / 86400) + 1) * 86400 + 7200, 'watched profile remains through EoD plus two-hour grace');
 
-assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 150, 750, 60, 3))), {
+const repeatHistory = [
+  { profile: 'profile-1', starbase: '0,-24', component: 'Framework', recipeKey: 'recipe-1', quantity: 3, durationSeconds: 100, startTime: 100, endTime: 200 },
+  { profile: 'profile-1', starbase: '0,-24', component: 'Framework', recipeKey: 'recipe-1', quantity: 3, durationSeconds: 100, startTime: 250, endTime: 350 },
+  { profile: 'profile-1', starbase: '0,-24', component: 'Framework', recipeKey: 'recipe-1', quantity: 3, durationSeconds: 100, startTime: 420, endTime: 520 }
+];
+const currentRepeatJob = { profile: 'profile-1', starbase: '0,-24', component: 'Framework', recipeKey: 'recipe-1', quantity: 3, durationSeconds: 100, startTime: 600 };
+assert.deepEqual(JSON.parse(JSON.stringify(context.classifyRepeat(currentRepeatJob, repeatHistory, 600))), {
+  repeatEligible: true, matchingFastRestartDepth: 2, lastMatchingRestartAt: 420,
+  evidenceWindowDays: 7, fastRestartThresholdSeconds: 300
+}, 'two consecutive matching fast restarts in the prior seven days make future repeats eligible');
+assert.equal(context.classifyRepeat(currentRepeatJob, repeatHistory.slice(0, 2), 600).repeatEligible, false, 'one prior fast restart is insufficient');
+assert.equal(context.classifyRepeat({ ...currentRepeatJob, component: 'Power Source' }, repeatHistory, 600).repeatEligible, false, 'automation evidence never leaks between components on the same profile');
+assert.equal(context.classifyRepeat({ ...currentRepeatJob, starbase: '1,-24' }, repeatHistory, 600).repeatEligible, false, 'automation evidence never leaks between starbases');
+assert.equal(context.classifyRepeat(currentRepeatJob, repeatHistory.map(row => ({ ...row, startTime: row.startTime - 8 * 86400, endTime: row.endTime - 8 * 86400 })), 600).repeatEligible, false, 'evidence older than seven days expires');
+assert.equal(context.classifyRepeat({ ...currentRepeatJob, startTime: 1_100 }, [
+  repeatHistory[0], repeatHistory[1],
+  { ...repeatHistory[2], startTime: 800, endTime: 900 },
+  { ...repeatHistory[2], startTime: 950, endTime: 1_050 }
+], 1_100).repeatEligible, false, 'two isolated fast links do not replace a consecutive two-link chain');
+
+assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 150, 750, 60, 3, true))), {
   durationSeconds: 100,
   overdueSeconds: 0,
   automationAssumed: true,
@@ -96,17 +120,18 @@ assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 150, 750
   inFlightQuantityByEod: 3,
   expectedQuantityByEod: 18
 }, 'EoD projection includes every complete same-duration automation repeat');
-assert.equal(context.projectEod(100, 800, 150, 750, 60, 3).expectedCompletionsByEod, 0, 'a process ending after EoD contributes no completed LP');
+assert.equal(context.projectEod(100, 200, 150, 750, 60, 3, false).expectedCompletionsByEod, 1, 'an active job without prior automation evidence counts only its current completion');
+assert.equal(context.projectEod(100, 800, 150, 750, 60, 3, true).expectedCompletionsByEod, 0, 'a process ending after EoD contributes no completed LP');
 assert.equal(context.projectEod(200, 200, 150, 750, 60, 3).expectedCompletionsByEod, 1, 'invalid duration retains the conservative in-flight completion without extrapolation');
 assert.equal(context.projectEod(100, 750, 150, 750, 60, 3).expectedCompletionsByEod, 1, 'a process ending exactly at EoD counts once');
-assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 250, 750, 60, 3))), {
+assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 250, 750, 60, 3, true))), {
   durationSeconds: 100, overdueSeconds: 50, automationAssumed: true, staleManualInstallation: false, pendingInstallation: true,
   inFlightCompletionsByEod: 1, expectedCompletionsByEod: 6,
   inFlightLpByEod: 60, expectedLpByEod: 360, repeatLpByEod: 300,
   inFlightQuantityByEod: 3, expectedQuantityByEod: 18
 }, 'a process overdue by at most two minutes counts its pending installation and automated repeats from now');
-assert.equal(context.projectEod(100, 200, 321, 750, 60, 3).expectedCompletionsByEod, 1, 'a process overdue by more than two minutes but no more than 24 hours counts its pending installation once');
-assert.equal(context.projectEod(100, 200, 321, 750, 60, 3).automationAssumed, false, 'an older overdue process is treated as manual');
+assert.equal(context.projectEod(100, 200, 321, 750, 60, 3, true).expectedCompletionsByEod, 1, 'a process overdue by more than two minutes but no more than 24 hours counts its pending installation once');
+assert.equal(context.projectEod(100, 200, 321, 750, 60, 3, true).automationAssumed, false, 'an older overdue process is treated as manual');
 assert.equal(context.projectEod(100, 200, 86_601, 90_000, 60, 3).expectedCompletionsByEod, 0, 'manual uninstalled LP older than 24 hours is excluded from Expected Additional LP by EOD');
 assert.equal(context.projectEod(100, 200, 86_600, 90_000, 60, 3).expectedCompletionsByEod, 1, 'manual uninstalled LP exactly 24 hours old remains expected once');
 assert.equal(
@@ -115,7 +140,7 @@ assert.equal(
   'SAGE EoD preserves the real seconds remaining until UTC midnight without mixing clock epochs'
 );
 assert.equal(
-  context.projectEod(1_782_768_956, 1_782_772_508, 1_782_771_962, context.sageEod(1_782_771_962, new Date('2026-07-23T07:50:00Z')), 701_389, 2_119).expectedCompletionsByEod,
+  context.projectEod(1_782_768_956, 1_782_772_508, 1_782_771_962, context.sageEod(1_782_771_962, new Date('2026-07-23T07:50:00Z')), 701_389, 2_119, true).expectedCompletionsByEod,
   17,
   'a 59-minute MUD job has 17 total completions by EoD rather than hundreds from mixed clocks'
 );
@@ -161,6 +186,10 @@ assert.match(processHistory, /component=Framework/, 'process history retains the
 assert.match(processHistory, /recipeKey=recipe-1/, 'process history retains the recipe identity');
 assert.match(processHistory, /quantity=42i/, 'process history retains job quantity');
 assert.match(processHistory, /startTime=1000i,endTime=1600i,durationSeconds=600i/, 'process history retains exact cadence timestamps');
+assert.match(processHistory, /repeatEligible=false,matchingFastRestartDepth=0i/, 'process history exposes repeat eligibility and evidence depth');
+assert.match(processHistory, /evidenceWindowDays=7i,fastRestartThresholdSeconds=300i/, 'process history exposes the rolling evidence policy');
+assert.match(source, /fetchUpgradeAutomationRepeatHistory\(faction, now\)/, 'the hourly cycle loads the rolling seven-day process evidence before projection');
+assert.match(source, /applyUpgradeAutomationRepeatEligibility\(allProcesses, repeatHistory\)/, 'the hourly cycle applies component-level repeat eligibility before aggregation');
 assert.match(source, /sendUpgradeAutomationLpProcessHistoryToInflux\(allProcesses, faction, now\)/, 'the hourly cycle emits individual process history without changing projections');
 
 const queue = context.buildQueue({
