@@ -172,6 +172,8 @@ assert.match(processHistory, /restartDelaySource=player_component/, 'process his
 assert.match(source, /fetchUpgradeAutomationRestartHistory\(faction, now\)/, 'the hourly cycle loads the rolling seven-day process evidence before projection');
 assert.match(source, /applyUpgradeAutomationRestartDelays\(allProcesses, restartHistory\)/, 'the hourly cycle applies component-level repeat eligibility before aggregation');
 assert.match(source, /sendUpgradeAutomationLpProcessHistoryToInflux\(allProcesses, faction, now\)/, 'the hourly cycle emits individual process history without changing projections');
+const expectedLpReader = extractFunction('fetchUpgradeAutomationExpectedLpByEod');
+assert.doesNotMatch(expectedLpReader, /range\(start: -2h, stop:/, 'the expected-LP read includes the just-written snapshot at the cycle timestamp');
 
 const queue = context.buildQueue({
   alpha: { pending: [{ signature: 'a1' }, { signature: 'a2' }] },

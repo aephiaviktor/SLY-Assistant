@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-234
+// @aephia-version 0.7.35-235
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -1248,7 +1248,7 @@
 			const faction = String(getUpgradeAutomationInfluxFactionTag()).replace(/"/g, '');
 			const instance = String(getSlyaInfluxInstanceTag()).replace(/"/g, '');
 			const flux = `from(bucket: "${sanitizeInfluxBucketName(globalSettings.influxDB)}")
-  |> range(start: -2h, stop: ${now.toISOString()})
+  |> range(start: -2h)
   |> filter(fn: (r) => r._measurement == "lp_per_profile")
   |> filter(fn: (r) => exists r.faction and r.faction == "${faction}")
   |> filter(fn: (r) => exists r.instance and r.instance == "${instance}")
