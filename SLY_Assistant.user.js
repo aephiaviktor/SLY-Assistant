@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-233
+// @aephia-version 0.7.35-234
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -2386,23 +2386,19 @@
 	}
 
 	function summarizeUpgradeAutomationUninstalledLp(processes) {
-		let automatedLp = 0;
-		let notAutomatedLp = 0;
-		let notAutomatedOlderThan24hLp = 0;
-		let oldestNotAutomatedAgeSeconds = 0;
+		let under24hLp = 0;
+		let over24hLp = 0;
+		let oldestOver24hAgeSeconds = 0;
 		for (const process of (processes || [])) {
 			if (!process?.pendingInstallation) continue;
 			const lp = Math.max(0, Number(process.lp || 0));
 			const overdueSeconds = Math.max(0, Number(process.overdueSeconds || 0));
-			if (process.automationAssumed) {
-				automatedLp += lp;
-			} else {
-				notAutomatedLp += lp;
-				oldestNotAutomatedAgeSeconds = Math.max(oldestNotAutomatedAgeSeconds, overdueSeconds);
-				if (overdueSeconds > 86400) notAutomatedOlderThan24hLp += lp;
-			}
+			if (overdueSeconds > 86400) {
+				over24hLp += lp;
+				oldestOver24hAgeSeconds = Math.max(oldestOver24hAgeSeconds, overdueSeconds);
+			} else under24hLp += lp;
 		}
-		return { automatedLp, notAutomatedLp, notAutomatedOlderThan24hLp, oldestNotAutomatedAgeSeconds };
+		return { under24hLp, over24hLp, oldestOver24hAgeSeconds };
 	}
 
 	function computeUpgradeAutomationSageEodSeconds(starbaseTime, now = new Date()) {
@@ -2412,86 +2408,71 @@
 		return sageNow + secondsUntilUtcEod;
 	}
 
-	function classifyUpgradeAutomationRepeatEligibility(process, historyRows, nowSeconds) {
-		const evidenceWindowDays = 7;
-		const fastRestartThresholdSeconds = 300;
-		const now = Number(nowSeconds || process?.startTime || 0);
-		const cutoff = now - evidenceWindowDays * 86400;
-		const duration = Number(process?.durationSeconds || (Number(process?.endTime || 0) - Number(process?.startTime || 0)));
-		const matches = new Map();
-		for (const row of (historyRows || [])) {
-			const rowDuration = Number(row?.durationSeconds || (Number(row?.endTime || 0) - Number(row?.startTime || 0)));
-			if (String(row?.profile || '') !== String(process?.profile || '')
-				|| String(row?.starbase || '') !== String(process?.starbase || '')
-				|| String(row?.component || '') !== String(process?.component || '')
-				|| String(row?.recipeKey || '') !== String(process?.recipeKey || '')
-				|| Number(row?.quantity || 0) !== Number(process?.quantity || 0)
-				|| rowDuration !== duration) continue;
-			const start = Number(row?.startTime || 0);
-			const end = Number(row?.endTime || 0);
-			if (!start || !end || start < cutoff || start >= now) continue;
-			matches.set(String(row?.process || row?.craftingProcess || `${start}:${end}`), { startTime: start, endTime: end });
-		}
-		const ordered = Array.from(matches.values()).sort((a, b) => a.startTime - b.startTime);
-		let matchingFastRestartDepth = 0;
-		let lastMatchingRestartAt = null;
-		for (let i = 1; i < ordered.length; i++) {
-			const gap = ordered[i].startTime - ordered[i - 1].endTime;
-			if (gap >= -5 && gap <= fastRestartThresholdSeconds) {
-				matchingFastRestartDepth += 1;
-				lastMatchingRestartAt = ordered[i].startTime;
-			} else {
-				matchingFastRestartDepth = 0;
-				lastMatchingRestartAt = null;
-			}
-		}
-		return { repeatEligible: matchingFastRestartDepth >= 2, matchingFastRestartDepth, lastMatchingRestartAt, evidenceWindowDays, fastRestartThresholdSeconds };
+	function medianUpgradeAutomationRestartDelay(values) {
+		const sorted = (values || []).map(Number).filter(value => Number.isFinite(value) && value >= 0).sort((a, b) => a - b);
+		if (!sorted.length) return null;
+		const middle = Math.floor(sorted.length / 2);
+		return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 	}
 
-	function applyUpgradeAutomationRepeatEligibility(processes, historyRows) {
+	function collectUpgradeAutomationRestartGaps(historyRows, nowSeconds, filter) {
+		const cutoff = Number(nowSeconds || 0) - 7 * 86400;
+		const groups = new Map();
+		for (const row of (historyRows || [])) {
+			if (filter && !filter(row)) continue;
+			const startTime = Number(row?.startTime || 0), endTime = Number(row?.endTime || 0);
+			if (!startTime || !endTime || startTime < cutoff || startTime >= nowSeconds) continue;
+			const key = [row.profile, row.starbase, row.component, row.recipeKey].map(value => String(value || '')).join('|');
+			if (!groups.has(key)) groups.set(key, new Map());
+			groups.get(key).set(String(row.process || row.craftingProcess || `${startTime}:${endTime}`), { startTime, endTime });
+		}
+		const gaps = [];
+		for (const rows of groups.values()) {
+			const ordered = Array.from(rows.values()).sort((x, y) => x.startTime - y.startTime);
+			for (let i = 1; i < ordered.length; i++) {
+				const gap = ordered[i].startTime - ordered[i - 1].endTime;
+				if (gap >= -5) gaps.push(Math.max(0, gap));
+			}
+		}
+		return gaps;
+	}
+
+	function estimateUpgradeAutomationRestartDelay(process, historyRows, nowSeconds) {
+		const samePlayerComponent = row => String(row?.profile || '') === String(process?.profile || '') && String(row?.starbase || '') === String(process?.starbase || '') && String(row?.component || '') === String(process?.component || '') && String(row?.recipeKey || '') === String(process?.recipeKey || '');
+		const sameComponent = row => String(row?.component || '') === String(process?.component || '') && String(row?.recipeKey || '') === String(process?.recipeKey || '');
+		for (const [source, filter] of [['player_component', samePlayerComponent], ['component_fallback', sameComponent], ['global_fallback', null]]) {
+			const gaps = collectUpgradeAutomationRestartGaps(historyRows, nowSeconds, filter);
+			if (gaps.length >= 2) return { restartDelaySeconds: medianUpgradeAutomationRestartDelay(gaps), restartDelaySource: source, restartGapSamples: gaps.length, evidenceWindowDays: 7 };
+		}
+		return { restartDelaySeconds: 300, restartDelaySource: 'default_fallback', restartGapSamples: 0, evidenceWindowDays: 7 };
+	}
+
+	function applyUpgradeAutomationRestartDelays(processes, historyRows) {
 		for (const process of (processes || [])) {
-			const evidence = classifyUpgradeAutomationRepeatEligibility(process, historyRows, process.startTime);
-			const projection = computeUpgradeAutomationLpProcessEodProjection(process.startTime, process.endTime, process.projectionNowSeconds, process.projectionEodSeconds, process.lp, process.quantity, evidence.repeatEligible);
+			const evidence = estimateUpgradeAutomationRestartDelay(process, historyRows, process.projectionNowSeconds || process.startTime);
+			const projection = computeUpgradeAutomationLpProcessEodProjection(process.startTime, process.endTime, process.projectionNowSeconds, process.projectionEodSeconds, process.lp, process.quantity, evidence.restartDelaySeconds);
 			Object.assign(process, projection, evidence, { active: projection.inFlightCompletionsByEod > 0, completesByEod: projection.inFlightCompletionsByEod > 0 });
 		}
 		return processes;
 	}
 
-	function computeUpgradeAutomationLpProcessEodProjection(startTime, endTime, nowSeconds, eodSeconds, lp, quantity, repeatEligible = false) {
-		const start = Number(startTime || 0);
-		const end = Number(endTime || 0);
-		const now = Number(nowSeconds || 0);
-		const eod = Number(eodSeconds || 0);
+	function computeUpgradeAutomationLpProcessEodProjection(startTime, endTime, nowSeconds, eodSeconds, lp, quantity, restartDelaySeconds = 300) {
+		const start = Number(startTime || 0), end = Number(endTime || 0), now = Number(nowSeconds || 0), eod = Number(eodSeconds || 0);
 		const durationSeconds = Number.isFinite(start) && Number.isFinite(end) && end > start ? end - start : 0;
+		const delay = Math.max(0, Number(restartDelaySeconds || 0));
 		const overdueSeconds = Math.max(0, now - end);
 		const pendingInstallation = end <= now;
-		const completesByEod = pendingInstallation || (end > now && end <= eod);
-		const automationAssumed = repeatEligible && (!pendingInstallation || overdueSeconds <= 120);
-		const staleManualInstallation = pendingInstallation && !automationAssumed && overdueSeconds > 86400;
-		const repeatAnchor = pendingInstallation ? now : end;
-		const inFlightCompletionsByEod = completesByEod && !staleManualInstallation ? 1 : 0;
-		const expectedCompletionsByEod = inFlightCompletionsByEod && automationAssumed && durationSeconds > 0
-			? 1 + Math.floor(Math.max(0, eod - repeatAnchor) / durationSeconds)
-			: inFlightCompletionsByEod;
-		const unitLp = Math.max(0, Number(lp || 0));
-		const unitQuantity = Math.max(0, Number(quantity || 0));
-		return {
-			durationSeconds,
-			overdueSeconds,
-			automationAssumed,
-			staleManualInstallation,
-			pendingInstallation,
-			inFlightCompletionsByEod,
-			expectedCompletionsByEod,
-			inFlightLpByEod: unitLp * inFlightCompletionsByEod,
-			expectedLpByEod: unitLp * expectedCompletionsByEod,
-			repeatLpByEod: unitLp * Math.max(0, expectedCompletionsByEod - inFlightCompletionsByEod),
-			inFlightQuantityByEod: unitQuantity * inFlightCompletionsByEod,
-			expectedQuantityByEod: unitQuantity * expectedCompletionsByEod
-		};
+		const staleUninstalled = pendingInstallation && overdueSeconds > 86400;
+		const remainingRestartDelaySeconds = pendingInstallation ? Math.max(0, delay - overdueSeconds) : delay;
+		const firstCompletionAt = (pendingInstallation ? now : end) + remainingRestartDelaySeconds;
+		const inFlightCompletionsByEod = !staleUninstalled && firstCompletionAt <= eod ? 1 : 0;
+		const cadenceSeconds = durationSeconds + delay;
+		const expectedCompletionsByEod = inFlightCompletionsByEod && cadenceSeconds > 0 ? 1 + Math.floor(Math.max(0, eod - firstCompletionAt) / cadenceSeconds) : inFlightCompletionsByEod;
+		const unitLp = Math.max(0, Number(lp || 0)), unitQuantity = Math.max(0, Number(quantity || 0));
+		return { durationSeconds, overdueSeconds, restartDelaySeconds: delay, remainingRestartDelaySeconds, staleUninstalled, pendingInstallation, inFlightCompletionsByEod, expectedCompletionsByEod, inFlightLpByEod: unitLp * inFlightCompletionsByEod, expectedLpByEod: unitLp * expectedCompletionsByEod, repeatLpByEod: unitLp * Math.max(0, expectedCompletionsByEod - inFlightCompletionsByEod), inFlightQuantityByEod: unitQuantity * inFlightCompletionsByEod, expectedQuantityByEod: unitQuantity * expectedCompletionsByEod };
 	}
 
-	async function fetchUpgradeAutomationRepeatHistory(faction, now = new Date()) {
+	async function fetchUpgradeAutomationRestartHistory(faction, now = new Date()) {
 		const factionTag = String(faction || '').replace(/"/g, '');
 		const flux = `from(bucket: "${sanitizeInfluxBucketName(globalSettings.influxDB)}")
   |> range(start: -7d, stop: ${now.toISOString()})
@@ -2896,8 +2877,8 @@
 		const ts = Math.floor(now.getTime());
 		for (const row of (processes || [])) {
 			if (!row?.profile || !row?.craftingProcess || !row?.starbase || !row?.component || !row?.recipeKey) continue;
-			const tags = `faction=${influxEscape(factionTag)},instance=${influxEscape(String(instanceTag))},profile=${influxEscape(row.profile)},process=${influxEscape(row.craftingProcess)},starbase=${influxEscape(row.starbase)},component=${influxEscape(row.component)},recipe=${influxEscape(String(row.recipe || ''))},recipeKey=${influxEscape(row.recipeKey)}`;
-			const fields = `quantity=${Math.round(Number(row.quantity || 0))}i,lp=${Math.round(Number(row.lp || 0))},lpPerUnit=${Math.round(Number(row.lpPerUnit || 0))}i,startTime=${Math.round(Number(row.startTime || 0))}i,endTime=${Math.round(Number(row.endTime || 0))}i,durationSeconds=${Math.round(Number(row.durationSeconds || 0))}i,remainingSeconds=${Math.round(Number(row.remainingSeconds || 0))}i,pendingInstallation=${row.pendingInstallation === true},automationAssumed=${row.automationAssumed === true},repeatEligible=${row.repeatEligible === true},matchingFastRestartDepth=${Math.max(0, Math.round(Number(row.matchingFastRestartDepth || 0)))}i,lastMatchingRestartAt=${Math.max(0, Math.round(Number(row.lastMatchingRestartAt || 0)))}i,evidenceWindowDays=${Math.max(0, Math.round(Number(row.evidenceWindowDays || 7)))}i,fastRestartThresholdSeconds=${Math.max(0, Math.round(Number(row.fastRestartThresholdSeconds || 300)))}i`;
+			const tags = `faction=${influxEscape(factionTag)},instance=${influxEscape(String(instanceTag))},profile=${influxEscape(row.profile)},process=${influxEscape(row.craftingProcess)},starbase=${influxEscape(row.starbase)},component=${influxEscape(row.component)},recipe=${influxEscape(String(row.recipe || ''))},recipeKey=${influxEscape(row.recipeKey)},restartDelaySource=${influxEscape(String(row.restartDelaySource || 'default_fallback'))}`;
+			const fields = `quantity=${Math.round(Number(row.quantity || 0))}i,lp=${Math.round(Number(row.lp || 0))},lpPerUnit=${Math.round(Number(row.lpPerUnit || 0))}i,startTime=${Math.round(Number(row.startTime || 0))}i,endTime=${Math.round(Number(row.endTime || 0))}i,durationSeconds=${Math.round(Number(row.durationSeconds || 0))}i,remainingSeconds=${Math.round(Number(row.remainingSeconds || 0))}i,pendingInstallation=${row.pendingInstallation === true},restartDelaySeconds=${Math.max(0, Math.round(Number(row.restartDelaySeconds || 0)))}i,restartGapSamples=${Math.max(0, Math.round(Number(row.restartGapSamples || 0)))}i,evidenceWindowDays=${Math.max(0, Math.round(Number(row.evidenceWindowDays || 7)))}i`;
 			lines.push(`lp_upgrade_process_history,${tags} ${fields} ${ts}`);
 		}
 		return lines.join('\n');
@@ -2945,8 +2926,8 @@
 					if (rows.scanOk !== true) scansOk = false;
 					allProcesses.push(...rows);
 				}
-				const repeatHistory = await fetchUpgradeAutomationRepeatHistory(faction, now);
-				applyUpgradeAutomationRepeatEligibility(allProcesses, repeatHistory);
+				const restartHistory = await fetchUpgradeAutomationRestartHistory(faction, now);
+				applyUpgradeAutomationRestartDelays(allProcesses, restartHistory);
 				const aggregated = aggregateUpgradeAutomationLpPerProfile(allProcesses);
 				upgradeAutomationUninstalledLp = summarizeUpgradeAutomationUninstalledLp(allProcesses);
 				const result = await sendUpgradeAutomationLpPerProfileToInflux(aggregated, faction, now);
@@ -5248,10 +5229,9 @@
 			`aggressiveness_rel=${Number.isFinite(Number(summary.aggrRelative)) ? Number(summary.aggrRelative) : 0}`,
 			`aggressiveness_abs=${Number.isFinite(Number(summary.aggrAbsolute)) ? Number(summary.aggrAbsolute) : 0}`,
 			`aggressiveness=${Number.isFinite(Number(summary.aggressiveness)) ? Number(summary.aggressiveness) : 0}`,
-			`uninstalled_automated_lp=${Math.round(Number(uninstalledSummary.automatedLp || 0))}i`,
-			`uninstalled_not_automated_lp=${Math.round(Number(uninstalledSummary.notAutomatedLp || 0))}i`,
-			`uninstalled_not_automated_older_24h_lp=${Math.round(Number(uninstalledSummary.notAutomatedOlderThan24hLp || 0))}i`,
-			`oldest_uninstalled_not_automated_age_seconds=${Math.max(0, Math.round(Number(uninstalledSummary.oldestNotAutomatedAgeSeconds || 0)))}i`
+			`uninstalled_under_24h_lp=${Math.round(Number(uninstalledSummary.under24hLp || 0))}i`,
+			`uninstalled_over_24h_lp=${Math.round(Number(uninstalledSummary.over24hLp || 0))}i`,
+			`oldest_uninstalled_over_24h_age_seconds=${Math.max(0, Math.round(Number(uninstalledSummary.oldestOver24hAgeSeconds || 0)))}i`
 		];
 		if (summary.expectedLpByEod != null && Number.isFinite(Number(summary.expectedLpByEod))) aggregateFields.push(`expected_additional_lp_eod=${Math.round(Number(summary.expectedLpByEod))}i`);
 		if (summary.expectedTotalLpByEod != null && Number.isFinite(Number(summary.expectedTotalLpByEod))) aggregateFields.push(`expected_total_lp_eod=${Math.round(Number(summary.expectedTotalLpByEod))}i`);
@@ -6717,11 +6697,11 @@
 				const expectedLpProfiles = Number(upgradeAutomationLpControl?.expectedLpByEodProfiles || 0);
 				const expectedLpRows = Number(upgradeAutomationLpControl?.expectedLpByEodRows || 0);
 				const expectedLpTitle = expectedLpByEod !== null
-					? `Expected additional LP by 00:00 UTC from active upgrade jobs, automation repeats, and manual pending installations no older than 24 hours. Older manual backlog is excluded. Latest snapshot: ${expectedLpSnapshotTime || 'unknown'}; profiles: ${expectedLpProfiles}; rows: ${expectedLpRows}.`
+					? `Expected additional LP by 00:00 UTC from active and uninstalled upgrade jobs using each player/component's median restart delay over the last 7 days. Uninstalled jobs older than 24 hours are excluded. Latest snapshot: ${expectedLpSnapshotTime || 'unknown'}; profiles: ${expectedLpProfiles}; rows: ${expectedLpRows}.`
 					: `Unavailable${upgradeAutomationLpControl?.expectedLpByEodError ? ': ' + String(upgradeAutomationLpControl.expectedLpByEodError) : ''}`;
 				const absAdjustment = Number.isFinite(upgradeAutomationLpControl?.absAdjustment) ? upgradeAutomationLpControl.absAdjustment : 0;
 				content += '<tr><td>Faction LP Installed Today</td><td align="right">' + Math.round(lpToday).toLocaleString() + '</td><td title="' + expectedLpTitle.replace(/["<>]/g, '') + '">Expected Additional LP by EOD</td><td align="right" title="' + expectedLpTitle.replace(/["<>]/g, '') + '">' + (expectedLpByEod !== null ? Math.round(expectedLpByEod).toLocaleString() : '-') + '</td><td>Expected Total LP by EOD</td><td align="right">' + (expectedTotalLpByEod !== null ? Math.round(expectedTotalLpByEod).toLocaleString() : '-') + '</td></tr>';
-				if (upgradeAutomationUninstalledLp) content += '<tr><td>Uninstalled automated LP</td><td align="right">' + Math.round(Number(upgradeAutomationUninstalledLp.automatedLp || 0)).toLocaleString() + '</td><td>Uninstalled not automated LP</td><td align="right">' + Math.round(Number(upgradeAutomationUninstalledLp.notAutomatedLp || 0)).toLocaleString() + '</td><td>Uninstalled not automated LP (&gt;24h)</td><td align="right">' + Math.round(Number(upgradeAutomationUninstalledLp.notAutomatedOlderThan24hLp || 0)).toLocaleString() + '</td></tr>';
+				if (upgradeAutomationUninstalledLp) content += '<tr><td>Uninstalled LP (&lt;24h)</td><td align="right">' + Math.round(Number(upgradeAutomationUninstalledLp.under24hLp || 0)).toLocaleString() + '</td><td>Uninstalled LP (&gt;24h)</td><td align="right">' + Math.round(Number(upgradeAutomationUninstalledLp.over24hLp || 0)).toLocaleString() + '</td></tr>';
 				content += '<tr><td>LP Target Now Hourly</td><td align="right">' + Math.round(lpTargetNowInflux).toLocaleString() + '</td><td>LP Faction yday</td><td align="right">' + (lpFactionYesterdayRaw != null && Number.isFinite(lpFactionYesterday) ? Math.round(lpFactionYesterday).toLocaleString() : '-') + '</td><td>LP Installed yday</td><td align="right">' + (lpInstalledYesterdayRaw != null && Number.isFinite(lpInstalledYesterday) ? Math.round(lpInstalledYesterday).toLocaleString() : '-') + '</td></tr>';
 				content += '<tr><td>' + lpAggPreLabel + '</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrRelative ?? upgradeAutomationLpControl?.rawAggressiveness ?? upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td><td>Aggr. (abs.)</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrAbsolute ?? (1 + absAdjustment)).toFixed(3) + '</td><td style="color:' + lpAggColor + '">Aggr.</td><td align="right" style="color:' + lpAggColor + '">' + Number(upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td></tr>';
 				content += '<tr><td colspan="6">&nbsp;</td></tr>';

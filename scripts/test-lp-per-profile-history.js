@@ -37,8 +37,10 @@ vm.runInContext(`
   ${extractFunction('mergeUpgradeAutomationLpPerProfileSignatureState')}
   ${extractFunction('updateUpgradeAutomationLpPerProfileWatchCohort')}
   ${extractFunction('computeUpgradeAutomationSageEodSeconds')}
-  ${extractFunction('classifyUpgradeAutomationRepeatEligibility')}
-  ${extractFunction('applyUpgradeAutomationRepeatEligibility')}
+  ${extractFunction('medianUpgradeAutomationRestartDelay')}
+  ${extractFunction('collectUpgradeAutomationRestartGaps')}
+  ${extractFunction('estimateUpgradeAutomationRestartDelay')}
+  ${extractFunction('applyUpgradeAutomationRestartDelays')}
   ${extractFunction('computeUpgradeAutomationLpProcessEodProjection')}
   ${extractFunction('summarizeUpgradeAutomationUninstalledLp')}
   ${extractFunction('buildUpgradeAutomationLpPerProfileTransactionQueue')}
@@ -48,8 +50,8 @@ vm.runInContext(`
   this.mergeState = mergeUpgradeAutomationLpPerProfileSignatureState;
   this.updateCohort = updateUpgradeAutomationLpPerProfileWatchCohort;
   this.sageEod = computeUpgradeAutomationSageEodSeconds;
-  this.classifyRepeat = classifyUpgradeAutomationRepeatEligibility;
-  this.applyRepeat = applyUpgradeAutomationRepeatEligibility;
+  this.estimateRestartDelay = estimateUpgradeAutomationRestartDelay;
+  this.applyRestartDelays = applyUpgradeAutomationRestartDelays;
   this.projectEod = computeUpgradeAutomationLpProcessEodProjection;
   this.summarizeUninstalled = summarizeUpgradeAutomationUninstalledLp;
   this.buildQueue = buildUpgradeAutomationLpPerProfileTransactionQueue;
@@ -87,76 +89,55 @@ assert.equal(cohort.profiles['profile-old'].cursor, 'old-cursor', 'restart curso
 assert.equal(cohort.profiles['profile-new'].expiresAt, (Math.floor(now / 86400) + 1) * 86400 + 7200, 'watched profile remains through EoD plus two-hour grace');
 
 const repeatHistory = [
-  { profile: 'profile-1', starbase: '0,-24', component: 'Framework', recipeKey: 'recipe-1', quantity: 3, durationSeconds: 100, startTime: 100, endTime: 200 },
-  { profile: 'profile-1', starbase: '0,-24', component: 'Framework', recipeKey: 'recipe-1', quantity: 3, durationSeconds: 100, startTime: 250, endTime: 350 },
-  { profile: 'profile-1', starbase: '0,-24', component: 'Framework', recipeKey: 'recipe-1', quantity: 3, durationSeconds: 100, startTime: 420, endTime: 520 }
+  { profile: 'profile-1', process: 'p1', starbase: '0,-24', component: 'Framework', recipeKey: 'recipe-1', startTime: 100, endTime: 200 },
+  { profile: 'profile-1', process: 'p2', starbase: '0,-24', component: 'Framework', recipeKey: 'recipe-1', startTime: 250, endTime: 350 },
+  { profile: 'profile-1', process: 'p3', starbase: '0,-24', component: 'Framework', recipeKey: 'recipe-1', startTime: 420, endTime: 520 },
+  { profile: 'profile-1', process: 'p4', starbase: '0,-24', component: 'Framework', recipeKey: 'recipe-1', startTime: 900, endTime: 1_000 }
 ];
-const currentRepeatJob = { profile: 'profile-1', starbase: '0,-24', component: 'Framework', recipeKey: 'recipe-1', quantity: 3, durationSeconds: 100, startTime: 600 };
-assert.deepEqual(JSON.parse(JSON.stringify(context.classifyRepeat(currentRepeatJob, repeatHistory, 600))), {
-  repeatEligible: true, matchingFastRestartDepth: 2, lastMatchingRestartAt: 420,
-  evidenceWindowDays: 7, fastRestartThresholdSeconds: 300
-}, 'two consecutive matching fast restarts in the prior seven days make future repeats eligible');
-assert.equal(context.classifyRepeat(currentRepeatJob, repeatHistory.slice(0, 2), 600).repeatEligible, false, 'one prior fast restart is insufficient');
-assert.equal(context.classifyRepeat({ ...currentRepeatJob, component: 'Power Source' }, repeatHistory, 600).repeatEligible, false, 'automation evidence never leaks between components on the same profile');
-assert.equal(context.classifyRepeat({ ...currentRepeatJob, starbase: '1,-24' }, repeatHistory, 600).repeatEligible, false, 'automation evidence never leaks between starbases');
-assert.equal(context.classifyRepeat(currentRepeatJob, repeatHistory.map(row => ({ ...row, startTime: row.startTime - 8 * 86400, endTime: row.endTime - 8 * 86400 })), 600).repeatEligible, false, 'evidence older than seven days expires');
-assert.equal(context.classifyRepeat({ ...currentRepeatJob, startTime: 1_100 }, [
-  repeatHistory[0], repeatHistory[1],
-  { ...repeatHistory[2], startTime: 800, endTime: 900 },
-  { ...repeatHistory[2], startTime: 950, endTime: 1_050 }
-], 1_100).repeatEligible, false, 'two isolated fast links do not replace a consecutive two-link chain');
+const currentRepeatJob = { profile: 'profile-1', starbase: '0,-24', component: 'Framework', recipeKey: 'recipe-1', startTime: 1_100 };
+assert.deepEqual(JSON.parse(JSON.stringify(context.estimateRestartDelay(currentRepeatJob, repeatHistory, 1_100))), {
+  restartDelaySeconds: 70, restartDelaySource: 'player_component', restartGapSamples: 3, evidenceWindowDays: 7
+}, 'the player/component restart delay uses the median observed gap and ignores the large outlier');
+assert.deepEqual(JSON.parse(JSON.stringify(context.estimateRestartDelay({ ...currentRepeatJob, profile: 'profile-new' }, repeatHistory, 1_100))), {
+  restartDelaySeconds: 70, restartDelaySource: 'component_fallback', restartGapSamples: 3, evidenceWindowDays: 7
+}, 'a component median is used when that player has insufficient restart history');
+assert.deepEqual(JSON.parse(JSON.stringify(context.estimateRestartDelay({ ...currentRepeatJob, profile: 'profile-new', component: 'Power Source', recipeKey: 'recipe-2' }, repeatHistory, 1_100))), {
+  restartDelaySeconds: 70, restartDelaySource: 'global_fallback', restartGapSamples: 3, evidenceWindowDays: 7
+}, 'the global median is used when player and component history are unavailable');
+assert.equal(context.estimateRestartDelay(currentRepeatJob, [], 1_100).restartDelaySeconds, 300, 'a 300-second conservative delay is used when no restart history exists');
 
-assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 150, 750, 60, 3, true))), {
-  durationSeconds: 100,
-  overdueSeconds: 0,
-  automationAssumed: true,
-  staleManualInstallation: false,
-  pendingInstallation: false,
-  inFlightCompletionsByEod: 1,
-  expectedCompletionsByEod: 6,
-  inFlightLpByEod: 60,
-  expectedLpByEod: 360,
-  repeatLpByEod: 300,
-  inFlightQuantityByEod: 3,
-  expectedQuantityByEod: 18
-}, 'EoD projection includes every complete same-duration automation repeat');
-assert.equal(context.projectEod(100, 200, 150, 750, 60, 3, false).expectedCompletionsByEod, 1, 'an active job without prior automation evidence counts only its current completion');
-assert.equal(context.projectEod(100, 800, 150, 750, 60, 3, true).expectedCompletionsByEod, 0, 'a process ending after EoD contributes no completed LP');
-assert.equal(context.projectEod(200, 200, 150, 750, 60, 3).expectedCompletionsByEod, 1, 'invalid duration retains the conservative in-flight completion without extrapolation');
-assert.equal(context.projectEod(100, 750, 150, 750, 60, 3).expectedCompletionsByEod, 1, 'a process ending exactly at EoD counts once');
-assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 250, 750, 60, 3, true))), {
-  durationSeconds: 100, overdueSeconds: 50, automationAssumed: true, staleManualInstallation: false, pendingInstallation: true,
-  inFlightCompletionsByEod: 1, expectedCompletionsByEod: 6,
-  inFlightLpByEod: 60, expectedLpByEod: 360, repeatLpByEod: 300,
-  inFlightQuantityByEod: 3, expectedQuantityByEod: 18
-}, 'a process overdue by at most two minutes counts its pending installation and automated repeats from now');
-assert.equal(context.projectEod(100, 200, 321, 750, 60, 3, true).expectedCompletionsByEod, 1, 'a process overdue by more than two minutes but no more than 24 hours counts its pending installation once');
-assert.equal(context.projectEod(100, 200, 321, 750, 60, 3, true).automationAssumed, false, 'an older overdue process is treated as manual');
-assert.equal(context.projectEod(100, 200, 86_601, 90_000, 60, 3).expectedCompletionsByEod, 0, 'manual uninstalled LP older than 24 hours is excluded from Expected Additional LP by EOD');
-assert.equal(context.projectEod(100, 200, 86_600, 90_000, 60, 3).expectedCompletionsByEod, 1, 'manual uninstalled LP exactly 24 hours old remains expected once');
+assert.deepEqual(JSON.parse(JSON.stringify(context.projectEod(100, 200, 150, 750, 60, 3, 50))), {
+  durationSeconds: 100, overdueSeconds: 0, restartDelaySeconds: 50, remainingRestartDelaySeconds: 50,
+  staleUninstalled: false, pendingInstallation: false, inFlightCompletionsByEod: 1, expectedCompletionsByEod: 4,
+  inFlightLpByEod: 60, expectedLpByEod: 240, repeatLpByEod: 180,
+  inFlightQuantityByEod: 3, expectedQuantityByEod: 12
+}, 'active projections include the median restart delay between every completion');
+assert.equal(context.projectEod(100, 200, 250, 750, 60, 3, 100).remainingRestartDelaySeconds, 50, 'pending jobs subtract time already overdue from their restart delay');
+assert.equal(context.projectEod(100, 200, 350, 750, 60, 3, 100).remainingRestartDelaySeconds, 0, 'pending jobs beyond their typical delay are assumed to restart immediately');
+assert.equal(context.projectEod(100, 200, 86_601, 90_000, 60, 3, 100).expectedCompletionsByEod, 0, 'uninstalled LP older than 24 hours is excluded from Expected Additional LP by EOD');
+assert.equal(context.projectEod(100, 200, 86_600, 90_000, 60, 3, 100).expectedCompletionsByEod, 18, 'uninstalled LP exactly 24 hours old remains eligible for cadence-based repeats');
 assert.equal(
   context.sageEod(1_782_771_962, new Date('2026-07-23T07:50:00Z')),
   1_782_830_162,
   'SAGE EoD preserves the real seconds remaining until UTC midnight without mixing clock epochs'
 );
 assert.equal(
-  context.projectEod(1_782_768_956, 1_782_772_508, 1_782_771_962, context.sageEod(1_782_771_962, new Date('2026-07-23T07:50:00Z')), 701_389, 2_119, true).expectedCompletionsByEod,
-  17,
-  'a 59-minute MUD job has 17 total completions by EoD rather than hundreds from mixed clocks'
+  context.projectEod(1_782_768_956, 1_782_772_508, 1_782_771_962, context.sageEod(1_782_771_962, new Date('2026-07-23T07:50:00Z')), 701_389, 2_119, 300).expectedCompletionsByEod,
+  15,
+  'a 59-minute MUD job includes its restart delay without mixing clock epochs'
 );
 
 const uninstalled = context.summarizeUninstalled([
-  { lp: 60, pendingInstallation: true, automationAssumed: true, overdueSeconds: 50 },
-  { lp: 40, pendingInstallation: true, automationAssumed: false, overdueSeconds: 500 },
-  { lp: 30, pendingInstallation: true, automationAssumed: false, overdueSeconds: 90_000 },
-  { lp: 999, pendingInstallation: false, automationAssumed: true, overdueSeconds: 0 }
+  { lp: 60, pendingInstallation: true, overdueSeconds: 50 },
+  { lp: 40, pendingInstallation: true, overdueSeconds: 500 },
+  { lp: 30, pendingInstallation: true, overdueSeconds: 90_000 },
+  { lp: 999, pendingInstallation: false, overdueSeconds: 0 }
 ]);
 assert.deepEqual(JSON.parse(JSON.stringify(uninstalled)), {
-  automatedLp: 60,
-  notAutomatedLp: 70,
-  notAutomatedOlderThan24hLp: 30,
-  oldestNotAutomatedAgeSeconds: 90_000
-}, 'faction diagnostics split uninstalled LP and identify the manual backlog older than 24 hours');
+  under24hLp: 100,
+  over24hLp: 30,
+  oldestOver24hAgeSeconds: 90_000
+}, 'faction diagnostics split all uninstalled LP only by the 24-hour EoD cutoff');
 
 const historyRunner = extractFunction('runUpgradeAutomationLpPerProfileRedemptionHistory');
 assert.match(historyRunner, /getSignaturesForAddress\(new solanaWeb3\.PublicKey\(profile\)/, 'history queries watched profile addresses directly');
@@ -176,7 +157,7 @@ const processHistory = context.formatProcessHistory([{
   component: 'Framework', recipe: 'Upgrade Framework', recipeKey: 'recipe-1',
   quantity: 42, lp: 1260, lpPerUnit: 30,
   startTime: 1_000, endTime: 1_600, durationSeconds: 600,
-  remainingSeconds: 100, pendingInstallation: false, automationAssumed: true
+  remainingSeconds: 100, pendingInstallation: false, restartDelaySeconds: 70, restartDelaySource: 'player_component', restartGapSamples: 3
 }], 'MUD', new Date('2026-07-27T07:00:00Z'), 'MUD1');
 assert.match(processHistory, /^lp_upgrade_process_history,/, 'individual active jobs use a separate diagnostic measurement');
 assert.match(processHistory, /profile=profile-1/, 'process history retains the player profile');
@@ -186,10 +167,10 @@ assert.match(processHistory, /component=Framework/, 'process history retains the
 assert.match(processHistory, /recipeKey=recipe-1/, 'process history retains the recipe identity');
 assert.match(processHistory, /quantity=42i/, 'process history retains job quantity');
 assert.match(processHistory, /startTime=1000i,endTime=1600i,durationSeconds=600i/, 'process history retains exact cadence timestamps');
-assert.match(processHistory, /repeatEligible=false,matchingFastRestartDepth=0i/, 'process history exposes repeat eligibility and evidence depth');
-assert.match(processHistory, /evidenceWindowDays=7i,fastRestartThresholdSeconds=300i/, 'process history exposes the rolling evidence policy');
-assert.match(source, /fetchUpgradeAutomationRepeatHistory\(faction, now\)/, 'the hourly cycle loads the rolling seven-day process evidence before projection');
-assert.match(source, /applyUpgradeAutomationRepeatEligibility\(allProcesses, repeatHistory\)/, 'the hourly cycle applies component-level repeat eligibility before aggregation');
+assert.match(processHistory, /restartDelaySeconds=70i,restartGapSamples=3i/, 'process history exposes the observed restart cadence');
+assert.match(processHistory, /restartDelaySource=player_component/, 'process history exposes the restart-delay evidence source');
+assert.match(source, /fetchUpgradeAutomationRestartHistory\(faction, now\)/, 'the hourly cycle loads the rolling seven-day process evidence before projection');
+assert.match(source, /applyUpgradeAutomationRestartDelays\(allProcesses, restartHistory\)/, 'the hourly cycle applies component-level repeat eligibility before aggregation');
 assert.match(source, /sendUpgradeAutomationLpProcessHistoryToInflux\(allProcesses, faction, now\)/, 'the hourly cycle emits individual process history without changing projections');
 
 const queue = context.buildQueue({
