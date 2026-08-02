@@ -245,7 +245,7 @@ for (const file of ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.use
   test(`${file} persists runtime progress and exposes block/value telemetry`, () => {
     const { source } = loadRuntime(file);
     assert.match(source, /saveScanningOptimizationRuntime/);
-    assert.match(source, /for\(const key of \['scanOptimizationEnabled', 'scanOptimizationRunEnabled', 'scanOptimizationBlockIndex', 'scanOptimizationBlockScansCompleted'\]\)/);
+    assert.match(source, /for\(const key of \['scanOptimizationEnabled', 'scanOptimizationRunEnabled', 'scanOptimizationBlockIndex', 'scanOptimizationBlockScansCompleted', 'scanOptimizationResupplyStartedAt'\]\)/);
     assert.match(source, /eventType !== 'optimization_complete'/);
     assert.match(source, /await advanceScanningOptimizationAfterCompletedScan\(userFleets\[i\]\)/);
     assert.match(source, /scanOptimizationBlockIndex/);

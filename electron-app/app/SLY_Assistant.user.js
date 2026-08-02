@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-235
+// @aephia-version 0.7.35-236
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -8147,7 +8147,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	async function saveScanningOptimizationRuntime(fleet, reason = 'scan-optimization-progress') {
 		const fleetPK = fleet.publicKey.toString();
 		const saved = JSON.parse(await GM.getValue(fleetPK, '{}'));
-		for(const key of ['scanOptimizationEnabled', 'scanOptimizationRunEnabled', 'scanOptimizationBlockIndex', 'scanOptimizationBlockScansCompleted']) saved[key] = fleet[key];
+		for(const key of ['scanOptimizationEnabled', 'scanOptimizationRunEnabled', 'scanOptimizationBlockIndex', 'scanOptimizationBlockScansCompleted', 'scanOptimizationResupplyStartedAt']) saved[key] = fleet[key];
 		for(const key of SCANNING_OPTIMIZATION_PARAMETER_KEYS) if(Object.prototype.hasOwnProperty.call(fleet, key)) saved[key] = fleet[key];
 		await saveFleetConfig(fleetPK, saved, reason, { skipLeveldbSnapshot: true });
 	}
@@ -8173,7 +8173,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const optimizationValue = telemetryState.parameters.length === 1 ? telemetryState.values[telemetryState.parameters[0]] : telemetryState.value;
 		const previousExperimentField = fleet.scanOptimizationPreviousExperimentId ? `,previousExperimentId=${optimizationInfluxString(fleet.scanOptimizationPreviousExperimentId)}` : '';
 		const progressFields = `,optimizationParameter=${optimizationInfluxString(optimizationParameter)},optimizationValue=${Number.isFinite(Number(optimizationValue)) ? Number(optimizationValue) : 0},optimizationValues=${optimizationInfluxString(JSON.stringify(telemetryValues))}${previousExperimentField},optimizationBlockNumber=${runtime.complete ? runtime.totalBlocks : Math.min(runtime.totalBlocks, runtime.blockIndex + 1)}i,optimizationTotalBlocks=${runtime.totalBlocks}i,optimizationBlockIndex=${runtime.blockIndex}i,optimizationBlockScansCompleted=${runtime.blockScansCompleted}i,optimizationScansInBlock=${runtime.scansInBlock}i,optimizationCompletedScans=${runtime.completedScans}i,optimizationTotalScans=${runtime.totalScans}i`;
-		const fields = buildScanningOptimizationParameterFields(fleet) + progressFields + (extraFields ? `,${extraFields}` : '');
+		const resupplyFields = Number(fleet.scanOptimizationResupplyStartedAt || 0) > 0 ? ',resupplyExcluded=true' : '';
+		const fields = buildScanningOptimizationParameterFields(fleet) + progressFields + resupplyFields + (extraFields ? `,${extraFields}` : '');
 		void sendToInflux(`optimization_event,${tags} ${fields}`, 'optimization').catch(error => {
 			cLog(1, `${FleetTimeStamp(fleet.label)} optimization telemetry failed`, error);
 		});
@@ -13817,6 +13818,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const sduStarbaseContext = await getTelemetryStarbaseContextFromCoords(sduStarbaseCoords[0], sduStarbaseCoords[1]);
 			await sendToInflux(`sdu,instance=${influxEscape(getSlyaInfluxInstanceTag())},faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},starbase=${influxEscape(sduStarbaseContext.starbaseName || 'unknown')},fleet=${influxEscape(userFleets[i].label)},sectorX=${fleetCoords[0]},sectorY=${fleetCoords[1]} amount=${sduFound},burnedFood=${burnedFood},chance=${scanCondition},cargoRoomLeft=${userFleets[i].cargoCapacity - cargoCnt - sduFound}${pauseTelemetryFields}${buildSlyaTxCostInfluxFields(scanResult)}`);
 			const completedScanTelemetryState = getScanningOptimizationCompletedScanTelemetryState(userFleets[i]);
+			const optimizationResupplyStartedAt = Number(userFleets[i].scanOptimizationResupplyStartedAt || 0);
+			const resupplyExcludedSeconds = optimizationResupplyStartedAt > 0 ? Math.max(0, (Date.now() - optimizationResupplyStartedAt) / 1000) : 0;
 			sendScanningOptimizationEvent(userFleets[i], 'scan_result', [
 				`signature=${optimizationInfluxString(scanResult?.slyaTxHash || '')}`,
 				`success=${scanResult && !scanResult?.meta?.err ? 'true' : 'false'}`,
@@ -13831,10 +13834,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				`struckOut=${struckOut ? 'true' : 'false'}`,
 				`pauseCount=${needPause ? 1 : 0}i`,
 				`pauseSeconds=${pauseDurationSeconds}i`,
+				`resupplyExcludedSeconds=${resupplyExcludedSeconds}`,
 				`scanStrikes=${Math.round(Number(userFleets[i].scanStrikes || 0))}i`,
 				`resultSectorX=${Number(fleetCoords[0] || 0)}`,
 				`resultSectorY=${Number(fleetCoords[1] || 0)}`
 			].join(','), ',operation=SCAN', scanResult && !scanResult?.meta?.err ? completedScanTelemetryState : null);
+			if(scanResult && !scanResult?.meta?.err && optimizationResupplyStartedAt > 0) userFleets[i].scanOptimizationResupplyStartedAt = 0;
 			if(scanResult && !scanResult?.meta?.err) await advanceScanningOptimizationAfterCompletedScan(userFleets[i]);
 
 		}
@@ -13898,6 +13903,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	}
 
 	async function handleResupply(i, fleetCoords) {
+		if(userFleets[i].scanOptimizationEnabled && !Number(userFleets[i].scanOptimizationResupplyStartedAt || 0)) {
+			userFleets[i].scanOptimizationResupplyStartedAt = Date.now();
+			await saveScanningOptimizationRuntime(userFleets[i], 'scan-optimization-resupply-start');
+		}
 		const errorWaitTime = 8 * 60 * 1000;
 		const errorFuelRatio = 0.75;
 
@@ -17407,6 +17416,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				let fleetScanOptimizationSchedule = Array.isArray(fleetParsedData.scanOptimizationSchedule) ? fleetParsedData.scanOptimizationSchedule : [];
 				let fleetScanOptimizationBlockIndex = Math.max(0, Math.floor(Number(fleetParsedData.scanOptimizationBlockIndex || 0)));
 				let fleetScanOptimizationBlockScansCompleted = Math.max(0, Math.floor(Number(fleetParsedData.scanOptimizationBlockScansCompleted || 0)));
+				let fleetScanOptimizationResupplyStartedAt = Math.max(0, Number(fleetParsedData.scanOptimizationResupplyStartedAt || 0));
 				let fleetMineResource = fleetParsedData && fleetParsedData.mineResource ? fleetParsedData.mineResource : '';
 				let fleetStarbase = fleetParsedData && fleetParsedData.starbase ? fleetParsedData.starbase : '';
 				let fleetMoveType = fleetParsedData && fleetParsedData.moveType ? fleetParsedData.moveType : 'warp';
@@ -17532,6 +17542,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					scanOptimizationSchedule: fleetScanOptimizationSchedule,
 					scanOptimizationBlockIndex: fleetScanOptimizationBlockIndex,
 					scanOptimizationBlockScansCompleted: fleetScanOptimizationBlockScansCompleted,
+					scanOptimizationResupplyStartedAt: fleetScanOptimizationResupplyStartedAt,
 					foodCnt: currentFoodCnt ? currentFoodCnt.account.data.parsed.info.tokenAmount.uiAmount : 0,
 					sduCnt: currentSduCnt ? currentSduCnt.account.data.parsed.info.tokenAmount.uiAmount : 0,
 					fuelCnt: currentFuelCnt ? currentFuelCnt.account.data.parsed.info.tokenAmount.uiAmount : 0,
