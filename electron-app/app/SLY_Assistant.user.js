@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-241
+// @aephia-version 0.7.35-242
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -7808,11 +7808,39 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	let slyaCostSourcePersistTail = Promise.resolve();
 	const slyaCostSourceMissingCounts = {};
 
+	function getSlyaInfluxPrecision() {
+		try {
+			const precision = String(new URL(String(globalSettings?.influxURL || '')).searchParams.get('precision') || 'ns').toLowerCase();
+			return ['s', 'ms', 'us', 'ns'].includes(precision) ? precision : 'ns';
+		} catch (e) { return 'ns'; }
+	}
+
+	function formatSlyaInfluxTimestamp(timestampMs) {
+		const milliseconds = BigInt(Math.round(Number(timestampMs)));
+		const precision = getSlyaInfluxPrecision();
+		if (precision === 's') return milliseconds / 1000n;
+		if (precision === 'ms') return milliseconds;
+		if (precision === 'us') return milliseconds * 1000n;
+		return milliseconds * 1000000n;
+	}
+
+	function normalizeSlyaCostSourceEventLineTimestamp(line) {
+		const match = String(line || '').match(/^(cargo_cost_source_event_v1,.*) (\d+)$/s);
+		if (!match || getSlyaInfluxPrecision() === 'ns') return String(line || '');
+		const legacyNs = BigInt(match[2]);
+		if (legacyNs % 1000000n !== 0n) return String(line || '');
+		const timestampMs = legacyNs / 1000000n;
+		const minMs = BigInt(Date.UTC(2020, 0, 1));
+		const maxMs = BigInt(Date.UTC(2100, 0, 1));
+		if (timestampMs < minMs || timestampMs > maxMs) return String(line || '');
+		return `${match[1]} ${formatSlyaInfluxTimestamp(timestampMs)}`;
+	}
+
 	function normalizeSlyaCostSourceOutbox(raw) {
 		let value = raw;
 		if (typeof value === 'string') { try { value = JSON.parse(value); } catch (e) { value = {}; } }
 		const entries = value && typeof value === 'object' && !Array.isArray(value) ? Object.entries(value) : [];
-		return new Map(entries.filter(([identity, line]) => String(identity).trim() && typeof line === 'string' && line.startsWith('cargo_cost_source_event_v1,')));
+		return new Map(entries.filter(([identity, line]) => String(identity).trim() && typeof line === 'string' && line.startsWith('cargo_cost_source_event_v1,')).map(([identity, line]) => [identity, normalizeSlyaCostSourceEventLineTimestamp(line)]));
 	}
 
 	function snapshotSlyaCostSourceOutbox(outbox) { return Array.from((outbox || new Map()).entries()); }
@@ -7901,7 +7929,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			? [`fuelQuantity=${Number(event.fuelQuantity)}`, `movementEventId=${optimizationInfluxString(event.movementEventId)}`, `cycleId=${optimizationInfluxString(event.cycleId)}`, `movementIndex=${Number(event.movementIndex)}i`]
 			: [`txFeeLamports=${Math.round(Number(event.txFeeLamports))}i`, `transactionSignature=${optimizationInfluxString(event.transactionSignature)}`].concat(event.eventPosition == null ? [] : [`eventPosition=${Number(event.eventPosition)}i`]);
 		fields.push(`timestampProvenance=${optimizationInfluxString(event.timestampProvenance)}`, `sourceProvenance=${optimizationInfluxString(event.sourceProvenance)}`, `faction=${optimizationInfluxString(getUpgradeAutomationInfluxFactionTag() || 'unknown')}`, `instance=${optimizationInfluxString(getSlyaInfluxInstanceTag() || 'unknown')}`, `fleetAccount=${optimizationInfluxString(event.fleetAccount || '')}`, `fleetLabel=${optimizationInfluxString(event.fleetLabel)}`, `assignment=${optimizationInfluxString(event.assignment)}`);
-		return `cargo_cost_source_event_v1,${tags.join(',')} ${fields.join(',')} ${BigInt(Math.round(Number(event.timestampMs))) * 1000000n}`;
+		return `cargo_cost_source_event_v1,${tags.join(',')} ${fields.join(',')} ${formatSlyaInfluxTimestamp(event.timestampMs)}`;
 	}
 
 	async function queueSlyaCostSourceEvent(event, missingReason = 'event_invalid') {

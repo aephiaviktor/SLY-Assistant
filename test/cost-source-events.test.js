@@ -36,12 +36,16 @@ function loadBuilders() {
     Math,
     Number,
     String,
+    URL,
+    globalSettings: { influxURL: 'https://example.invalid/api/v2/write?bucket=slya&precision=ms' },
     getSlyaInfluxInstanceTag: () => 'USTUR1',
     getUpgradeAutomationInfluxFactionTag: () => 'UST',
     influxEscape: (value) => String(value).replaceAll(' ', '\\ '),
     optimizationInfluxString: (value) => JSON.stringify(String(value ?? '')),
   });
   vm.runInContext(`
+    ${extractFunction('getSlyaInfluxPrecision')}
+    ${extractFunction('formatSlyaInfluxTimestamp')}
     ${extractFunction('getSlyaCostEventTimestamp')}
     ${extractFunction('buildSlyaFuelCostSourceEvent')}
     ${extractFunction('getSlyaTransactionFeeSourceEvents')}
@@ -88,7 +92,7 @@ test('Fuel retry retains identity and block timestamp while equal source values 
   assert.notEqual(two.eventIdentity, one.eventIdentity);
   assert.notEqual(buildSlyaCostSourceEventLine(two), buildSlyaCostSourceEventLine(one));
   assert.match(buildSlyaCostSourceEventLine(one), / fuelQuantity=12\.5/);
-  assert.match(buildSlyaCostSourceEventLine(one), / 1785830000000000000$/);
+  assert.match(buildSlyaCostSourceEventLine(one), / 1785830000000$/);
 });
 
 test('SOL fee identity uses real signature and exact native lamports', () => {
