@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-240
+// @aephia-version 0.7.35-241
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -14767,6 +14767,22 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		}
 	}
 
+	function sanitizeSlyaCostSourceInfluxError(status, statusText, errText) {
+		let reason = String(errText || '').trim();
+		try { reason = String(JSON.parse(reason)?.message || reason); } catch (e) {}
+		const parsePrefix = "unable to parse '";
+		if (reason.toLowerCase().startsWith(parsePrefix)) {
+			const separator = reason.lastIndexOf("': ");
+			reason = separator >= 0 ? `unable to parse: ${reason.slice(separator + 3)}` : 'unable to parse: detail redacted';
+		}
+		reason = reason
+			.replace(/https?:\/\/\S+/gi, '[redacted-url]')
+			.replace(/[A-Za-z0-9_-]{24,}/g, '[redacted-id]')
+			.replace(/\s+/g, ' ')
+			.slice(0, 160);
+		return `http=${Number(status) || 0} ${String(statusText || '').replace(/\s+/g, ' ').slice(0, 40)} reason=${reason || 'none'}`.slice(0, 220);
+	}
+
 	async function sendToInflux(msg, bucketOverride = '', includeCostSourceOutbox = false) {
 		if(!globalSettings.influxURL.length) return false;
 		let message = '';
@@ -14798,7 +14814,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				message = 'Error while sending a request to influx: ' + response.status + ' ' + response.statusText + (errText ? (' ' + errText.slice(0, 300)) : '');
 				upgradeAutomationInfluxDebugStatus = 'http ' + response.status + ' ' + response.statusText + (errText ? (': ' + errText.slice(0, 120)) : '');
 				if (scheduledCostSourceAttempt) {
-					await appendUpgradeAutomationLog(`[COST-SOURCE-OUTBOX] queued=${queuedBeforeSnapshot} included=${queuedCostEvents.length} fuel=${queuedFuel} sol=${queuedSol} acknowledged=0 retained=${costSourceOutbox.size} missing=${missingSummary}`);
+					const rejection = sanitizeSlyaCostSourceInfluxError(response.status, response.statusText, errText);
+					await appendUpgradeAutomationLog(`[COST-SOURCE-OUTBOX] queued=${queuedBeforeSnapshot} included=${queuedCostEvents.length} fuel=${queuedFuel} sol=${queuedSol} acknowledged=0 retained=${costSourceOutbox.size} missing=${missingSummary} rejection=${rejection}`);
 					for (const key of Object.keys(slyaCostSourceMissingCounts)) delete slyaCostSourceMissingCounts[key];
 				}
 			} else {
