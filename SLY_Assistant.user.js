@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-239
+// @aephia-version 0.7.35-240
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -2744,7 +2744,7 @@
 		if (!line) return { sent: true, rows: 0 };
 		const count = line.split('\n').length;
 		await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] redeemed write start faction=${faction} rows=${count}`);
-		const sent = await sendToInflux(line, '', idx === 0);
+		const sent = await sendToInflux(line);
 		if (sent !== true) await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] redeemed write failed faction=${faction} rows=${count} detail=${String(upgradeAutomationInfluxDebugStatus || 'unknown').slice(0, 500)}`);
 		return { sent: sent === true, rows: count };
 	}
@@ -5382,7 +5382,7 @@
 			const measurement = line.startsWith('lp_auto_comp,') ? 'lp_auto_comp' : (line.startsWith('lp_auto_settings') || line.startsWith('lp_auto_settings,') ? 'lp_auto_settings' : (line.startsWith('lp_auto_aggr,') ? 'lp_auto_aggr' : (line.startsWith('lp_auto_perf,') ? 'lp_auto_perf' : (line.startsWith('slya_perf,') ? 'slya_perf' : 'unknown'))));
 			upgradeAutomationInfluxDebugStatus = `sending ${measurement} ${idx + 1}/${lines.length}`;
 			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][INFLUX] sending measurement=${measurement} line=${idx + 1}/${lines.length}`);
-			await sendToInflux(line);
+			await sendToInflux(line, '', idx === 0);
 			upgradeAutomationInfluxDebugLine = line;
 			lastMeasurementSent = measurement;
 			sentCount++;
