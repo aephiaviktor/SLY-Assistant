@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-238
+// @aephia-version 0.7.35-239
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -2744,7 +2744,7 @@
 		if (!line) return { sent: true, rows: 0 };
 		const count = line.split('\n').length;
 		await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] redeemed write start faction=${faction} rows=${count}`);
-		const sent = await sendToInflux(line);
+		const sent = await sendToInflux(line, '', idx === 0);
 		if (sent !== true) await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] redeemed write failed faction=${faction} rows=${count} detail=${String(upgradeAutomationInfluxDebugStatus || 'unknown').slice(0, 500)}`);
 		return { sent: sent === true, rows: count };
 	}
@@ -14767,11 +14767,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		}
 	}
 
-	async function sendToInflux(msg, bucketOverride = '') {
+	async function sendToInflux(msg, bucketOverride = '', includeCostSourceOutbox = false) {
 		if(!globalSettings.influxURL.length) return false;
 		let message = '';
 		let sent = false;
-		const scheduledCostSourceFlush = bucketOverride === UPGRADE_AUTOMATION_INFLUX_BUCKET;
+		const scheduledCostSourceFlush = includeCostSourceOutbox === true;
 		const flushMinute = new Date().toISOString().slice(0, 16);
 		const scheduledCostSourceAttempt = scheduledCostSourceFlush && flushMinute !== slyaCostSourceLastFlushMinute;
 		if (scheduledCostSourceAttempt) slyaCostSourceLastFlushMinute = flushMinute;
