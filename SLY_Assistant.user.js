@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-243
+// @aephia-version 0.7.35-244
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -17164,7 +17164,6 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					await handleMovement(i, null, null, null);
 				}
 				else if (fleetParsedData.assignment == 'Scan' && fleetState == 'Idle') {
-					updateFleetState(userFleets[i], fleetState);
 					let scanBlockPattern = globalSettings.scanBlockPattern;
 					if(userFleets[i].scanPattern) scanBlockPattern=userFleets[i].scanPattern;
 					if(!scanBlockPattern.includes('auto')) {
