@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-242
+// @aephia-version 0.7.35-243
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -13824,7 +13824,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		await saveFleetConfig(fleetPK, fleetParsedData, 'scan-end-save');
 	}
 
+	const SCAN_SUBMISSION_RETRY_DELAY_MS = 10000;
+
 	async function handleScan(i, fleetCoords, destCoords) {
+		if(Number(userFleets[i].scanSubmissionRetryAt || 0) > Date.now()) return;
+
 		let fleetCurrentCargo = await solanaReadConnection.getParsedTokenAccountsByOwner(userFleets[i].cargoHold, {programId: tokenProgramPK});
 		let cargoCnt = fleetCurrentCargo.value.reduce((n, {account}) => n + account.data.parsed.info.tokenAmount.uiAmount * cargoItems.find(r => r.token == account.data.parsed.info.mint).size, 0);
 		let currentFoodAcct = fleetCurrentCargo.value.find(item => item.pubkey.toString() === userFleets[i].foodToken.toString());
@@ -13903,8 +13907,18 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			userFleets[i].lastScanCoord = userFleets[i].destCoord;
 			if(!userFleets[i].scanStrikes) userFleets[i].scanStrikes = 0;
 			const scanResult = await execScan(userFleets[i], fleetCoords);
-			const changesSDU = scanResult ? getBalanceChange(scanResult, userFleets[i].sduToken.toString()) : {postBalance: userFleets[i].sduCnt, preBalance: userFleets[i].sduCnt};
-			const changesFood = scanResult ? getBalanceChange(scanResult, userFleets[i].foodToken.toString()) : {postBalance: userFleets[i].foodCnt - userFleets[i].scanCost, preBalance: userFleets[i].foodCnt};
+			const scanSucceeded = Boolean(scanResult && scanResult.meta && !scanResult.meta.err);
+			if(!scanSucceeded) {
+				const scanError = scanResult?.meta?.err ? JSON.stringify(scanResult.meta.err) : 'no confirmed transaction result';
+				userFleets[i].scanSubmissionRetryAt = Date.now() + SCAN_SUBMISSION_RETRY_DELAY_MS;
+				const retryAt = TimeToStr(new Date(userFleets[i].scanSubmissionRetryAt));
+				cLog(1, `${FleetTimeStamp(userFleets[i].label)} Scan submission failed; retrying at ${retryAt}: ${scanError}`);
+				updateFleetState(userFleets[i], `Scan retry [${retryAt}]`);
+				return;
+			}
+			userFleets[i].scanSubmissionRetryAt = 0;
+			const changesSDU = getBalanceChange(scanResult, userFleets[i].sduToken.toString());
+			const changesFood = getBalanceChange(scanResult, userFleets[i].foodToken.toString());
 			const scanConditionLog = scanResult && scanResult.meta.logMessages ? scanResult.meta.logMessages.find(item => item.startsWith("Program log: SDU probability:")) : null;
 			const scanCondition = scanConditionLog ? (Number(scanConditionLog.split(' ').pop())*100).toFixed(4) : 0;
 			userFleets[i].foodCnt = changesFood.postBalance;
