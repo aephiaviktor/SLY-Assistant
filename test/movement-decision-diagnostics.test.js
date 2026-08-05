@@ -11,7 +11,7 @@ const requiredReasons = [
 
 for (const relativePath of files) {
   const source = fs.readFileSync(path.join(__dirname, '..', relativePath), 'utf8');
-  assert.match(source, /@aephia-version 0\.7\.35-245/);
+  assert.match(source, /@aephia-version 0\.7\.35-246/);
   assert.match(source, /schema: 'slya\.movement-decision\.v1'/);
   for (const reason of requiredReasons) assert.ok(source.includes(`'${reason}'`), `${relativePath}: missing ${reason}`);
 
@@ -25,8 +25,10 @@ for (const relativePath of files) {
 
   const core = source.slice(source.indexOf('async function handleScanCore'), source.indexOf('function influxEscape'));
   assert.match(core, /await handleMovement\([^;]+diagnostic\.movement\);/);
-  assert.doesNotMatch(core, /(?:if|switch)\s*\([^)]*(?:movementDiagnostic|diagnostic\.movement)/,
-    `${relativePath}: scanner caller must not branch on movement diagnostics`);
+  assert.match(core, /if \(diagnostic\.movement\.alreadyAtTarget\)/,
+    `${relativePath}: already-at-target must be separated from new movement`);
+  assert.match(core, /else if \(hasConfirmedMovementProof\(diagnostic\.movement\)\)/,
+    `${relativePath}: movement state changes must be proof-gated`);
   assert.match(core, /const scanSucceeded = Boolean\(scanResult && scanResult\.meta && !scanResult\.meta\.err\)/,
     `${relativePath}: v243 confirmed-result behavior must remain`);
 

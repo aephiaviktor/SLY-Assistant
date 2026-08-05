@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-245
+// @aephia-version 0.7.35-246
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -13584,7 +13584,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		if (movementDiagnostic) {
 			Object.assign(movementDiagnostic, {
 				started: true, completed: false, alreadyAtTarget: false,
-				blockedReason: '', txSignature: '', chainStateBefore: '', chainStateAfter: '',
+				blockedReason: '', txSignature: '', chainStateBefore: '', chainStateAfter: '', targetReached: false,
 				submissionStatus: 'not_attempted', confirmationStatus: 'not_attempted'
 			});
 		}
@@ -13730,6 +13730,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].warpFuelConsumptionRate/100);
 						warpCooldownFinished = warpResult.warpCooldownFinished;
 				} else if (currentFuelCnt + currentCargoFuelCnt >= subwarpCost) {
+					const fleetPK = userFleets[i].publicKey.toString();
+					const fleetSavedData = await GM.getValue(fleetPK, '{}');
+					const fleetParsedData = JSON.parse(fleetSavedData);
+					const assignment = fleetParsedData.assignment;
 					moveTime = calculateSubwarpTime(userFleets[i], moveDist);
 					const scanningMovementTime = calculateScanningMovementOpportunityCost(Date.now(), moveTime, userFleets[i].scanEnd);
 					userFleets[i].scanOptimizationMovementContext = {
@@ -13742,10 +13746,6 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					if (movementDiagnostic) movementDiagnostic.submissionStatus = 'attempted';
 					const subwarpResult = await execSubwarp(userFleets[i], moveX, moveY, moveTime);
 					if (movementDiagnostic) recordMovementTransactionDiagnostic(movementDiagnostic, subwarpResult);
-					const fleetPK = userFleets[i].publicKey.toString();
-					const fleetSavedData = await GM.getValue(fleetPK, '{}');
-					const fleetParsedData = JSON.parse(fleetSavedData);
-					const assignment = fleetParsedData.assignment;
 						const movementStarbaseCoords = ConvertCoords(fleetParsedData.starbase || userFleets[i].starbaseCoord);
 						const movementStarbaseContext = await getTelemetryStarbaseContextFromCoords(movementStarbaseCoords[0], movementStarbaseCoords[1]);
 						const movementFactionTag = movementStarbaseContext.faction ? `,faction=${influxEscape(movementStarbaseContext.faction)}` : '';
@@ -13760,8 +13760,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					} else {
 					if (movementDiagnostic) movementDiagnostic.blockedReason = 'insufficient_or_invalid_fuel';
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Unable to move, lack of fuel`);
-					updateFleetState(userFleets[i], 'ERROR: Not enough fuel');
-					if(globalSettings.emailNotEnoughFFA) await sendEMail(userFleets[i].label + ' not enough fuel', '');
+					if (!movementDiagnostic) {
+						updateFleetState(userFleets[i], 'ERROR: Not enough fuel');
+						if(globalSettings.emailNotEnoughFFA) await sendEMail(userFleets[i].label + ' not enough fuel', '');
+					}
 				}
 			}
 		}
@@ -13819,7 +13821,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		[fleetState, extra] = getFleetState(fleetAcctInfo, userFleets[i]);
 		if (movementDiagnostic) {
 			movementDiagnostic.chainStateAfter = fleetState;
-			if (!movementDiagnostic.blockedReason && movementDiagnostic.confirmationStatus === 'confirmed') {
+			movementDiagnostic.targetReached = Boolean(fleetState == 'Idle' && Array.isArray(extra) && extra.length > 1 && extra[0] == moveX && extra[1] == moveY);
+			const confirmedTransaction = movementDiagnostic.confirmationStatus === 'confirmed' && Boolean(movementDiagnostic.txSignature);
+			if (!movementDiagnostic.alreadyAtTarget && (confirmedTransaction || movementDiagnostic.targetReached)) {
 				movementDiagnostic.completed = true;
 				movementDiagnostic.blockedReason = 'confirmed_movement';
 			}
@@ -13885,10 +13889,21 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			diagnostic.confirmationStatus = 'failed';
 			diagnostic.blockedReason = 'confirmation_failure';
 			diagnostic.error = sanitizeMovementDiagnosticError(txResult.meta.err);
+		} else if (diagnostic.txSignature && txResult?.meta) {
+			diagnostic.submissionStatus = 'submitted';
+			diagnostic.confirmationStatus = 'confirmed';
 		} else {
 			diagnostic.submissionStatus = diagnostic.txSignature ? 'submitted' : 'unknown';
-			diagnostic.confirmationStatus = 'confirmed';
+			diagnostic.confirmationStatus = 'not_confirmed';
+			diagnostic.blockedReason = 'confirmation_failure';
 		}
+	}
+
+	function hasConfirmedMovementProof(result) {
+		if (!result || result.alreadyAtTarget) return false;
+		const confirmedTransaction = result.confirmationStatus === 'confirmed' && Boolean(result.txSignature);
+		const confirmedChainTarget = result.chainStateAfter === 'Idle' && result.targetReached === true;
+		return result.completed === true && (confirmedTransaction || confirmedChainTarget);
 	}
 
 	function emitMovementDecisionDiagnostic(event) {
@@ -13900,7 +13915,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-245', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-246', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -13909,7 +13924,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			scanEndBefore: beforeScanEnd, lastConfirmedScan: fleet.lastScanCoord ? { coordinates: fleet.lastScanCoord } : null,
 			retryAt: Number(fleet.scanSubmissionRetryAt || 0), eligible: Number(fleet.scanSubmissionRetryAt || 0) <= Date.now(),
 			cooldownMs: Math.max(0, beforeScanEnd - Date.now()), schedulerDecision: 'skip', decisionReason: Number(fleet.scanSubmissionRetryAt || 0) > Date.now() ? 'retry_not_due' : 'not_evaluated',
-			movement: { started: false, completed: false, alreadyAtTarget: false, blockedReason: '', txSignature: '', chainStateBefore: '', chainStateAfter: '', submissionStatus: 'not_attempted', confirmationStatus: 'not_attempted' },
+			movement: { started: false, completed: false, alreadyAtTarget: false, blockedReason: '', txSignature: '', chainStateBefore: '', chainStateAfter: '', targetReached: false, submissionStatus: 'not_attempted', confirmationStatus: 'not_attempted' },
 			scanSignature: '', finalScanDecision: 'not_attempted', persistenceDecision: 'unchanged'
 		};
 		try {
@@ -13979,27 +13994,48 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						cLog(1, `${FleetTimeStamp(userFleets[i].label)}`, fuelReadout);
 						let moveDist = calculateMovementDistance(fleetCoords, destCoords);
 						if (moveDist > 0) {
-								moved = true;
-								const scanEndsIn = Math.max(0, userFleets[i].scanEnd - Date.now());
-								//Clamp the scan end time to the cooldown if it is higher (due to paused scanning)
-								userFleets[i].scanEnd = (scanEndsIn > userFleets[i].scanCooldown * 1000 ? userFleets[i].scanCooldown * 1000 : scanEndsIn) + Date.now(); //fixed a wrong time calculation
-								diagnostic.persistenceDecision = 'scan_end_write_requested';
-								await saveScanEnd(i);
 								diagnostic.schedulerDecision = 'move';
 								diagnostic.decisionReason = 'target_coordinates_differ';
-								await handleMovement(i, moveDist, destCoords[0], destCoords[1], isStarbaseAndWarpSubwarp, diagnostic.movement);
-								cLog(1,`${FleetTimeStamp(userFleets[i].label)} Movement finished`);
-								userFleets[i].scanStrikes = 0;
+								try {
+									await handleMovement(i, moveDist, destCoords[0], destCoords[1], isStarbaseAndWarpSubwarp, diagnostic.movement);
+								} catch (error) {
+									diagnostic.error = sanitizeMovementDiagnosticError(error);
+									if (diagnostic.movement.confirmationStatus === 'confirmed' && diagnostic.movement.txSignature) {
+										diagnostic.movement.completed = true;
+										diagnostic.movement.blockedReason = 'confirmed_movement';
+									} else {
+										diagnostic.movement.blockedReason = diagnostic.movement.blockedReason || classifyMovementDiagnosticFailure(error, diagnostic.movement);
+										return;
+									}
+								}
+								if (diagnostic.movement.alreadyAtTarget) {
+									fleetCoords = destCoords.slice(0, 2);
+									diagnostic.schedulerDecision = 'scan';
+									diagnostic.decisionReason = 'already_at_target';
+								} else if (hasConfirmedMovementProof(diagnostic.movement)) {
+									moved = true;
+									const scanEndsIn = Math.max(0, userFleets[i].scanEnd - Date.now());
+									//Clamp the scan end time to the cooldown if it is higher (due to paused scanning)
+									userFleets[i].scanEnd = (scanEndsIn > userFleets[i].scanCooldown * 1000 ? userFleets[i].scanCooldown * 1000 : scanEndsIn) + Date.now(); //fixed a wrong time calculation
+									diagnostic.persistenceDecision = 'scan_end_write_requested';
+									await saveScanEnd(i);
+									cLog(1,`${FleetTimeStamp(userFleets[i].label)} Movement finished`);
+									userFleets[i].scanStrikes = 0;
+								} else {
+									return;
+								}
 						} else {
 								cLog(1,`${FleetTimeStamp(userFleets[i].label)} Skipping movement`);
 						}
 				} else {
 					cLog(1, `${FleetTimeStamp(userFleets[i].label)} ${fuelReadout} (low)`);
+					diagnostic.movement.blockedReason = 'insufficient_or_invalid_fuel';
 					if(globalSettings.scanResupplyOnLowFuel) {
 						await handleResupply(i, fleetCoords);
 						moved = true;
 					} else {
 						cLog(3, `${FleetTimeStamp(userFleets[i].label)} Moved:`, moved);
+						return;
 					}
 				}
 			}
