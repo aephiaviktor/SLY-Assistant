@@ -74,10 +74,9 @@ const lines = context.buildLines(
     ],
   },
   {
-    automatedLp: 50,
-    notAutomatedLp: 70,
-    notAutomatedOlderThan24hLp: 30,
-    oldestNotAutomatedAgeSeconds: 100_000,
+    under24hLp: 120,
+    over24hLp: 30,
+    oldestOver24hAgeSeconds: 100_000,
   }
 );
 
@@ -87,10 +86,9 @@ assert.match(lines[0], /player_lp_installed_today=960i/, 'player installed LP eq
 assert.match(lines[0], /faction_lp_installed_today=1000i/);
 assert.match(lines[0], /expected_additional_lp_eod=400i/);
 assert.match(lines[0], /expected_total_lp_eod=1400i/);
-assert.match(lines[0], /uninstalled_automated_lp=50i/);
-assert.match(lines[0], /uninstalled_not_automated_lp=70i/);
-assert.match(lines[0], /uninstalled_not_automated_older_24h_lp=30i/);
-assert.match(lines[0], /oldest_uninstalled_not_automated_age_seconds=100000i/);
+assert.match(lines[0], /uninstalled_under_24h_lp=120i/);
+assert.match(lines[0], /uninstalled_over_24h_lp=30i/);
+assert.match(lines[0], /oldest_uninstalled_over_24h_age_seconds=100000i/);
 assert.match(lines[0], /phantom_crew=840i/);
 assert.match(lines[0], /neutral_lp_target=2000i/);
 assert.match(lines[0], /requested_lp_target=2500i/);

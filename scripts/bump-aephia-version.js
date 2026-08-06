@@ -66,6 +66,7 @@ function updateFile(text, file, version) {
   } else {
     next = next.replace(/^(\/\/\s*@version\s+.*)$/m, `$1\n// @aephia-version ${version}`);
   }
+  next = next.replace(/(schema:\s*'slya\.movement-decision\.v1',\s*version:\s*')[0-9]+\.[0-9]+\.[0-9]+-[0-9]+(')/g, `$1${version}$2`);
 
   if (next === text) throw new Error(`${file}: no changes applied`);
   return next;
@@ -93,14 +94,18 @@ function main() {
   console.log(`Current Aephia version: ${current || '(none)'}`);
   console.log(`Next Aephia version: ${version}`);
 
-  for (const file of FILES) {
-    const path = resolve(ROOT, file);
-    const text = readFileSync(path, 'utf8');
-    const fileBase = parseOfficialVersion(text, file);
-    if (fileBase !== base) throw new Error(`${file}: official version ${fileBase} differs from ${base}`);
-    if (args.dryRun) continue;
-    writeFileSync(path, updateFile(text, file, version));
-    console.log(`Updated ${file}`);
+  if (!args.dryRun) {
+    const updatedCanonical = updateFile(primaryText, FILES[0], version);
+    writeFileSync(primaryPath, updatedCanonical);
+    const packagedPath = resolve(ROOT, FILES[1]);
+    writeFileSync(packagedPath, updatedCanonical);
+    const canonicalBytes = readFileSync(primaryPath);
+    const packagedBytes = readFileSync(packagedPath);
+    if (!canonicalBytes.equals(packagedBytes)) {
+      throw new Error('Release stopped: canonical and packaged userscripts are not byte-identical');
+    }
+    console.log(`Updated ${FILES[0]}`);
+    console.log(`Synchronized ${FILES[1]} from canonical source (byte-identical)`);
   }
 
   if (!args.dryRun && args.commit) {
