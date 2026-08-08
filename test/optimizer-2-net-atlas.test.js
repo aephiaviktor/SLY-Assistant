@@ -38,9 +38,21 @@ test('Optimizer 2 does not replace the scheduler plan input', () => {
 });
 
 test('execution summary feeds Optimizer 2 from the current faction epoch ATLAS pool', () => {
-	assert.match(source, /computeUpgradeAutomationNetAtlasPlan\(neutralComponentPlan, componentPerformanceMetrics\.rows, expectedTotalLpByEod, pricingHistoryDebug\.latest\?\.atlasPool, now\)/);
+	assert.match(source, /computeUpgradeAutomationNetAtlasPlan\(neutralComponentPlan, componentPerformanceMetrics\.rows, expectedTotalLpByEod, optimizer2AtlasPool, now\)/);
 	assert.doesNotMatch(source, /computeUpgradeAutomationNetAtlasPlan\(neutralComponentPlan, componentPerformanceMetrics\.rows, expectedTotalLpByEod, profitStats\.atlasPool, now\)/);
 	assert.match(source, /optimizer2\.lpValue === null/);
+});
+
+test('MUD Optimizer 2 retains its declared pool when pricing history is unavailable', () => {
+	const context = {
+		UPGRADE_AUTOMATION_ATLAS_POOL_OVERRIDES: Object.freeze({ MUD: 1_991_250 }),
+		normalizeUpgradeAutomationLpInstance: value => String(value || '').toUpperCase()
+	};
+	vm.createContext(context);
+	vm.runInContext(`${extractFunction('resolveUpgradeAutomationOptimizer2AtlasPool')}; this.resolvePool = resolveUpgradeAutomationOptimizer2AtlasPool;`, context);
+	assert.equal(context.resolvePool('MUD', null), 1_991_250);
+	assert.equal(context.resolvePool('ONI', { atlasPool: 2_000_000 }), 2_000_000);
+	assert.equal(context.resolvePool('UST', null), 0);
 });
 
 test('current ONI epoch inputs create colored pools and reallocate target crew', () => {

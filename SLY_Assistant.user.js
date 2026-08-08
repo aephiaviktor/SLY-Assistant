@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-252
+// @aephia-version 0.7.35-253
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -3665,6 +3665,14 @@
 		return { rows, lpValue, expectedTotalLpByEod: redemption, atlasPool: pool, neutralMultiplier, targetMultiplier, fullTransferableSourceCrew, moveBudget, sourcePoolCount: sourcePool.length, destPoolCount: destPool.length, sourcePoolMass: Number(bestPartition?.sourceMass || 0), destPoolMass: Number(bestPartition?.destMass || 0), sourceReferenceNetAtlas, transfers };
 	}
 
+	function resolveUpgradeAutomationOptimizer2AtlasPool(lpInstance, pricingHistoryLatest = null) {
+		const normalizedInstance = normalizeUpgradeAutomationLpInstance(lpInstance);
+		const declaredOverride = Number(UPGRADE_AUTOMATION_ATLAS_POOL_OVERRIDES[normalizedInstance]);
+		if (Number.isFinite(declaredOverride) && declaredOverride > 0) return declaredOverride;
+		const historyPool = Number(pricingHistoryLatest?.atlasPool);
+		return Number.isFinite(historyPool) && historyPool > 0 ? historyPool : 0;
+	}
+
 	function computeUpgradeAutomationFinalPlan(neutralRows = [], aggressiveness = 1, now = new Date()) {
 		const rows = neutralRows.map(row => ({ ...row }));
 		const planning = getUpgradeAutomationPlanningHorizon(now);
@@ -4129,7 +4137,8 @@
 			row.targetBaselineBufferDays = baseline?.neutralBufferDays ?? null;
 		}
 		const finalPlan = computeUpgradeAutomationFinalPlan(neutralComponentPlan, ag.aggr, now);
-		const optimizer2Plan = computeUpgradeAutomationNetAtlasPlan(neutralComponentPlan, componentPerformanceMetrics.rows, expectedTotalLpByEod, pricingHistoryDebug.latest?.atlasPool, now);
+		const optimizer2AtlasPool = resolveUpgradeAutomationOptimizer2AtlasPool(lpInstanceKey, pricingHistoryDebug.latest);
+		const optimizer2Plan = computeUpgradeAutomationNetAtlasPlan(neutralComponentPlan, componentPerformanceMetrics.rows, expectedTotalLpByEod, optimizer2AtlasPool, now);
 		const requestedNeutralPhaseMode = !!globalSettings?.upgradeAutomationNeutralBlockSingleTx;
 		const neutralPhaseSnapshotKey = getUpgradeAutomationNeutralPhaseSnapshotKey(globalSettings, now);
 		let neutralPhaseSnapshot = null;
@@ -14867,7 +14876,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-252', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-253', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
