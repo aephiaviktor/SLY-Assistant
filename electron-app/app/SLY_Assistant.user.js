@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-250
+// @aephia-version 0.7.35-251
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -3513,6 +3513,7 @@
 			row.optimizer2NetAtlasPerSecond = lpValue !== null && Number.isFinite(gmPrice) && gmPrice > 0 && secondsPerUnit > 0
 				? ((lpPerUnit * lpValue) - gmPrice) / secondsPerUnit
 				: null;
+			row.optimizer2GmPrice = Number.isFinite(gmPrice) && gmPrice > 0 ? gmPrice : null;
 			row.optimizer2Crew = Math.max(0, Math.floor(Number(row.crew || 0)));
 			row.optimizer2Source = false;
 			row.optimizer2Destination = false;
@@ -3526,48 +3527,114 @@
 			const inventoryFeasible = Number(projected.finalUpgradingHour || 0) <= Number(row.inventoryGlobal || 0);
 			return { ...projected, legal: inventoryFeasible };
 		};
-		const transferAmountFor = (src, dst) => Number(dst.optimizer2Crew || 0) === 0 ? UPGRADE_AUTOMATION_MIN_JOB_CREW : 1;
-		const initialReceivers = eligibleRows.filter(row => {
+		const orderedRows = [...eligibleRows].sort((a, b) => {
+			const netDiff = Number(a.optimizer2NetAtlasPerSecond) - Number(b.optimizer2NetAtlasPerSecond);
+			if (netDiff !== 0) return netDiff;
+			return String(a.displayName || a.name || '').localeCompare(String(b.displayName || b.name || ''));
+		});
+		const economicMassOf = row => Number(row.inventoryPhantom || 0) * Number(row.optimizer2NetAtlasPerSecond || 0);
+		let bestPartition = null;
+		for (let boundary = 1; boundary < orderedRows.length; boundary++) {
+			const sourceCandidates = orderedRows.slice(0, boundary);
+			const destinationCandidates = orderedRows.slice(boundary);
+			if (!sourceCandidates.some(row => Number(row.optimizer2Crew || 0) >= UPGRADE_AUTOMATION_MIN_JOB_CREW)) continue;
+			const sourceMass = sourceCandidates.reduce((sum, row) => sum + economicMassOf(row), 0);
+			const destMass = destinationCandidates.reduce((sum, row) => sum + economicMassOf(row), 0);
+			const difference = Math.abs(sourceMass - destMass);
+			if (!bestPartition || difference < bestPartition.difference) bestPartition = { sourceCandidates, destinationCandidates, sourceMass, destMass, difference };
+		}
+		const sourcePool = bestPartition?.sourceCandidates || [];
+		const initialReceivers = (bestPartition?.destinationCandidates || []).filter(row => {
 			const addCrew = Number(row.optimizer2Crew || 0) === 0 ? UPGRADE_AUTOMATION_MIN_JOB_CREW : 1;
 			return simulate(row, Number(row.optimizer2Crew || 0) + addCrew).legal;
 		});
-		const bestInitialNetAtlas = initialReceivers.length ? Math.max(...initialReceivers.map(row => Number(row.optimizer2NetAtlasPerSecond))) : null;
-		const destPool = bestInitialNetAtlas === null ? [] : initialReceivers.filter(row => Number(row.optimizer2NetAtlasPerSecond) === bestInitialNetAtlas);
-		const sourcePool = bestInitialNetAtlas === null ? [] : eligibleRows.filter(row => {
-			if (Number(row.optimizer2Crew || 0) <= 0 || Number(row.optimizer2NetAtlasPerSecond) >= bestInitialNetAtlas) return false;
-			return destPool.some(dst => {
-				const transferAmount = transferAmountFor(row, dst);
-				return transferAmount > 0 && Number(row.optimizer2Crew || 0) >= transferAmount && simulate(row, Number(row.optimizer2Crew || 0) - transferAmount).legal;
-			});
-		});
+		const destPool = initialReceivers;
 		for (const row of sourcePool) row.optimizer2Source = true;
 		for (const row of destPool) row.optimizer2Destination = true;
+		const transferableSourceCrew = sourcePool.reduce((sum, row) => sum + Math.max(0, Number(row.optimizer2Crew || 0)), 0);
+		const sourceReferenceNetAtlas = transferableSourceCrew > 0
+			? sourcePool.reduce((sum, row) => sum + Number(row.optimizer2Crew || 0) * Number(row.optimizer2NetAtlasPerSecond || 0), 0) / transferableSourceCrew
+			: 0;
+		const destinationUplifts = destPool.map(row => ({ row, uplift: Math.max(0, Number(row.optimizer2NetAtlasPerSecond || 0) - sourceReferenceNetAtlas) }));
+		const totalUplift = destinationUplifts.reduce((sum, entry) => sum + entry.uplift, 0);
+		const destinationQuotas = new Map();
+		if (transferableSourceCrew > 0 && totalUplift > 0) {
+			const exactQuotas = destinationUplifts.map(entry => {
+				const exact = transferableSourceCrew * entry.uplift / totalUplift;
+				return { ...entry, exact, quota: Math.floor(exact), remainder: exact - Math.floor(exact) };
+			});
+			let unassigned = transferableSourceCrew - exactQuotas.reduce((sum, entry) => sum + entry.quota, 0);
+			exactQuotas.sort((a, b) => b.remainder - a.remainder || Number(b.row.optimizer2NetAtlasPerSecond) - Number(a.row.optimizer2NetAtlasPerSecond));
+			for (let index = 0; index < exactQuotas.length && unassigned > 0; index++, unassigned--) exactQuotas[index].quota += 1;
+			for (const entry of exactQuotas) destinationQuotas.set(entry.row, entry.quota);
+		}
+		const destinationAddedCrew = new Map(destPool.map(row => [row, 0]));
+		const transferAmountFor = (src, dst) => Number(dst.optimizer2Crew || 0) === 0 ? UPGRADE_AUTOMATION_MIN_JOB_CREW : 1;
 		const guardLimit = Math.max(1000, rows.length * Math.max(1, rows.reduce((sum, row) => sum + Number(row.optimizer2Crew || 0), 0)) * 6);
 		let transfers = 0;
 		for (let guard = 0; guard < guardLimit; guard++) {
+			const atomicSource = sourcePool.find(row => Number(row.optimizer2Crew || 0) === UPGRADE_AUTOMATION_MIN_JOB_CREW);
+			if (atomicSource) {
+				const atomicAllocations = new Map();
+				let atomicRemaining = UPGRADE_AUTOMATION_MIN_JOB_CREW;
+				const stoppedReceiver = destPool
+					.filter(dst => Number(dst.optimizer2Crew || 0) === 0 && Number(destinationQuotas.get(dst) || 0) - Number(destinationAddedCrew.get(dst) || 0) >= UPGRADE_AUTOMATION_MIN_JOB_CREW)
+					.sort((a, b) => Number(b.optimizer2NetAtlasPerSecond) - Number(a.optimizer2NetAtlasPerSecond))[0];
+				if (stoppedReceiver) {
+					atomicAllocations.set(stoppedReceiver, UPGRADE_AUTOMATION_MIN_JOB_CREW);
+					atomicRemaining = 0;
+				} else {
+					while (atomicRemaining > 0) {
+						const receiver = destPool
+							.filter(dst => Number(dst.optimizer2Crew || 0) > 0)
+							.map(dst => ({ dst, remaining: Number(destinationQuotas.get(dst) || 0) - Number(destinationAddedCrew.get(dst) || 0) - Number(atomicAllocations.get(dst) || 0) }))
+							.filter(entry => entry.remaining > 0)
+							.sort((a, b) => b.remaining - a.remaining || Number(b.dst.optimizer2NetAtlasPerSecond) - Number(a.dst.optimizer2NetAtlasPerSecond))[0];
+						if (!receiver) break;
+						atomicAllocations.set(receiver.dst, Number(atomicAllocations.get(receiver.dst) || 0) + 1);
+						atomicRemaining -= 1;
+					}
+				}
+				const atomicSourceSim = simulate(atomicSource, 0);
+				const atomicDestinationsLegal = atomicRemaining === 0 && [...atomicAllocations.entries()].every(([dst, amount]) => simulate(dst, Number(dst.optimizer2Crew || 0) + amount).legal);
+				if (atomicSourceSim.legal && atomicDestinationsLegal) {
+					atomicSource.optimizer2Crew = 0;
+					syncRow(atomicSource);
+					for (const [dst, amount] of atomicAllocations.entries()) {
+						dst.optimizer2Crew += amount;
+						destinationAddedCrew.set(dst, Number(destinationAddedCrew.get(dst) || 0) + amount);
+						syncRow(dst);
+					}
+					transfers += UPGRADE_AUTOMATION_MIN_JOB_CREW;
+					continue;
+				}
+			}
 			let best = null;
-			for (const src of eligibleRows) {
-				for (const dst of eligibleRows) {
+			for (const src of sourcePool) {
+				for (const dst of destPool) {
 					if (src === dst || Number(src.optimizer2Crew || 0) <= 0) continue;
 					if (Number(dst.optimizer2NetAtlasPerSecond) <= Number(src.optimizer2NetAtlasPerSecond)) continue;
 					const transferAmount = transferAmountFor(src, dst);
 					if (transferAmount <= 0 || Number(src.optimizer2Crew || 0) < transferAmount) continue;
+					const quotaRemaining = Number(destinationQuotas.get(dst) || 0) - Number(destinationAddedCrew.get(dst) || 0);
+					if (quotaRemaining <= 0) continue;
 					const srcSim = simulate(src, Number(src.optimizer2Crew || 0) - transferAmount);
 					const dstSim = simulate(dst, Number(dst.optimizer2Crew || 0) + transferAmount);
 					if (!srcSim.legal || !dstSim.legal) continue;
 					const improvement = transferAmount * (Number(dst.optimizer2NetAtlasPerSecond) - Number(src.optimizer2NetAtlasPerSecond));
 					if (!(improvement > 0)) continue;
-					if (!best || improvement > best.improvement) best = { src, dst, transferAmount, improvement };
+					if (!best || quotaRemaining > best.quotaRemaining || (quotaRemaining === best.quotaRemaining && improvement > best.improvement)) best = { src, dst, transferAmount, improvement, quotaRemaining };
 				}
 			}
 			if (!best) break;
 			best.src.optimizer2Crew -= best.transferAmount;
 			best.dst.optimizer2Crew += best.transferAmount;
+			destinationAddedCrew.set(best.dst, Number(destinationAddedCrew.get(best.dst) || 0) + best.transferAmount);
 			syncRow(best.src);
 			syncRow(best.dst);
 			transfers += best.transferAmount;
 		}
-		return { rows, lpValue, expectedTotalLpByEod: redemption, atlasPool: pool, sourcePoolCount: sourcePool.length, destPoolCount: destPool.length, sourcePoolCrew: sourcePool.reduce((sum, row) => sum + Number(row.crew || 0), 0), transfers };
+		return { rows, lpValue, expectedTotalLpByEod: redemption, atlasPool: pool, sourcePoolCount: sourcePool.length, destPoolCount: destPool.length, sourcePoolMass: Number(bestPartition?.sourceMass || 0), destPoolMass: Number(bestPartition?.destMass || 0), sourceReferenceNetAtlas, transfers };
 	}
 
 	function computeUpgradeAutomationFinalPlan(neutralRows = [], aggressiveness = 1, now = new Date()) {
@@ -6884,20 +6951,21 @@
 			content += openSection('lp-auto-optimizer-2');
 			if (upgradeAutomationExecutionSummary?.optimizer2Plan?.rows?.length) {
 				const optimizer2 = upgradeAutomationExecutionSummary.optimizer2Plan;
-				content += '<tr style="opacity:0.66"><td rowspan="2" style="min-width:180px"><b>Optimizer 2<br>Component</b><br><small>NET ATLAS/s target</small></td><td rowspan="2" align="right" style="min-width:110px"><b>NET ATLAS/s</b></td><td rowspan="2" align="right" style="min-width:120px"><b>Installed Today</b></td><td colspan="2" align="center" style="min-width:170px"><b>Neutral</b></td><td colspan="2" align="center" style="min-width:170px"><b>Target</b></td></tr>';
+				content += '<tr style="opacity:0.66"><td rowspan="2" style="min-width:180px"><b>Optimizer 2<br>Component</b><br><small>NET ATLAS/s target</small></td><td rowspan="2" align="right" style="min-width:96px"><b>GM Price</b></td><td rowspan="2" align="right" style="min-width:110px"><b>NET ATLAS/s</b></td><td rowspan="2" align="right" style="min-width:120px"><b>Installed Today</b></td><td colspan="2" align="center" style="min-width:170px"><b>Neutral</b></td><td colspan="2" align="center" style="min-width:170px"><b>Target</b></td></tr>';
 				content += '<tr style="opacity:0.66"><td align="right" style="min-width:72px"><b>Crew</b></td><td align="right" style="min-width:78px"><b>Buffer Days</b></td><td align="right" style="min-width:72px"><b>Crew</b></td><td align="right" style="min-width:78px"><b>Buffer Days</b></td></tr>';
 				for (const row of optimizer2.rows) {
 					const sideStyle = row.optimizer2Source ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.optimizer2Destination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
 					const netAtlas = row.optimizer2NetAtlasPerSecond !== null && Number.isFinite(Number(row.optimizer2NetAtlasPerSecond)) ? Number(row.optimizer2NetAtlasPerSecond).toLocaleString(undefined, { minimumFractionDigits: 8, maximumFractionDigits: 8 }) : '-';
+					const gmPrice = row.optimizer2GmPrice !== null && Number.isFinite(Number(row.optimizer2GmPrice)) ? Number(row.optimizer2GmPrice).toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }) : '-';
 					const netTitle = 'NET ATLAS/s: ' + netAtlas + '; GM input: pricingATL.priceATL; Faction redemption: Expected Total LP by EOD';
 					const neutralBuffer = row.neutralBufferDays == null ? '' : (Number.isFinite(Number(row.neutralBufferDays)) ? Number(row.neutralBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
 					const targetBuffer = row.optimizer2BufferDays == null ? '' : (Number.isFinite(Number(row.optimizer2BufferDays)) ? Number(row.optimizer2BufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
 					const netStyle = row.optimizer2NetAtlasPerSecond == null ? '' : (Number(row.optimizer2NetAtlasPerSecond) >= 0 ? ' style="color:#80ff80"' : ' style="color:#ff8080"');
-					content += '<tr><td' + sideStyle + ' title="' + netTitle.replace(/["<>]/g, '') + '">' + String(row.displayName || row.name || '') + '</td><td align="right"' + netStyle + '>' + netAtlas + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right">' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right">' + neutralBuffer + '</td><td align="right">' + Math.floor(Number(row.optimizer2Crew || 0)).toLocaleString() + '</td><td align="right">' + targetBuffer + '</td></tr>';
+					content += '<tr><td' + sideStyle + ' title="' + netTitle.replace(/["<>]/g, '') + '">' + String(row.displayName || row.name || '') + '</td><td align="right">' + gmPrice + '</td><td align="right"' + netStyle + '>' + netAtlas + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right">' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right">' + neutralBuffer + '</td><td align="right">' + Math.floor(Number(row.optimizer2Crew || 0)).toLocaleString() + '</td><td align="right">' + targetBuffer + '</td></tr>';
 				}
-				if (optimizer2.lpValue === null || !Number.isFinite(Number(optimizer2.lpValue))) content += '<tr><td colspan="7" style="color:#ffb366">Optimizer 2 unavailable: Expected Total LP by EOD or current faction ATLAS pool is missing.</td></tr>';
+				if (optimizer2.lpValue === null || !Number.isFinite(Number(optimizer2.lpValue))) content += '<tr><td colspan="8" style="color:#ffb366">Optimizer 2 unavailable: Expected Total LP by EOD or current faction ATLAS pool is missing.</td></tr>';
 			} else {
-				content += '<tr><td colspan="7">Optimizer 2 unavailable</td></tr>';
+				content += '<tr><td colspan="8">Optimizer 2 unavailable</td></tr>';
 			}
 			content += closeSection;
 		} catch (e) {
@@ -14769,7 +14837,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-250', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-251', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
