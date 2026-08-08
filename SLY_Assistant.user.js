@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-251
+// @aephia-version 0.7.35-252
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -3493,6 +3493,12 @@
 		const rows = neutralRows.map(row => ({ ...row }));
 		const planning = getUpgradeAutomationPlanningHorizon(now);
 		const remainingHours = planning.planningHours;
+		const effectiveNow = now instanceof Date ? now : new Date(now);
+		const fractionalUtcHour = effectiveNow.getUTCHours() + effectiveNow.getUTCMinutes() / 60 + effectiveNow.getUTCSeconds() / 3600;
+		const neutralPhaseLength = Math.max(0, Math.min(23, Number(globalSettings?.upgradeAutomationAggressivenessStartHour ?? 12)));
+		const targetProgress = Math.max(0, Math.min(1, (fractionalUtcHour - neutralPhaseLength) / Math.max(1, 23 - neutralPhaseLength)));
+		const targetMultiplier = targetProgress * targetProgress * (3 - 2 * targetProgress);
+		const neutralMultiplier = 1 - targetMultiplier;
 		const redemption = Number(expectedTotalLpByEod);
 		const pool = Number(atlasPool);
 		const metricsByComponent = new Map((componentMetrics || []).map(metric => [getUpgradeAutomationPerformanceComponentName(metric?.component || ''), metric]));
@@ -3551,29 +3557,47 @@
 		const destPool = initialReceivers;
 		for (const row of sourcePool) row.optimizer2Source = true;
 		for (const row of destPool) row.optimizer2Destination = true;
-		const transferableSourceCrew = sourcePool.reduce((sum, row) => sum + Math.max(0, Number(row.optimizer2Crew || 0)), 0);
-		const sourceReferenceNetAtlas = transferableSourceCrew > 0
-			? sourcePool.reduce((sum, row) => sum + Number(row.optimizer2Crew || 0) * Number(row.optimizer2NetAtlasPerSecond || 0), 0) / transferableSourceCrew
+		const fullTransferableSourceCrew = sourcePool.reduce((sum, row) => sum + Math.max(0, Number(row.optimizer2Crew || 0)), 0);
+		const rawMoveBudget = Math.round(fullTransferableSourceCrew * targetMultiplier);
+		const sourceRemovalQuotas = new Map();
+		let moveBudgetRemaining = rawMoveBudget;
+		for (const row of sourcePool) {
+			if (moveBudgetRemaining <= 0) break;
+			const crew = Math.max(0, Number(row.optimizer2Crew || 0));
+			let removal = Math.min(crew, moveBudgetRemaining);
+			const retainedCrew = crew - removal;
+			if (retainedCrew > 0 && retainedCrew < UPGRADE_AUTOMATION_MIN_JOB_CREW) {
+				const leaveMinimumRemoval = Math.max(0, crew - UPGRADE_AUTOMATION_MIN_JOB_CREW);
+				removal = Math.abs(removal - leaveMinimumRemoval) <= Math.abs(crew - removal) ? leaveMinimumRemoval : crew;
+			}
+			sourceRemovalQuotas.set(row, removal);
+			moveBudgetRemaining -= removal;
+			if (removal < crew) break;
+		}
+		const moveBudget = [...sourceRemovalQuotas.values()].reduce((sum, value) => sum + Number(value || 0), 0);
+		const sourceReferenceNetAtlas = moveBudget > 0
+			? sourcePool.reduce((sum, row) => sum + Number(sourceRemovalQuotas.get(row) || 0) * Number(row.optimizer2NetAtlasPerSecond || 0), 0) / moveBudget
 			: 0;
 		const destinationUplifts = destPool.map(row => ({ row, uplift: Math.max(0, Number(row.optimizer2NetAtlasPerSecond || 0) - sourceReferenceNetAtlas) }));
 		const totalUplift = destinationUplifts.reduce((sum, entry) => sum + entry.uplift, 0);
 		const destinationQuotas = new Map();
-		if (transferableSourceCrew > 0 && totalUplift > 0) {
+		if (moveBudget > 0 && totalUplift > 0) {
 			const exactQuotas = destinationUplifts.map(entry => {
-				const exact = transferableSourceCrew * entry.uplift / totalUplift;
+				const exact = moveBudget * entry.uplift / totalUplift;
 				return { ...entry, exact, quota: Math.floor(exact), remainder: exact - Math.floor(exact) };
 			});
-			let unassigned = transferableSourceCrew - exactQuotas.reduce((sum, entry) => sum + entry.quota, 0);
+			let unassigned = moveBudget - exactQuotas.reduce((sum, entry) => sum + entry.quota, 0);
 			exactQuotas.sort((a, b) => b.remainder - a.remainder || Number(b.row.optimizer2NetAtlasPerSecond) - Number(a.row.optimizer2NetAtlasPerSecond));
 			for (let index = 0; index < exactQuotas.length && unassigned > 0; index++, unassigned--) exactQuotas[index].quota += 1;
 			for (const entry of exactQuotas) destinationQuotas.set(entry.row, entry.quota);
 		}
+		const sourceRemovedCrew = new Map(sourcePool.map(row => [row, 0]));
 		const destinationAddedCrew = new Map(destPool.map(row => [row, 0]));
 		const transferAmountFor = (src, dst) => Number(dst.optimizer2Crew || 0) === 0 ? UPGRADE_AUTOMATION_MIN_JOB_CREW : 1;
 		const guardLimit = Math.max(1000, rows.length * Math.max(1, rows.reduce((sum, row) => sum + Number(row.optimizer2Crew || 0), 0)) * 6);
 		let transfers = 0;
 		for (let guard = 0; guard < guardLimit; guard++) {
-			const atomicSource = sourcePool.find(row => Number(row.optimizer2Crew || 0) === UPGRADE_AUTOMATION_MIN_JOB_CREW);
+			const atomicSource = sourcePool.find(row => Number(row.optimizer2Crew || 0) === UPGRADE_AUTOMATION_MIN_JOB_CREW && Number(sourceRemovalQuotas.get(row) || 0) - Number(sourceRemovedCrew.get(row) || 0) >= UPGRADE_AUTOMATION_MIN_JOB_CREW);
 			if (atomicSource) {
 				const atomicAllocations = new Map();
 				let atomicRemaining = UPGRADE_AUTOMATION_MIN_JOB_CREW;
@@ -3599,6 +3623,7 @@
 				const atomicDestinationsLegal = atomicRemaining === 0 && [...atomicAllocations.entries()].every(([dst, amount]) => simulate(dst, Number(dst.optimizer2Crew || 0) + amount).legal);
 				if (atomicSourceSim.legal && atomicDestinationsLegal) {
 					atomicSource.optimizer2Crew = 0;
+					sourceRemovedCrew.set(atomicSource, Number(sourceRemovedCrew.get(atomicSource) || 0) + UPGRADE_AUTOMATION_MIN_JOB_CREW);
 					syncRow(atomicSource);
 					for (const [dst, amount] of atomicAllocations.entries()) {
 						dst.optimizer2Crew += amount;
@@ -3613,9 +3638,11 @@
 			for (const src of sourcePool) {
 				for (const dst of destPool) {
 					if (src === dst || Number(src.optimizer2Crew || 0) <= 0) continue;
+					const sourceQuotaRemaining = Number(sourceRemovalQuotas.get(src) || 0) - Number(sourceRemovedCrew.get(src) || 0);
+					if (sourceQuotaRemaining <= 0) continue;
 					if (Number(dst.optimizer2NetAtlasPerSecond) <= Number(src.optimizer2NetAtlasPerSecond)) continue;
 					const transferAmount = transferAmountFor(src, dst);
-					if (transferAmount <= 0 || Number(src.optimizer2Crew || 0) < transferAmount) continue;
+					if (transferAmount <= 0 || Number(src.optimizer2Crew || 0) < transferAmount || sourceQuotaRemaining < transferAmount) continue;
 					const quotaRemaining = Number(destinationQuotas.get(dst) || 0) - Number(destinationAddedCrew.get(dst) || 0);
 					if (quotaRemaining <= 0) continue;
 					const srcSim = simulate(src, Number(src.optimizer2Crew || 0) - transferAmount);
@@ -3628,13 +3655,14 @@
 			}
 			if (!best) break;
 			best.src.optimizer2Crew -= best.transferAmount;
+			sourceRemovedCrew.set(best.src, Number(sourceRemovedCrew.get(best.src) || 0) + best.transferAmount);
 			best.dst.optimizer2Crew += best.transferAmount;
 			destinationAddedCrew.set(best.dst, Number(destinationAddedCrew.get(best.dst) || 0) + best.transferAmount);
 			syncRow(best.src);
 			syncRow(best.dst);
 			transfers += best.transferAmount;
 		}
-		return { rows, lpValue, expectedTotalLpByEod: redemption, atlasPool: pool, sourcePoolCount: sourcePool.length, destPoolCount: destPool.length, sourcePoolMass: Number(bestPartition?.sourceMass || 0), destPoolMass: Number(bestPartition?.destMass || 0), sourceReferenceNetAtlas, transfers };
+		return { rows, lpValue, expectedTotalLpByEod: redemption, atlasPool: pool, neutralMultiplier, targetMultiplier, fullTransferableSourceCrew, moveBudget, sourcePoolCount: sourcePool.length, destPoolCount: destPool.length, sourcePoolMass: Number(bestPartition?.sourceMass || 0), destPoolMass: Number(bestPartition?.destMass || 0), sourceReferenceNetAtlas, transfers };
 	}
 
 	function computeUpgradeAutomationFinalPlan(neutralRows = [], aggressiveness = 1, now = new Date()) {
@@ -6951,7 +6979,9 @@
 			content += openSection('lp-auto-optimizer-2');
 			if (upgradeAutomationExecutionSummary?.optimizer2Plan?.rows?.length) {
 				const optimizer2 = upgradeAutomationExecutionSummary.optimizer2Plan;
-				content += '<tr style="opacity:0.66"><td rowspan="2" style="min-width:180px"><b>Optimizer 2<br>Component</b><br><small>NET ATLAS/s target</small></td><td rowspan="2" align="right" style="min-width:96px"><b>GM Price</b></td><td rowspan="2" align="right" style="min-width:110px"><b>NET ATLAS/s</b></td><td rowspan="2" align="right" style="min-width:120px"><b>Installed Today</b></td><td colspan="2" align="center" style="min-width:170px"><b>Neutral</b></td><td colspan="2" align="center" style="min-width:170px"><b>Target</b></td></tr>';
+				const optimizer2NeutralMultiplier = Number(optimizer2.neutralMultiplier || 0).toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+				const optimizer2TargetMultiplier = Number(optimizer2.targetMultiplier || 0).toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+				content += '<tr style="opacity:0.66"><td rowspan="2" style="min-width:180px"><b>Optimizer 2<br>Component</b><br><small>NET ATLAS/s target</small></td><td rowspan="2" align="right" style="min-width:96px"><b>GM Price</b></td><td rowspan="2" align="right" style="min-width:110px"><b>NET ATLAS/s</b></td><td rowspan="2" align="right" style="min-width:120px"><b>Installed Today</b></td><td colspan="2" align="center" style="min-width:170px"><b>Neutral</b><br><small>Neutral multiplier ×' + optimizer2NeutralMultiplier + '</small></td><td colspan="2" align="center" style="min-width:170px"><b>Target</b><br><small>Target multiplier ×' + optimizer2TargetMultiplier + '</small></td></tr>';
 				content += '<tr style="opacity:0.66"><td align="right" style="min-width:72px"><b>Crew</b></td><td align="right" style="min-width:78px"><b>Buffer Days</b></td><td align="right" style="min-width:72px"><b>Crew</b></td><td align="right" style="min-width:78px"><b>Buffer Days</b></td></tr>';
 				for (const row of optimizer2.rows) {
 					const sideStyle = row.optimizer2Source ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.optimizer2Destination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
@@ -14837,7 +14867,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-251', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-252', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),

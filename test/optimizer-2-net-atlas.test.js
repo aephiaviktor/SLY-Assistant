@@ -46,6 +46,7 @@ test('execution summary feeds Optimizer 2 from the current faction epoch ATLAS p
 test('current ONI epoch inputs create colored pools and reallocate target crew', () => {
 	const context = {
 		UPGRADE_AUTOMATION_MIN_JOB_CREW: 10,
+		globalSettings: { upgradeAutomationAggressivenessStartHour: 6 },
 		getUpgradeAutomationPlanningHorizon: () => ({ planningHours: 6 }),
 		getUpgradeAutomationPerformanceComponentName: component => component === 'SDU' ? 'Survey Data Unit' : component,
 		projectUpgradeAutomationFinalRow: (row, crew) => ({
@@ -66,7 +67,21 @@ test('current ONI epoch inputs create colored pools and reallocate target crew',
 		{ component: 'Electronics', priceGm: 0.00565940 },
 		{ component: 'Electromagnet', priceGm: 0.00925088 }
 	];
-	const result = context.computePlan(rows, metrics, 20_000_000_000, 2_000_000, new Date('2026-08-08T06:00:00Z'));
+	const neutralResult = context.computePlan(rows, metrics, 20_000_000_000, 2_000_000, new Date('2026-08-08T06:00:00Z'));
+	assert.equal(neutralResult.targetMultiplier, 0);
+	assert.equal(neutralResult.neutralMultiplier, 1);
+	assert.equal(neutralResult.transfers, 0);
+	assert.equal(neutralResult.rows.find(row => row.name === 'Framework').optimizer2Crew, 101);
+
+	const midpointResult = context.computePlan(rows, metrics, 20_000_000_000, 2_000_000, new Date('2026-08-08T14:30:00Z'));
+	assert.ok(Math.abs(midpointResult.targetMultiplier - 0.5) < 1e-12);
+	assert.ok(Math.abs(midpointResult.neutralMultiplier - 0.5) < 1e-12);
+	assert.equal(midpointResult.transfers, 51);
+	assert.equal(midpointResult.rows.find(row => row.name === 'Framework').optimizer2Crew, 50);
+
+	const result = context.computePlan(rows, metrics, 20_000_000_000, 2_000_000, new Date('2026-08-08T23:00:00Z'));
+	assert.equal(result.targetMultiplier, 1);
+	assert.equal(result.neutralMultiplier, 0);
 	assert.ok(result.sourcePoolCount > 0);
 	assert.ok(result.destPoolCount > 0);
 	assert.ok(result.transfers > 0);
@@ -88,5 +103,7 @@ test('Optimizer 2 panel shows NET ATLAS per second and omits upgrading per hour 
 	const section = source.slice(sectionStart, sectionEnd);
 	assert.match(section, /<b>GM Price<\/b>/);
 	assert.match(section, /<b>NET ATLAS\/s<\/b>/);
+	assert.match(section, /Neutral multiplier ×/);
+	assert.match(section, /Target multiplier ×/);
 	assert.doesNotMatch(section, /Upgrading<br>\/ Hour/);
 });
