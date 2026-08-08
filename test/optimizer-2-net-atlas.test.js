@@ -22,7 +22,8 @@ function extractFunction(name) {
 test('Optimizer 2 is observational and ranks pools by NET ATLAS per second', () => {
 	assert.match(source, /function computeUpgradeAutomationNetAtlasPlan\(/);
 	assert.match(source, /\(\(lpPerUnit \* lpValue\) - gmPrice\) \/ secondsPerUnit/);
-	assert.match(source, /sourceMass <= destMass/);
+	assert.match(source, /bestInitialNetAtlas/);
+	assert.match(source, /Number\(row\.optimizer2Crew \|\| 0\) <= 0/);
 	assert.match(source, /optimizer2NetAtlasPerSecond/);
 	assert.match(source, /pricingATL\.priceATL/);
 	assert.match(source, /lp-auto-optimizer-2/);
@@ -58,19 +59,30 @@ test('current ONI epoch inputs create colored pools and reallocate target crew',
 		{ name: 'Framework', displayName: 'Framework', crew: 20, secondsPerUnit: 12, lpPerUnit: 68, inventoryPhantom: 1000, inventoryGlobal: 100000, phantomUpgradeEligible: true },
 		{ name: 'Electronics', displayName: 'Electronics', crew: 20, secondsPerUnit: 14, lpPerUnit: 92, inventoryPhantom: 1000, inventoryGlobal: 100000, phantomUpgradeEligible: true },
 		{ name: 'Electromagnet', displayName: 'Electromagnet', crew: 20, secondsPerUnit: 16, lpPerUnit: 133, inventoryPhantom: 1000, inventoryGlobal: 100000, phantomUpgradeEligible: true },
-		{ name: 'Survey Data Unit', displayName: 'Survey Data Unit', crew: 20, secondsPerUnit: 120, lpPerUnit: 1325, inventoryPhantom: 1000, inventoryGlobal: 100000, phantomUpgradeEligible: true }
+		{ name: 'Survey Data Unit', displayName: 'Survey Data Unit', crew: 0, secondsPerUnit: 120, lpPerUnit: 1325, inventoryPhantom: 1000, inventoryGlobal: 100000, phantomUpgradeEligible: true }
 	];
 	const metrics = [
-		{ component: 'Framework', priceGm: 0.00305 },
-		{ component: 'Electronics', priceGm: 0.004203 },
-		{ component: 'Electromagnet', priceGm: 0.007141 },
-		{ component: 'Survey Data Unit', priceGm: 0.0925 }
+		{ component: 'Framework', priceGm: 0.006 },
+		{ component: 'Electronics', priceGm: 0.001 },
+		{ component: 'Electromagnet', priceGm: 0.012 },
+		{ component: 'Survey Data Unit', priceGm: 0.2 }
 	];
 	const result = context.computePlan(rows, metrics, 20_000_000_000, 2_000_000, new Date('2026-08-08T06:00:00Z'));
 	assert.ok(result.sourcePoolCount > 0);
 	assert.ok(result.destPoolCount > 0);
 	assert.ok(result.transfers > 0);
-	assert.ok(result.rows.some(row => row.optimizer2Source));
-	assert.ok(result.rows.some(row => row.optimizer2Destination));
+	assert.equal(result.rows.find(row => row.name === 'Framework').optimizer2Source, true);
+	assert.equal(result.rows.find(row => row.name === 'Electromagnet').optimizer2Source, true);
+	assert.equal(result.rows.find(row => row.name === 'Electronics').optimizer2Destination, true);
+	assert.equal(result.rows.find(row => row.name === 'Survey Data Unit').optimizer2Source, false);
+	assert.equal(result.rows.find(row => row.name === 'Survey Data Unit').optimizer2Destination, false);
 	assert.ok(result.rows.some(row => row.optimizer2Crew !== row.crew));
+});
+
+test('Optimizer 2 panel shows NET ATLAS per second and omits upgrading per hour columns', () => {
+	const sectionStart = source.indexOf("openSection('lp-auto-optimizer-2')");
+	const sectionEnd = source.indexOf("content += closeSection;", sectionStart);
+	const section = source.slice(sectionStart, sectionEnd);
+	assert.match(section, /<b>NET ATLAS\/s<\/b>/);
+	assert.doesNotMatch(section, /Upgrading<br>\/ Hour/);
 });
