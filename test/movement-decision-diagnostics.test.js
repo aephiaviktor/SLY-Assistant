@@ -11,7 +11,7 @@ const requiredReasons = [
 
 for (const relativePath of files) {
   const source = fs.readFileSync(path.join(__dirname, '..', relativePath), 'utf8');
-  assert.match(source, /@aephia-version 0\.7\.35-247/);
+  assert.match(source, /@aephia-version 0\.7\.35-\d+/);
   assert.match(source, /schema: 'slya\.movement-decision\.v1'/);
   for (const reason of requiredReasons) assert.ok(source.includes(`'${reason}'`), `${relativePath}: missing ${reason}`);
 

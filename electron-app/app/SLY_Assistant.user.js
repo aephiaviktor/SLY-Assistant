@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-248
+// @aephia-version 0.7.35-249
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -4045,7 +4045,7 @@
 			row.targetBaselineBufferDays = baseline?.neutralBufferDays ?? null;
 		}
 		const finalPlan = computeUpgradeAutomationFinalPlan(neutralComponentPlan, ag.aggr, now);
-		const optimizer2Plan = computeUpgradeAutomationNetAtlasPlan(neutralComponentPlan, componentPerformanceMetrics.rows, expectedTotalLpByEod, profitStats.atlasPool, now);
+		const optimizer2Plan = computeUpgradeAutomationNetAtlasPlan(neutralComponentPlan, componentPerformanceMetrics.rows, expectedTotalLpByEod, pricingHistoryDebug.latest?.atlasPool, now);
 		const requestedNeutralPhaseMode = !!globalSettings?.upgradeAutomationNeutralBlockSingleTx;
 		const neutralPhaseSnapshotKey = getUpgradeAutomationNeutralPhaseSnapshotKey(globalSettings, now);
 		let neutralPhaseSnapshot = null;
@@ -6905,7 +6905,7 @@
 					const targetBuffer = row.optimizer2BufferDays == null ? '' : (Number.isFinite(Number(row.optimizer2BufferDays)) ? Number(row.optimizer2BufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
 					content += '<tr><td' + sideStyle + ' title="' + netTitle.replace(/["<>]/g, '') + '">' + String(row.displayName || row.name || '') + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right">' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right">' + Math.floor(Number(row.neutralUpgradingHour || 0)).toLocaleString() + '</td><td align="right">' + neutralBuffer + '</td><td align="right">' + Math.floor(Number(row.optimizer2Crew || 0)).toLocaleString() + '</td><td align="right">' + Math.floor(Number(row.optimizer2UpgradingHour || 0)).toLocaleString() + '</td><td align="right">' + targetBuffer + '</td></tr>';
 				}
-				if (!Number.isFinite(Number(optimizer2.lpValue))) content += '<tr><td colspan="8" style="color:#ffb366">Optimizer 2 unavailable: Expected Total LP by EOD or ATLAS pool is missing.</td></tr>';
+				if (optimizer2.lpValue === null || !Number.isFinite(Number(optimizer2.lpValue))) content += '<tr><td colspan="8" style="color:#ffb366">Optimizer 2 unavailable: Expected Total LP by EOD or current faction ATLAS pool is missing.</td></tr>';
 			} else {
 				content += '<tr><td colspan="8">Optimizer 2 unavailable</td></tr>';
 			}
@@ -14779,7 +14779,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-248', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-249', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
