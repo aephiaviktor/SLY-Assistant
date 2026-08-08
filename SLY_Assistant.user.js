@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-247
+// @aephia-version 0.7.35-248
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -3489,6 +3489,98 @@
 		}, 0);
 	}
 
+	function computeUpgradeAutomationNetAtlasPlan(neutralRows = [], componentMetrics = [], expectedTotalLpByEod = null, atlasPool = 0, now = new Date()) {
+		const rows = neutralRows.map(row => ({ ...row }));
+		const planning = getUpgradeAutomationPlanningHorizon(now);
+		const remainingHours = planning.planningHours;
+		const redemption = Number(expectedTotalLpByEod);
+		const pool = Number(atlasPool);
+		const metricsByComponent = new Map((componentMetrics || []).map(metric => [getUpgradeAutomationPerformanceComponentName(metric?.component || ''), metric]));
+		const lpValue = Number.isFinite(redemption) && redemption > 0 && Number.isFinite(pool) && pool > 0 ? pool / redemption : null;
+		const syncRow = row => {
+			const projected = projectUpgradeAutomationFinalRow(row, row.optimizer2Crew, remainingHours);
+			row.optimizer2UpgradingHour = projected.finalUpgradingHour;
+			row.optimizer2UpgradingDay = projected.finalUpgradingDay;
+			row.optimizer2BufferDays = projected.finalBufferDays;
+			return projected;
+		};
+		for (const row of rows) {
+			const component = getUpgradeAutomationPerformanceComponentName(row.displayName || row.name || '');
+			const metric = metricsByComponent.get(component);
+			const gmPrice = Number(metric?.priceGm);
+			const secondsPerUnit = Number(row.secondsPerUnit || 0);
+			const lpPerUnit = Number(row.lpPerUnit || 0);
+			row.optimizer2NetAtlasPerSecond = lpValue !== null && Number.isFinite(gmPrice) && gmPrice > 0 && secondsPerUnit > 0
+				? ((lpPerUnit * lpValue) - gmPrice) / secondsPerUnit
+				: null;
+			row.optimizer2Crew = Math.max(0, Math.floor(Number(row.crew || 0)));
+			row.optimizer2Source = false;
+			row.optimizer2Destination = false;
+			syncRow(row);
+		}
+		const eligibleRows = rows.filter(row => row.phantomUpgradeEligible && Number(row.inventoryPhantom || 0) > 0 && row.optimizer2NetAtlasPerSecond !== null && Number.isFinite(Number(row.optimizer2NetAtlasPerSecond)));
+		const orderedRows = [...eligibleRows].sort((a, b) => {
+			const netDiff = Number(a.optimizer2NetAtlasPerSecond) - Number(b.optimizer2NetAtlasPerSecond);
+			if (netDiff !== 0) return netDiff;
+			return String(a.displayName || a.name || '').localeCompare(String(b.displayName || b.name || ''));
+		});
+		const lpMassOf = row => Math.max(0, Number(row.inventoryPhantom || 0)) * Math.max(0, Number(row.lpPerUnit || 0));
+		const sourcePool = [];
+		const destPool = [];
+		let sourceMass = 0;
+		let destMass = 0;
+		let left = 0;
+		let right = orderedRows.length - 1;
+		while (left <= right) {
+			if (sourceMass <= destMass) {
+				const row = orderedRows[left++];
+				if (!row) continue;
+				sourcePool.push(row);
+				sourceMass += lpMassOf(row);
+			} else {
+				const row = orderedRows[right--];
+				if (!row) continue;
+				destPool.push(row);
+				destMass += lpMassOf(row);
+			}
+		}
+		for (const row of sourcePool) row.optimizer2Source = true;
+		for (const row of destPool) row.optimizer2Destination = true;
+		const simulate = (row, crew) => {
+			const normalizedCrew = Math.max(0, Math.floor(Number(crew || 0)));
+			if (normalizedCrew > 0 && normalizedCrew < UPGRADE_AUTOMATION_MIN_JOB_CREW) return { legal: false };
+			const projected = projectUpgradeAutomationFinalRow(row, normalizedCrew, remainingHours);
+			const inventoryFeasible = Number(projected.finalUpgradingHour || 0) <= Number(row.inventoryGlobal || 0);
+			return { ...projected, legal: inventoryFeasible };
+		};
+		const transferAmountFor = (src, dst) => Number(dst.optimizer2Crew || 0) === 0 ? UPGRADE_AUTOMATION_MIN_JOB_CREW : 1;
+		const guardLimit = Math.max(1000, rows.length * Math.max(1, rows.reduce((sum, row) => sum + Number(row.optimizer2Crew || 0), 0)) * 6);
+		let transfers = 0;
+		for (let guard = 0; guard < guardLimit; guard++) {
+			let best = null;
+			for (const src of sourcePool) {
+				for (const dst of destPool) {
+					if (Number(dst.optimizer2NetAtlasPerSecond) <= Number(src.optimizer2NetAtlasPerSecond)) continue;
+					const transferAmount = transferAmountFor(src, dst);
+					if (transferAmount <= 0 || Number(src.optimizer2Crew || 0) < transferAmount) continue;
+					const srcSim = simulate(src, Number(src.optimizer2Crew || 0) - transferAmount);
+					const dstSim = simulate(dst, Number(dst.optimizer2Crew || 0) + transferAmount);
+					if (!srcSim.legal || !dstSim.legal) continue;
+					const improvement = transferAmount * (Number(dst.optimizer2NetAtlasPerSecond) - Number(src.optimizer2NetAtlasPerSecond));
+					if (!(improvement > 0)) continue;
+					if (!best || improvement > best.improvement) best = { src, dst, transferAmount, improvement };
+				}
+			}
+			if (!best) break;
+			best.src.optimizer2Crew -= best.transferAmount;
+			best.dst.optimizer2Crew += best.transferAmount;
+			syncRow(best.src);
+			syncRow(best.dst);
+			transfers += best.transferAmount;
+		}
+		return { rows, lpValue, expectedTotalLpByEod: redemption, atlasPool: pool, sourcePoolCount: sourcePool.length, destPoolCount: destPool.length, sourcePoolMass: sourceMass, destPoolMass: destMass, transfers };
+	}
+
 	function computeUpgradeAutomationFinalPlan(neutralRows = [], aggressiveness = 1, now = new Date()) {
 		const rows = neutralRows.map(row => ({ ...row }));
 		const planning = getUpgradeAutomationPlanningHorizon(now);
@@ -3953,6 +4045,7 @@
 			row.targetBaselineBufferDays = baseline?.neutralBufferDays ?? null;
 		}
 		const finalPlan = computeUpgradeAutomationFinalPlan(neutralComponentPlan, ag.aggr, now);
+		const optimizer2Plan = computeUpgradeAutomationNetAtlasPlan(neutralComponentPlan, componentPerformanceMetrics.rows, expectedTotalLpByEod, profitStats.atlasPool, now);
 		const requestedNeutralPhaseMode = !!globalSettings?.upgradeAutomationNeutralBlockSingleTx;
 		const neutralPhaseSnapshotKey = getUpgradeAutomationNeutralPhaseSnapshotKey(globalSettings, now);
 		let neutralPhaseSnapshot = null;
@@ -4086,6 +4179,7 @@
 			specialPriorityTransfers: finalPlan.specialPriorityTransfers,
 			targetAddedIdleCrew: finalPlan.targetAddedIdleCrew,
 			neutralComponentPlan: finalPlan.rows,
+			optimizer2Plan,
 			yesterdayProfitAtlas: profitStats.yesterdayProfitAtlas,
 			avg7dProfitAtlas: profitStats.avg7dProfitAtlas,
 			aggrNeutralDebugValue: aggrNeutralDebug.latestValue,
@@ -6794,6 +6888,26 @@
 				}
 			} else {
 				content += '<tr><td colspan="6">Performance metrics unavailable</td></tr>';
+			}
+			content += closeSection;
+			content += '<div class="lp-auto-section-gap"></div>';
+
+			content += openSection('lp-auto-optimizer-2');
+			if (upgradeAutomationExecutionSummary?.optimizer2Plan?.rows?.length) {
+				const optimizer2 = upgradeAutomationExecutionSummary.optimizer2Plan;
+				content += '<tr style="opacity:0.66"><td rowspan="2" style="min-width:180px"><b>Optimizer 2<br>Component</b><br><small>NET ATLAS/s target</small></td><td rowspan="2" align="right" style="min-width:120px"><b>Installed Today</b></td><td colspan="3" align="center" style="min-width:270px"><b>Neutral</b></td><td colspan="3" align="center" style="min-width:270px"><b>Target</b></td></tr>';
+				content += '<tr style="opacity:0.66"><td align="right" style="min-width:72px"><b>Crew</b></td><td align="right" style="min-width:96px"><b>Upgrading<br>/ Hour</b></td><td align="right" style="min-width:78px"><b>Buffer Days</b></td><td align="right" style="min-width:72px"><b>Crew</b></td><td align="right" style="min-width:96px"><b>Upgrading<br>/ Hour</b></td><td align="right" style="min-width:78px"><b>Buffer Days</b></td></tr>';
+				for (const row of optimizer2.rows) {
+					const sideStyle = row.optimizer2Source ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.optimizer2Destination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
+					const netAtlas = row.optimizer2NetAtlasPerSecond !== null && Number.isFinite(Number(row.optimizer2NetAtlasPerSecond)) ? Number(row.optimizer2NetAtlasPerSecond).toLocaleString(undefined, { minimumFractionDigits: 8, maximumFractionDigits: 8 }) : '-';
+					const netTitle = 'NET ATLAS/s: ' + netAtlas + '; GM input: pricingATL.priceATL; Faction redemption: Expected Total LP by EOD';
+					const neutralBuffer = row.neutralBufferDays == null ? '' : (Number.isFinite(Number(row.neutralBufferDays)) ? Number(row.neutralBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
+					const targetBuffer = row.optimizer2BufferDays == null ? '' : (Number.isFinite(Number(row.optimizer2BufferDays)) ? Number(row.optimizer2BufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
+					content += '<tr><td' + sideStyle + ' title="' + netTitle.replace(/["<>]/g, '') + '">' + String(row.displayName || row.name || '') + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right">' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right">' + Math.floor(Number(row.neutralUpgradingHour || 0)).toLocaleString() + '</td><td align="right">' + neutralBuffer + '</td><td align="right">' + Math.floor(Number(row.optimizer2Crew || 0)).toLocaleString() + '</td><td align="right">' + Math.floor(Number(row.optimizer2UpgradingHour || 0)).toLocaleString() + '</td><td align="right">' + targetBuffer + '</td></tr>';
+				}
+				if (!Number.isFinite(Number(optimizer2.lpValue))) content += '<tr><td colspan="8" style="color:#ffb366">Optimizer 2 unavailable: Expected Total LP by EOD or ATLAS pool is missing.</td></tr>';
+			} else {
+				content += '<tr><td colspan="8">Optimizer 2 unavailable</td></tr>';
 			}
 			content += closeSection;
 		} catch (e) {
@@ -14665,7 +14779,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-247', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-248', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
