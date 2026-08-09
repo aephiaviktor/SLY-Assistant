@@ -46,6 +46,7 @@ function loadBuilders() {
   vm.runInContext(`
     ${extractFunction('getSlyaInfluxPrecision')}
     ${extractFunction('formatSlyaInfluxTimestamp')}
+    ${extractFunction('getSlyaCostSourceScope')}
     ${extractFunction('getSlyaCostEventTimestamp')}
     ${extractFunction('buildSlyaFuelCostSourceEvent')}
     ${extractFunction('getSlyaTransactionFeeSourceEvents')}
@@ -78,8 +79,8 @@ test('two Fuel movements in one cycle have stable distinct plan positions and as
   const first = buildSlyaFuelCostSourceEvent(movement('cycle-1', 0, 'Transport'));
   const second = buildSlyaFuelCostSourceEvent(movement('cycle-1', 1, 'Supply Chain'));
   const reassigned = buildSlyaFuelCostSourceEvent(movement('cycle-1', 0, 'Supply Chain'));
-  assert.equal(first.eventIdentity, 'fuel:cycle-1:0');
-  assert.equal(second.eventIdentity, 'fuel:cycle-1:1');
+  assert.equal(first.eventIdentity, 'UST:USTUR1:fuel:cycle-1:0');
+  assert.equal(second.eventIdentity, 'UST:USTUR1:fuel:cycle-1:1');
   assert.equal(reassigned.eventIdentity, first.eventIdentity);
 });
 
@@ -98,7 +99,7 @@ test('Fuel retry retains identity and block timestamp while equal source values 
 test('SOL fee identity uses real signature and exact native lamports', () => {
   const { getSlyaTransactionFeeSourceEvents, buildSlyaCostSourceEventLine } = loadBuilders();
   const [fee] = getSlyaTransactionFeeSourceEvents(tx('real-signature', 987654));
-  assert.equal(fee.eventIdentity, 'sol_fee:real-signature');
+  assert.equal(fee.eventIdentity, 'UST:USTUR1:sol_fee:real-signature');
   assert.equal(fee.txFeeLamports, 987654);
   assert.match(buildSlyaCostSourceEventLine(fee), /txFeeLamports=987654i/);
 });
@@ -127,14 +128,29 @@ test('event point identity prevents timestamp collisions and stores no valuation
   const { buildSlyaFuelCostSourceEvent, buildSlyaCostSourceEventLine } = loadBuilders();
   const first = buildSlyaCostSourceEventLine(buildSlyaFuelCostSourceEvent(movement('cycle', 0)));
   const second = buildSlyaCostSourceEventLine(buildSlyaFuelCostSourceEvent(movement('cycle', 1)));
-  assert.match(first, /^cargo_cost_source_event_v1,eventType=fuel,eventIdentity=fuel:cycle:0,/);
-  assert.match(second, /^cargo_cost_source_event_v1,eventType=fuel,eventIdentity=fuel:cycle:1,/);
+  assert.match(first, /^cargo_cost_source_event_v1,eventType=fuel,eventIdentity=UST:USTUR1:fuel:cycle:0,/);
+  assert.match(second, /^cargo_cost_source_event_v1,eventType=fuel,eventIdentity=UST:USTUR1:fuel:cycle:1,/);
   assert.doesNotMatch(first, /priceATL|estimated|amountATL/);
 });
 
-test('compatibility movement telemetry and cadence stay in the established send', () => {
+test('compatibility movement telemetry stays in the established send without a new timer, RPC, or fetch path', () => {
   assert.match(source, /const movementFields = `type="warp",burnedFuel=\$\{burnedFuel\},moveTime=\$\{moveTime\},moveDist=\$\{moveDist\}\$\{buildSlyaTxCostInfluxFields\(movementTxResult\)\}`/);
   assert.match(source, /sendToInflux\(`movement,\$\{movementTags\} \$\{movementFields\}`\)/);
-  assert.match(source, /const writeBody = queuedCostEvents\.length/);
+  assert.match(source, /const flushCostSourceOutbox = !String\(bucketOverride \|\| ''\)\.trim\(\)/);
   assert.doesNotMatch(source, /setInterval\([^\n]*cargo_cost_source_event_v1|setTimeout\([^\n]*cargo_cost_source_event_v1/);
+  assert.doesNotMatch(source, /fetch\([^\n]*cargo_cost_source_event_v1/);
+});
+
+test('faction and instance scope prevent otherwise identical source identities from colliding', () => {
+  const first = loadBuilders().buildSlyaFuelCostSourceEvent(movement('same-cycle', 0));
+  const context = vm.createContext({
+    BigInt, Math, Number, String, URL,
+    globalSettings: { influxURL: 'https://example.invalid/api/v2/write?bucket=slya&precision=ms' },
+    getSlyaInfluxInstanceTag: () => 'USTUR2',
+    getUpgradeAutomationInfluxFactionTag: () => 'UST',
+    influxEscape: String,
+    optimizationInfluxString: (value) => JSON.stringify(String(value ?? '')),
+  });
+  vm.runInContext(`${extractFunction('getSlyaCostSourceScope')}\n${extractFunction('getSlyaCostEventTimestamp')}\n${extractFunction('buildSlyaFuelCostSourceEvent')}\nthis.result=buildSlyaFuelCostSourceEvent(${JSON.stringify(movement('same-cycle', 0))});`, context);
+  assert.notEqual(first.eventIdentity, context.result.eventIdentity);
 });

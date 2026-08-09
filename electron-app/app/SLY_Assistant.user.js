@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-253
+// @aephia-version 0.7.35-254
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -5569,7 +5569,7 @@
 			const measurement = line.startsWith('lp_auto_comp,') ? 'lp_auto_comp' : (line.startsWith('lp_auto_settings') || line.startsWith('lp_auto_settings,') ? 'lp_auto_settings' : (line.startsWith('lp_auto_aggr,') ? 'lp_auto_aggr' : (line.startsWith('lp_auto_perf,') ? 'lp_auto_perf' : (line.startsWith('slya_perf,') ? 'slya_perf' : 'unknown'))));
 			upgradeAutomationInfluxDebugStatus = `sending ${measurement} ${idx + 1}/${lines.length}`;
 			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][INFLUX] sending measurement=${measurement} line=${idx + 1}/${lines.length}`);
-			await sendToInflux(line, '', idx === 0);
+			await sendToInflux(line);
 			upgradeAutomationInfluxDebugLine = line;
 			lastMeasurementSent = measurement;
 			sentCount++;
@@ -8753,9 +8753,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 	const SLYA_COST_SOURCE_OUTBOX_KEY = 'slyaCostSourceEventOutbox_v1';
 	let pendingSlyaCostSourceEventLines = null;
-	let slyaCostSourceLastFlushMinute = '';
 	let slyaCostSourcePersistTail = Promise.resolve();
 	const slyaCostSourceMissingCounts = {};
+	const slyaCostSourceCounters = { eligible: 0, queued: 0, deduplicated: 0, attempted: 0, accepted: 0, failed: 0 };
 
 	function getSlyaInfluxPrecision() {
 		try {
@@ -8789,18 +8789,36 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		let value = raw;
 		if (typeof value === 'string') { try { value = JSON.parse(value); } catch (e) { value = {}; } }
 		const entries = value && typeof value === 'object' && !Array.isArray(value) ? Object.entries(value) : [];
-		return new Map(entries.filter(([identity, line]) => String(identity).trim() && typeof line === 'string' && line.startsWith('cargo_cost_source_event_v1,')).map(([identity, line]) => [identity, normalizeSlyaCostSourceEventLineTimestamp(line)]));
+		const normalized = [];
+		for (const [identity, record] of entries) {
+			const line = typeof record === 'string' ? record : record?.line;
+			if (!String(identity).trim() || typeof line !== 'string' || !line.startsWith('cargo_cost_source_event_v1,')) continue;
+			const queuedAtMs = Number(typeof record === 'string' ? Date.now() : record?.queuedAtMs);
+			normalized.push([identity, {
+				line: normalizeSlyaCostSourceEventLineTimestamp(line),
+				queuedAtMs: Number.isSafeInteger(queuedAtMs) && queuedAtMs > 0 ? queuedAtMs : Date.now(),
+			}]);
+		}
+		return new Map(normalized);
 	}
 
-	function snapshotSlyaCostSourceOutbox(outbox) { return Array.from((outbox || new Map()).entries()); }
+	function snapshotSlyaCostSourceOutbox(outbox) { return Array.from((outbox || new Map()).entries()).map(([identity, record]) => [identity, { ...record }]); }
 
 	function acknowledgeSlyaCostSourceEventSnapshot(outbox, snapshot) {
-		for (const [identity, line] of snapshot || []) if (outbox.get(identity) === line) outbox.delete(identity);
+		for (const [identity, record] of snapshot || []) {
+			const pending = outbox.get(identity);
+			if (pending?.line === record?.line && pending?.queuedAtMs === record?.queuedAtMs) outbox.delete(identity);
+		}
 		return outbox;
 	}
 
 	function composeSlyaScheduledInfluxBody(message, snapshot) {
-		return (snapshot || []).map(([, line]) => line).concat(String(message || '')).join('\n');
+		return (snapshot || []).map(([, record]) => record.line).concat(String(message || '')).join('\n');
+	}
+
+	function getSlyaCostSourceOldestPendingAgeSeconds(outbox, nowMs = Date.now()) {
+		const queuedTimes = Array.from((outbox || new Map()).values()).map(record => Number(record?.queuedAtMs)).filter(value => Number.isSafeInteger(value) && value > 0);
+		return queuedTimes.length ? Math.max(0, Math.floor((Number(nowMs) - Math.min(...queuedTimes)) / 1000)) : 0;
 	}
 
 	async function loadSlyaCostSourceOutbox() {
@@ -8822,6 +8840,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	}
 
 
+	function getSlyaCostSourceScope() {
+		const faction = String(getUpgradeAutomationInfluxFactionTag() || 'unknown').trim() || 'unknown';
+		const instance = String(getSlyaInfluxInstanceTag() || 'unknown').trim() || 'unknown';
+		return `${faction}:${instance}`;
+	}
+
 	function getSlyaCostEventTimestamp(txResult) {
 		const blockTime = Number(txResult?.blockTime);
 		if (!Number.isInteger(blockTime) || blockTime <= 0) return null;
@@ -8836,7 +8860,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const timestamp = getSlyaCostEventTimestamp(input.txResult);
 		if (!cycleId || !movementEventId || !Number.isInteger(movementIndex) || movementIndex < 0 || !Number.isFinite(burnedFuel) || burnedFuel <= 0 || !timestamp) return null;
 		return {
-			eventType: 'fuel', eventIdentity: `fuel:${cycleId}:${movementIndex}`,
+			eventType: 'fuel', eventIdentity: `${getSlyaCostSourceScope()}:fuel:${cycleId}:${movementIndex}`,
 			cycleId, movementEventId, movementIndex, fuelQuantity: burnedFuel,
 			fleetAccount: String(input.fleetAccount || ''), fleetLabel: String(input.fleetLabel || ''),
 			assignment: String(input.assignment || ''), sourceProvenance: 'confirmed_movement',
@@ -8856,7 +8880,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			if (!signature || !Number.isSafeInteger(txFeeLamports) || txFeeLamports <= 0 || !timestamp) continue;
 			const hasPosition = Number.isInteger(Number(position)) && Number(position) >= 0;
 			events.push({
-				eventType: 'sol_fee', eventIdentity: `sol_fee:${signature}${hasPosition ? `:${Number(position)}` : ''}`,
+				eventType: 'sol_fee', eventIdentity: `${getSlyaCostSourceScope()}:sol_fee:${signature}${hasPosition ? `:${Number(position)}` : ''}`,
 				transactionSignature: signature, txFeeLamports,
 				eventPosition: hasPosition ? Number(position) : null,
 				fleetAccount: String(entry?.slyaFleetAccount || ''), fleetLabel: String(entry?.slyaFleetLabel || ''),
@@ -8884,8 +8908,14 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	async function queueSlyaCostSourceEvent(event, missingReason = 'event_invalid') {
 		const line = buildSlyaCostSourceEventLine(event);
 		if (!line) { countSlyaCostSourceMissing(missingReason); return false; }
+		slyaCostSourceCounters.eligible += 1;
 		const outbox = await loadSlyaCostSourceOutbox();
-		outbox.set(event.eventIdentity, line);
+		if (outbox.has(event.eventIdentity)) {
+			slyaCostSourceCounters.deduplicated += 1;
+			return true;
+		}
+		outbox.set(event.eventIdentity, { line, queuedAtMs: Date.now() });
+		slyaCostSourceCounters.queued += 1;
 		await persistSlyaCostSourceOutbox();
 		return true;
 	}
@@ -14876,7 +14906,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-253', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-254', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -15182,21 +15212,19 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return `http=${Number(status) || 0} ${String(statusText || '').replace(/\s+/g, ' ').slice(0, 40)} reason=${reason || 'none'}`.slice(0, 220);
 	}
 
-	async function sendToInflux(msg, bucketOverride = '', includeCostSourceOutbox = false) {
+	async function sendToInflux(msg, bucketOverride = '') {
 		if(!globalSettings.influxURL.length) return false;
 		let message = '';
 		let sent = false;
-		const scheduledCostSourceFlush = includeCostSourceOutbox === true;
-		const flushMinute = new Date().toISOString().slice(0, 16);
-		const scheduledCostSourceAttempt = scheduledCostSourceFlush && flushMinute !== slyaCostSourceLastFlushMinute;
-		if (scheduledCostSourceAttempt) slyaCostSourceLastFlushMinute = flushMinute;
-		const costSourceOutbox = scheduledCostSourceAttempt ? await loadSlyaCostSourceOutbox() : null;
-		const queuedBeforeSnapshot = costSourceOutbox?.size || 0;
-		const queuedCostEvents = scheduledCostSourceAttempt ? snapshotSlyaCostSourceOutbox(costSourceOutbox) : [];
+		const flushCostSourceOutbox = !String(bucketOverride || '').trim();
+		const costSourceOutbox = flushCostSourceOutbox ? await loadSlyaCostSourceOutbox() : null;
+		const queuedCostEvents = flushCostSourceOutbox ? snapshotSlyaCostSourceOutbox(costSourceOutbox) : [];
 		const writeBody = queuedCostEvents.length ? composeSlyaScheduledInfluxBody(msg, queuedCostEvents) : msg;
-		const queuedFuel = queuedCostEvents.filter(([, line]) => line.includes('eventType=fuel')).length;
-		const queuedSol = queuedCostEvents.filter(([, line]) => line.includes('eventType=sol_fee')).length;
+		const queuedFuel = queuedCostEvents.filter(([, record]) => record.line.includes('eventType=fuel')).length;
+		const queuedSol = queuedCostEvents.filter(([, record]) => record.line.includes('eventType=sol_fee')).length;
+		const oldestPendingSeconds = getSlyaCostSourceOldestPendingAgeSeconds(costSourceOutbox);
 		const missingSummary = JSON.stringify(slyaCostSourceMissingCounts);
+		if (queuedCostEvents.length) slyaCostSourceCounters.attempted += queuedCostEvents.length;
 		try {
 			cLog(2, 'Sending message to influx:', msg);
 			const influxWriteUrl = buildInfluxWriteUrl(bucketOverride);
@@ -15212,25 +15240,33 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				try { errText = await response.text(); } catch(e) {}
 				message = 'Error while sending a request to influx: ' + response.status + ' ' + response.statusText + (errText ? (' ' + errText.slice(0, 300)) : '');
 				upgradeAutomationInfluxDebugStatus = 'http ' + response.status + ' ' + response.statusText + (errText ? (': ' + errText.slice(0, 120)) : '');
-				if (scheduledCostSourceAttempt) {
+				if (flushCostSourceOutbox && (queuedCostEvents.length || Object.keys(slyaCostSourceMissingCounts).length)) {
+					slyaCostSourceCounters.failed += queuedCostEvents.length;
 					const rejection = sanitizeSlyaCostSourceInfluxError(response.status, response.statusText, errText);
-					await appendUpgradeAutomationLog(`[COST-SOURCE-OUTBOX] queued=${queuedBeforeSnapshot} included=${queuedCostEvents.length} fuel=${queuedFuel} sol=${queuedSol} acknowledged=0 retained=${costSourceOutbox.size} missing=${missingSummary} rejection=${rejection}`);
+					await appendUpgradeAutomationLog(`[COST-SOURCE-OUTBOX] eligible=${slyaCostSourceCounters.eligible} queued=${slyaCostSourceCounters.queued} deduplicated=${slyaCostSourceCounters.deduplicated} pending=${costSourceOutbox.size} attempted=${slyaCostSourceCounters.attempted} accepted=${slyaCostSourceCounters.accepted} failed=${slyaCostSourceCounters.failed} batch=${queuedCostEvents.length} fuel=${queuedFuel} sol=${queuedSol} oldestPendingSeconds=${oldestPendingSeconds} ineligible=${missingSummary} rejection=${rejection}`);
 					for (const key of Object.keys(slyaCostSourceMissingCounts)) delete slyaCostSourceMissingCounts[key];
 				}
 			} else {
 				message = 'Influx: Request was successful.';
 				upgradeAutomationInfluxDebugStatus = 'http ' + response.status + ' ' + response.statusText;
 				sent = true;
-				if (scheduledCostSourceAttempt) {
+				if (flushCostSourceOutbox && queuedCostEvents.length) {
 					acknowledgeSlyaCostSourceEventSnapshot(costSourceOutbox, queuedCostEvents);
 					await persistSlyaCostSourceOutbox();
-					await appendUpgradeAutomationLog(`[COST-SOURCE-OUTBOX] queued=${queuedBeforeSnapshot} included=${queuedCostEvents.length} fuel=${queuedFuel} sol=${queuedSol} acknowledged=${queuedCostEvents.length} retained=${costSourceOutbox.size} missing=${missingSummary}`);
+					slyaCostSourceCounters.accepted += queuedCostEvents.length;
+					await appendUpgradeAutomationLog(`[COST-SOURCE-OUTBOX] eligible=${slyaCostSourceCounters.eligible} queued=${slyaCostSourceCounters.queued} deduplicated=${slyaCostSourceCounters.deduplicated} pending=${costSourceOutbox.size} attempted=${slyaCostSourceCounters.attempted} accepted=${slyaCostSourceCounters.accepted} failed=${slyaCostSourceCounters.failed} batch=${queuedCostEvents.length} fuel=${queuedFuel} sol=${queuedSol} oldestPendingSeconds=${oldestPendingSeconds} ineligible=${missingSummary}`);
 					for (const key of Object.keys(slyaCostSourceMissingCounts)) delete slyaCostSourceMissingCounts[key];
 				}
 			}
 		} catch(error) {
 			message = 'Error while sending a request to influx: ' + error.message;
 			upgradeAutomationInfluxDebugStatus = 'fetch error: ' + error.message;
+			if (flushCostSourceOutbox && queuedCostEvents.length) {
+				slyaCostSourceCounters.failed += queuedCostEvents.length;
+				const rejection = sanitizeSlyaCostSourceInfluxError(0, 'network failure', error?.message || 'unknown');
+				await appendUpgradeAutomationLog(`[COST-SOURCE-OUTBOX] eligible=${slyaCostSourceCounters.eligible} queued=${slyaCostSourceCounters.queued} deduplicated=${slyaCostSourceCounters.deduplicated} pending=${costSourceOutbox.size} attempted=${slyaCostSourceCounters.attempted} accepted=${slyaCostSourceCounters.accepted} failed=${slyaCostSourceCounters.failed} batch=${queuedCostEvents.length} fuel=${queuedFuel} sol=${queuedSol} oldestPendingSeconds=${oldestPendingSeconds} ineligible=${missingSummary} rejection=${rejection}`);
+				for (const key of Object.keys(slyaCostSourceMissingCounts)) delete slyaCostSourceMissingCounts[key];
+			}
 		}
 		cLog(2, message);
 		return sent;
