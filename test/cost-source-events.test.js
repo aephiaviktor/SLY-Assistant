@@ -56,10 +56,13 @@ function loadBuilders() {
   return context.api;
 }
 
-const tx = (signature, lamports = 5000, blockTime = 1785830000, position = null) => ({
+const tx = (signature, lamports = 5000, blockTime = 1785830000, position = null, fleetAccount = 'fleet-account') => ({
   slyaTxHash: signature,
   slyaTxFeeLamports: lamports,
   blockTime,
+  slyaFleetAccount: fleetAccount,
+  slyaFleetLabel: 'Fleet A',
+  slyaAssignment: 'Transport',
   ...(position == null ? {} : { slyaTxEventPosition: position }),
 });
 
@@ -115,12 +118,13 @@ test('transaction replay is identical; distinct signatures and real positions re
   );
 });
 
-test('unsigned/preflight, missing signature, missing fee, and unstable timestamp fail closed', () => {
+test('unsigned/preflight, missing identity, fee, timestamp, or authoritative fleet fail closed', () => {
   const { getSlyaTransactionFeeSourceEvents, buildSlyaFuelCostSourceEvent } = loadBuilders();
   assert.equal(getSlyaTransactionFeeSourceEvents(null).length, 0);
-  assert.equal(getSlyaTransactionFeeSourceEvents({ meta: { fee: 5000 }, blockTime: 1 }).length, 0);
-  assert.equal(getSlyaTransactionFeeSourceEvents({ slyaTxHash: 'sig', blockTime: 1 }).length, 0);
-  assert.equal(getSlyaTransactionFeeSourceEvents({ slyaTxHash: 'sig', slyaTxFeeLamports: 5000 }).length, 0);
+  assert.equal(getSlyaTransactionFeeSourceEvents({ meta: { fee: 5000 }, blockTime: 1, slyaFleetAccount: 'fleet' }).length, 0);
+  assert.equal(getSlyaTransactionFeeSourceEvents({ slyaTxHash: 'sig', blockTime: 1, slyaFleetAccount: 'fleet' }).length, 0);
+  assert.equal(getSlyaTransactionFeeSourceEvents({ slyaTxHash: 'sig', slyaTxFeeLamports: 5000, slyaFleetAccount: 'fleet' }).length, 0);
+  assert.equal(getSlyaTransactionFeeSourceEvents(tx('sig', 5000, 1785830000, null, '')).length, 0);
   assert.equal(buildSlyaFuelCostSourceEvent({ ...movement('cycle', 0), movementEventId: '' }), null);
 });
 
