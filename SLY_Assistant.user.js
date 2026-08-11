@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-261
+// @aephia-version 0.7.35-262
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -692,15 +692,14 @@
 
 		await GM.setValue(settingsGmKey, JSON.stringify(backup.settings));
 		for (const [key, value] of Object.entries(backup.fleetConfigs || {})) await GM.setValue(key, JSON.stringify(value));
-		// craftConfigs: only restore the user-persistent fields. The volatile
-		// runtime state (state, craftingId, craftingCoords, feeAtlas, amount,
-		// nextAmount, nextRuntime, lpAutomationUpdatedAt, lpAutomationCycleStamp,
-		// errorCount) is re-derived on reload from on-chain via
-		// recoverCraftingProcessesForAllSlots and from the optimizer's next cycle
-		// write via applyUpgradeAutomationExecutionToCraftConfig. Restoring the
-		// raw backup values would surface stale "Waiting for crew" / past
-		// nextFinishAt to the panel.
-		const PERSISTENT_CRAFT_CONFIG_KEYS = ['coordinates', 'item', 'special', 'belowAmount'];
+		// craftConfigs: restore only user-configured fields. The runtime-only
+		// state (state, craftingId, craftingCoords, feeAtlas, nextAmount,
+		// nextRuntime, lpAutomationUpdatedAt, lpAutomationCycleStamp, errorCount)
+		// is re-derived on reload from on-chain via recoverCraftingProcessesForAllSlots
+		// and from the optimizer's next cycle write via applyUpgradeAutomationExecutionToCraftConfig.
+		// Keep amount and crew: those are user configuration, and dropping them
+		// makes the external state backup incomplete after a blank-screen reload.
+		const PERSISTENT_CRAFT_CONFIG_KEYS = ['coordinates', 'item', 'amount', 'crew', 'special', 'belowAmount'];
 		for (const [key, value] of Object.entries(backup.craftConfigs || {})) {
 			if (!value || typeof value !== 'object') continue;
 			const filtered = {};
@@ -15030,7 +15029,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-261', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-262', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
