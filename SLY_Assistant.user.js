@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-257
+// @aephia-version 0.7.35-258
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -6985,17 +6985,25 @@
 				const optimizer2 = upgradeAutomationExecutionSummary.optimizer2Plan;
 				const optimizer2NeutralMultiplier = Number(optimizer2.neutralMultiplier || 0).toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 				const optimizer2TargetMultiplier = Number(optimizer2.targetMultiplier || 0).toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-				content += '<tr style="opacity:0.66"><td rowspan="2" style="min-width:180px"><b>Optimizer 2<br>Component</b><br><small>Net profit target</small></td><td rowspan="2" align="right" style="min-width:96px"><b>GM Price</b></td><td rowspan="2" align="right" style="min-width:110px"><b>Net Profit (ATLAS)<br>/ Crew / Day</b></td><td rowspan="2" align="right" style="min-width:120px"><b>Installed Today</b></td><td colspan="2" align="center" style="min-width:170px"><b>Neutral</b><br><small>Neutral multiplier ×' + optimizer2NeutralMultiplier + '</small></td><td colspan="2" align="center" style="min-width:170px"><b>Target</b><br><small>Target multiplier ×' + optimizer2TargetMultiplier + '</small></td></tr>';
-				content += '<tr style="opacity:0.66"><td align="right" style="min-width:72px"><b>Crew</b></td><td align="right" style="min-width:78px"><b>Buffer Days</b></td><td align="right" style="min-width:72px"><b>Crew</b></td><td align="right" style="min-width:78px"><b>Buffer Days</b></td></tr>';
+				const nextCycleTarget = typeof upgradeAutomationExecutionSummary.nextCycleTarget === 'boolean' ? upgradeAutomationExecutionSummary.nextCycleTarget : isUpgradeAutomationNextCycleTarget(globalSettings, new Date());
+				const highlightNeutral = !nextCycleTarget;
+				const neutralHighlightStyle = highlightNeutral ? ' style="background:rgba(80,200,120,0.16); box-shadow: inset 0 0 0 1px rgba(80,200,120,0.30);"' : '';
+				const targetHighlightStyle = !highlightNeutral ? ' style="background:rgba(80,200,120,0.16); box-shadow: inset 0 0 0 1px rgba(80,200,120,0.30);"' : '';
+				content += '<tr style="opacity:0.66"><td rowspan="2" style="min-width:180px"><b>Optimizer 2<br>Component</b><br><small>Net profit target</small></td><td rowspan="2" align="right" style="min-width:96px"><b>GM Price</b></td><td rowspan="2" align="right" style="min-width:110px"><b>Net Profit (ATLAS)<br>/ Crew / Day</b></td><td rowspan="2" align="right" style="min-width:120px"><b>Installed Today</b></td><td colspan="2" align="center" style="min-width:170px"' + neutralHighlightStyle + '><b>Neutral</b><br><small>Neutral multiplier ×' + optimizer2NeutralMultiplier + '</small></td><td colspan="2" align="center" style="min-width:170px"' + targetHighlightStyle + '><b>Target</b><br><small>Target multiplier ×' + optimizer2TargetMultiplier + '</small></td></tr>';
+				content += '<tr style="opacity:0.66"><td align="right" style="min-width:72px"' + neutralHighlightStyle + '><b>Crew</b></td><td align="right" style="min-width:78px"' + neutralHighlightStyle + '><b>Buffer Days</b></td><td align="right" style="min-width:72px"' + targetHighlightStyle + '><b>Crew</b></td><td align="right" style="min-width:78px"' + targetHighlightStyle + '><b>Buffer Days</b></td></tr>';
 				for (const row of optimizer2.rows) {
 					const sideStyle = row.optimizer2Source ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.optimizer2Destination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
-					const netAtlas = row.optimizer2NetAtlasPerSecond !== null && Number.isFinite(Number(row.optimizer2NetAtlasPerSecond)) ? (Number(row.optimizer2NetAtlasPerSecond) * 86400).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '-';
+					const netAtlas = row.optimizer2NetAtlasPerSecond !== null && Number.isFinite(Number(row.optimizer2NetAtlasPerSecond)) ? (Number(row.optimizer2NetAtlasPerSecond) * 86400).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : '-';
 					const gmPrice = row.optimizer2GmPrice !== null && Number.isFinite(Number(row.optimizer2GmPrice)) ? Number(row.optimizer2GmPrice).toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }) : '-';
 					const netTitle = 'Net Profit (ATLAS) / Crew / Day: ' + netAtlas + '; GM input: pricingATL.priceATL; Faction redemption: Expected Total LP by EOD';
 					const neutralBuffer = row.neutralBufferDays == null ? '' : (Number.isFinite(Number(row.neutralBufferDays)) ? Number(row.neutralBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
 					const targetBuffer = row.optimizer2BufferDays == null ? '' : (Number.isFinite(Number(row.optimizer2BufferDays)) ? Number(row.optimizer2BufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
+					const neutralBufferWarning = row.neutralBufferDays != null && Number.isFinite(Number(row.neutralBufferDays)) && Number(row.neutralBufferDays) < 5;
+					const targetBufferWarning = row.optimizer2BufferDays != null && Number.isFinite(Number(row.optimizer2BufferDays)) && Number(row.optimizer2BufferDays) < 5;
+					const neutralBufferStyle = neutralBufferWarning ? (neutralHighlightStyle ? neutralHighlightStyle.replace(/"$/, '; color:#ffb366"') : ' style="color:#ffb366"') : neutralHighlightStyle;
+					const targetBufferStyle = targetBufferWarning ? (targetHighlightStyle ? targetHighlightStyle.replace(/"$/, '; color:#ffb366"') : ' style="color:#ffb366"') : targetHighlightStyle;
 					const netStyle = row.optimizer2NetAtlasPerSecond == null ? '' : (Number(row.optimizer2NetAtlasPerSecond) >= 0 ? ' style="color:#80ff80"' : ' style="color:#ff8080"');
-					content += '<tr><td' + sideStyle + ' title="' + netTitle.replace(/["<>]/g, '') + '">' + String(row.displayName || row.name || '') + '</td><td align="right">' + gmPrice + '</td><td align="right"' + netStyle + '>' + netAtlas + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right">' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right">' + neutralBuffer + '</td><td align="right">' + Math.floor(Number(row.optimizer2Crew || 0)).toLocaleString() + '</td><td align="right">' + targetBuffer + '</td></tr>';
+					content += '<tr><td' + sideStyle + ' title="' + netTitle.replace(/["<>]/g, '') + '">' + String(row.displayName || row.name || '') + '</td><td align="right">' + gmPrice + '</td><td align="right"' + netStyle + '>' + netAtlas + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right"' + neutralBufferStyle + '>' + neutralBuffer + '</td><td align="right"' + targetHighlightStyle + '>' + Math.floor(Number(row.optimizer2Crew || 0)).toLocaleString() + '</td><td align="right"' + targetBufferStyle + '>' + targetBuffer + '</td></tr>';
 				}
 				if (optimizer2.lpValue === null || !Number.isFinite(Number(optimizer2.lpValue))) content += '<tr><td colspan="8" style="color:#ffb366">Optimizer 2 unavailable: Expected Total LP by EOD or current faction ATLAS pool is missing.</td></tr>';
 			} else {
@@ -15008,7 +15016,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-257', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-258', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
