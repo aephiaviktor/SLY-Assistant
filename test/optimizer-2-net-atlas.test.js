@@ -171,6 +171,11 @@ test('Performance Metrics orders value periods and derives daily per-crew profit
 	assert.match(section, /color:#80ff80/);
 	assert.match(section, /color:#ff8080/);
 	assert.match(section, /colspan="8"/);
+	assert.doesNotMatch(section, /min-width:/);
+	assert.match(source, /\.lp-auto-performance-metrics \.lp-auto-summary-table \{ width: 100%; table-layout: fixed; \}/);
+	assert.match(source, /\.lp-auto-performance-metrics \.lp-auto-summary-table td \{ min-width: 0 !important;/);
+	assert.match(source, /\.lp-auto-performance-metrics \.lp-auto-summary-table td:nth-child\(3\).*width: 11% !important/);
+	assert.match(source, /\.lp-auto-performance-metrics \.lp-auto-summary-table td:nth-child\(5\).*width: 11% !important/);
 });
 
 test('Optimizer 2 panel displays daily net profit with O1-style active and warning colors', () => {
