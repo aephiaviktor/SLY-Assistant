@@ -19,7 +19,7 @@ function extractFunction(name) {
 	throw new Error(`Could not extract ${name}`);
 }
 
-test('Optimizer 2 is observational and ranks pools by NET ATLAS per second', () => {
+test('Optimizer 2 ranks pools by net ATLAS profit per second internally', () => {
 	assert.match(source, /function computeUpgradeAutomationNetAtlasPlan\(/);
 	assert.match(source, /\(\(lpPerUnit \* lpValue\) - gmPrice\) \/ secondsPerUnit/);
 	assert.match(source, /economicMassOf/);
@@ -125,12 +125,33 @@ test('current ONI epoch inputs create colored pools and reallocate target crew',
 	assert.ok(Math.abs((electromagnet.optimizer2Crew - 20) - (electronics.optimizer2Crew - 20)) <= 1);
 });
 
-test('Optimizer 2 panel shows NET ATLAS per second and omits upgrading per hour columns', () => {
+test('LP Control shows the effective optimizer and omits O1 target summaries', () => {
+	const sectionStart = source.indexOf("openSection('lp-auto-control')");
+	const sectionEnd = source.indexOf("content += closeSection;", sectionStart);
+	const section = source.slice(sectionStart, sectionEnd);
+	assert.match(section, /Optimizer Selector/);
+	assert.match(section, /optimizerVersion === 'O2' \? 'Optimizer 2' : 'Optimizer 1'/);
+	assert.match(section, /Optimizer 1 \(fallback\)/);
+	assert.doesNotMatch(section, />Neutral LP Target</);
+	assert.doesNotMatch(section, />Requested LP Target</);
+	assert.doesNotMatch(section, />Optimizer LP Target</);
+});
+
+test('Optimizer 2 is immediately after LP Control and before Optimizer 1', () => {
+	const control = source.indexOf("openSection('lp-auto-control')");
+	const optimizer2 = source.indexOf("openSection('lp-auto-optimizer-2')");
+	const optimizer1 = source.indexOf("openSection('lp-auto-components')");
+	assert.ok(control < optimizer2 && optimizer2 < optimizer1);
+	assert.match(source.slice(optimizer1, source.indexOf('content += closeSection;', optimizer1)), /<b>Optimizer 1<br>Component<\/b>/);
+});
+
+test('Optimizer 2 panel displays net ATLAS profit per crew per day', () => {
 	const sectionStart = source.indexOf("openSection('lp-auto-optimizer-2')");
 	const sectionEnd = source.indexOf("content += closeSection;", sectionStart);
 	const section = source.slice(sectionStart, sectionEnd);
 	assert.match(section, /<b>GM Price<\/b>/);
-	assert.match(section, /<b>NET ATLAS\/s<\/b>/);
+	assert.match(section, /Net Profit \(ATLAS\)<br>\/ Crew \/ Day/);
+	assert.match(section, /Number\(row\.optimizer2NetAtlasPerSecond\) \* 86400/);
 	assert.match(section, /Neutral multiplier ×/);
 	assert.match(section, /Target multiplier ×/);
 	assert.doesNotMatch(section, /Upgrading<br>\/ Hour/);
