@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-258
+// @aephia-version 0.7.35-259
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -7016,24 +7016,32 @@
 			if (upgradeAutomationExecutionSummary?.neutralComponentPlan?.length) {
 				const metricRows = Array.isArray(upgradeAutomationExecutionSummary?.componentPerformanceMetrics) ? upgradeAutomationExecutionSummary.componentPerformanceMetrics : [];
 				const metricsByComponent = Object.fromEntries(metricRows.map(row => [String(row.component || ''), row]));
-				content += '<tr style="opacity:0.66"><td style="min-width:180px"><b>Performance Metrics<br>Component</b></td><td align="right" style="min-width:96px"><b>Installed 14d</b></td><td align="right" style="min-width:96px"><b>Installed yday</b></td><td align="right" style="min-width:120px"><b>ATLAS Value 14d avg</b></td><td align="right" style="min-width:120px"><b>ATLAS Value yday</b></td><td align="right" style="min-width:96px"><b>Price GM</b></td></tr>';
+				content += '<tr style="opacity:0.66"><td style="min-width:180px"><b>Performance Metrics<br>Component</b></td><td align="right" style="min-width:96px"><b>Installed 14d</b></td><td align="right" style="min-width:120px"><b>ATLAS Value 14d</b></td><td align="right" style="min-width:96px"><b>Installed yday</b></td><td align="right" style="min-width:120px"><b>ATLAS Value yday</b></td><td align="right" style="min-width:96px"><b>GM Price</b></td><td align="right" style="min-width:132px"><b>Net Profit / Crew / Day<br>(14d)</b></td><td align="right" style="min-width:132px"><b>Net Profit / Crew / Day<br>(yday)</b></td></tr>';
 				for (const row of upgradeAutomationExecutionSummary.neutralComponentPlan) {
 					const componentName = String(row.displayName || row.name || '');
 					const metric = metricsByComponent[componentName] || metricsByComponent[row.name] || (componentName === 'Survey Data Unit' ? metricsByComponent.SDU : null);
 					const installed14d = Math.floor(Number(metric?.installed14d || 0));
 					const installed14dDisplay = installed14d > 0 ? installed14d.toLocaleString() : '-';
-					const averageValue = installed14d > 0 && Number.isFinite(Number(metric?.averageValue)) ? Number(metric.averageValue).toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }) : '-';
+					const hasAverageValue = installed14d > 0 && Number.isFinite(Number(metric?.averageValue));
+					const averageValue = hasAverageValue ? Number(metric.averageValue).toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }) : '-';
 					const installedYday = Math.floor(Number(metric?.installedYday || 0));
 					const installedYdayDisplay = installedYday > 0 ? installedYday.toLocaleString() : '-';
-					const averageValueYday = installedYday > 0 && Number.isFinite(Number(metric?.averageValueYday)) ? Number(metric.averageValueYday).toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }) : '-';
-					const priceGm = Number.isFinite(Number(metric?.priceGm)) && Number(metric.priceGm) > 0 ? Number(metric.priceGm).toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }) : '-';
-					content += '<tr><td>' + componentName + '</td><td align="right">' + installed14dDisplay + '</td><td align="right">' + installedYdayDisplay + '</td><td align="right">' + averageValue + '</td><td align="right">' + averageValueYday + '</td><td align="right">' + priceGm + '</td></tr>';
+					const hasAverageValueYday = installedYday > 0 && Number.isFinite(Number(metric?.averageValueYday));
+					const averageValueYday = hasAverageValueYday ? Number(metric.averageValueYday).toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }) : '-';
+					const hasPriceGm = Number.isFinite(Number(metric?.priceGm)) && Number(metric.priceGm) > 0;
+					const priceGm = hasPriceGm ? Number(metric.priceGm).toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }) : '-';
+					const secondsPerUnit = Math.max(1, Number(row.secondsPerUnit || 1));
+					const profit14d = hasAverageValue && hasPriceGm ? (Number(metric.averageValue) - Number(metric.priceGm)) * 86400 / secondsPerUnit : null;
+					const profitYday = hasAverageValueYday && hasPriceGm ? (Number(metric.averageValueYday) - Number(metric.priceGm)) * 86400 / secondsPerUnit : null;
+					const formatProfit = value => value === null || !Number.isFinite(value) ? '-' : value.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+					const profitStyle = value => value === null || !Number.isFinite(value) ? '' : (value >= 0 ? ' style="color:#80ff80"' : ' style="color:#ff8080"');
+					content += '<tr><td>' + componentName + '</td><td align="right">' + installed14dDisplay + '</td><td align="right">' + averageValue + '</td><td align="right">' + installedYdayDisplay + '</td><td align="right">' + averageValueYday + '</td><td align="right">' + priceGm + '</td><td align="right"' + profitStyle(profit14d) + '>' + formatProfit(profit14d) + '</td><td align="right"' + profitStyle(profitYday) + '>' + formatProfit(profitYday) + '</td></tr>';
 				}
 				if (upgradeAutomationExecutionSummary?.componentPerformanceMetricsError) {
-					content += '<tr><td colspan="6" style="color:#ffb366">Performance metrics using available data; refresh issue: ' + String(upgradeAutomationExecutionSummary.componentPerformanceMetricsError).replace(/[<>]/g, '') + '</td></tr>';
+					content += '<tr><td colspan="8" style="color:#ffb366">Performance metrics using available data; refresh issue: ' + String(upgradeAutomationExecutionSummary.componentPerformanceMetricsError).replace(/[<>]/g, '') + '</td></tr>';
 				}
 			} else {
-				content += '<tr><td colspan="6">Performance metrics unavailable</td></tr>';
+				content += '<tr><td colspan="8">Performance metrics unavailable</td></tr>';
 			}
 			content += closeSection;
 			content += '<div class="lp-auto-section-gap"></div>';
@@ -15016,7 +15024,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-258', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-259', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),

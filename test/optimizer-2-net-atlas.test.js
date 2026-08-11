@@ -145,6 +145,34 @@ test('Optimizer 2 is immediately after LP Control and before Optimizer 1', () =>
 	assert.match(source.slice(optimizer1, source.indexOf('content += closeSection;', optimizer1)), /<b>Optimizer 1<br>Component<\/b>/);
 });
 
+test('Performance Metrics orders value periods and derives daily per-crew profit', () => {
+	const sectionStart = source.indexOf("openSection('lp-auto-performance-metrics')");
+	const sectionEnd = source.indexOf("content += closeSection;", sectionStart);
+	const section = source.slice(sectionStart, sectionEnd);
+	const headers = [
+		'<b>Performance Metrics<br>Component</b>',
+		'<b>Installed 14d</b>',
+		'<b>ATLAS Value 14d</b>',
+		'<b>Installed yday</b>',
+		'<b>ATLAS Value yday</b>',
+		'<b>GM Price</b>',
+		'<b>Net Profit / Crew / Day<br>(14d)</b>',
+		'<b>Net Profit / Crew / Day<br>(yday)</b>'
+	];
+	let previous = -1;
+	for (const header of headers) {
+		const position = section.indexOf(header);
+		assert.ok(position > previous, `missing or misordered header: ${header}`);
+		previous = position;
+	}
+	assert.match(section, /\(Number\(metric\.averageValue\) - Number\(metric\.priceGm\)\) \* 86400 \/ secondsPerUnit/);
+	assert.match(section, /\(Number\(metric\.averageValueYday\) - Number\(metric\.priceGm\)\) \* 86400 \/ secondsPerUnit/);
+	assert.match(section, /minimumFractionDigits: 1, maximumFractionDigits: 1/);
+	assert.match(section, /color:#80ff80/);
+	assert.match(section, /color:#ff8080/);
+	assert.match(section, /colspan="8"/);
+});
+
 test('Optimizer 2 panel displays daily net profit with O1-style active and warning colors', () => {
 	const sectionStart = source.indexOf("openSection('lp-auto-optimizer-2')");
 	const sectionEnd = source.indexOf("content += closeSection;", sectionStart);
