@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-260
+// @aephia-version 0.7.35-261
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -104,6 +104,12 @@
 	let upgradeAutomationGmPriceCache = { fetchedAt: 0, prices: {} };
 	const recoveredCraftingProcessSlots = new Map();
 	let recoverAllCraftingProcessesInFlight = null;
+	const CRAFT_WATCHDOG_INTERVAL_MS = 2 * 60 * 1000;
+	const CRAFT_WATCHDOG_RELOAD_COOLDOWN_MS = 15 * 60 * 1000;
+	const CRAFT_WATCHDOG_LAST_RELOAD_KEY = 'craftWatchdogLastReloadAt';
+	const craftPollRuntime = new Map();
+	const craftPollGeneration = new Map();
+	let craftTransactionInFlightCount = 0;
 	const settingsGmKey = 'globalSettings';
 	const UPGRADE_AUTOMATION_LOG_KEY = 'upgradeAutomationLog';
 	const UPGRADE_AUTOMATION_SCHEDULER_PENDING_PLAN_KEY = 'upgradeAutomationSchedulerPendingPlan';
@@ -15024,7 +15030,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-260', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-261', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -18085,9 +18091,76 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
         return waitMinutes * 60000;
 	}
 
+	function getCraftWatchdogAction(runtime, craft, nowMs) {
+		if (!Number(craft?.craftingId || 0)) return 'clear';
+		const expectedEndAt = Number(runtime?.expectedEndAt || 0);
+		if (!expectedEndAt || nowMs - expectedEndAt <= 2 * 60 * 1000) return 'none';
+		const lastProgressAt = Math.max(Number(runtime?.pollStartedAt || 0), Number(runtime?.pollCompletedAt || 0));
+		if (lastProgressAt && nowMs - lastProgressAt <= 2 * 60 * 1000) return 'none';
+		return Number(runtime?.recoveryAttempts || 0) > 0 ? 'reload' : 'reconcile';
+	}
 
-    async function startCraft(userCraft) {
+	function isCurrentCraftPoll(label, generation) {
+		return Number(craftPollGeneration.get(label) || 0) === Number(generation || 0);
+	}
+
+	async function runCraftTransaction(operation) {
+		craftTransactionInFlightCount++;
+		try { return await operation(); }
+		finally { craftTransactionInFlightCount = Math.max(0, craftTransactionInFlightCount - 1); }
+	}
+
+	async function craftOverdueWatchdog() {
+		if (!enableAssistant) return;
+		const now = Date.now();
+		try {
+			const craftWatchdogLastReloadAt = Number(await GM.getValue(CRAFT_WATCHDOG_LAST_RELOAD_KEY, 0)) || 0;
+			for (const [label, runtime] of craftPollRuntime) {
+				const craft = JSON.parse(await GM.getValue(label, '{}'));
+				const action = getCraftWatchdogAction(runtime, craft, now);
+				if (action === 'clear') {
+					runtime.expectedEndAt = 0;
+					runtime.recoveryAttempts = 0;
+					continue;
+				}
+				if (action === 'reconcile' && craftTransactionInFlightCount === 0) {
+					runtime.recoveryAttempts = 1;
+					const generation = Number(craftPollGeneration.get(label) || 0) + 1;
+					craftPollGeneration.set(label, generation);
+					cLog(1, `${FleetTimeStamp(label)} Craft watchdog reconciling overdue craftingId=${craft.craftingId} expectedEndAt=${new Date(runtime.expectedEndAt).toISOString()} stage=${runtime.stage || 'unknown'}`);
+					startCraft(craft, generation);
+					continue;
+				}
+				if (action === 'reload' && craftTransactionInFlightCount === 0 && now - craftWatchdogLastReloadAt >= CRAFT_WATCHDOG_RELOAD_COOLDOWN_MS) {
+					await GM.setValue(CRAFT_WATCHDOG_LAST_RELOAD_KEY, now);
+					cLog(1, `${FleetTimeStamp(label)} Craft watchdog reloading after targeted reconciliation failed craftingId=${craft.craftingId} expectedEndAt=${new Date(runtime.expectedEndAt).toISOString()} stage=${runtime.stage || 'unknown'}`);
+					window.location.reload();
+					return;
+				}
+			}
+		} catch (error) {
+			cLog(1, '[CRAFT][WATCHDOG] check failed', error);
+		}
+		if (enableAssistant) setTimeout(craftOverdueWatchdog, CRAFT_WATCHDOG_INTERVAL_MS);
+	}
+
+
+    async function startCraft(userCraft, requestedGeneration = null) {
         if (!enableAssistant) return;
+	const craftLabel = userCraft.label;
+	let generation = requestedGeneration;
+	if (generation === null) {
+		generation = Number(craftPollGeneration.get(craftLabel) || 0);
+		if (!generation) {
+			generation = 1;
+			craftPollGeneration.set(craftLabel, generation);
+		}
+	}
+	if (!isCurrentCraftPoll(craftLabel, generation)) return;
+	const runtime = craftPollRuntime.get(craftLabel) || { expectedEndAt: 0, pollStartedAt: 0, pollCompletedAt: 0, recoveryAttempts: 0, stage: 'starting' };
+	craftPollRuntime.set(craftLabel, runtime);
+	runtime.pollStartedAt = Date.now();
+	runtime.stage = 'loading-state';
 	let localTimeout = 60000;
         try {
             const EMPTY_CRAFTING_SPEED_PER_TIER = [0, .2, .275, .35, .425, .5, .5];
@@ -18108,7 +18181,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
             //if this job isn't active, we exit immediately and check every 10 seconds for an update, this saves at least 2 RPC requests. Also it prevents a error in getRecipe
             if(userCraft.state === 'Idle' && (!userCraft.item || !userCraft.coordinates || (!userCraft.amount && !userCraft.lpAutomationManaged))) {
-		setTimeout(() => { startCraft(userCraft); }, 10000);
+		if (isCurrentCraftPoll(craftLabel, generation)) {
+			runtime.pollCompletedAt = Date.now();
+			runtime.stage = 'idle';
+			setTimeout(() => { startCraft(userCraft, generation); }, 10000);
+		}
 		return;
             }
 
@@ -18178,6 +18255,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	                        },
 	                    },*/
 	                ]);
+	                if (!isCurrentCraftPoll(craftLabel, generation)) return;
 
 	                for (let craftingProcess of craftingProcesses) {
 	                    if (userCraft.craftingId && craftingProcess.account.craftingId.toNumber() == userCraft.craftingId) craftingProcessRunning = true;
@@ -18210,6 +18288,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	                            completedUpgradeProcesses.push({craftingProcess: craftingProcess.publicKey, craftingInstance: craftingInstance.publicKey, recipe: craftingProcess.account.recipe, status: craftingProcess.account.status, craftingId: craftingProcess.account.craftingId.toNumber()});
 	                        } else if (userCraft.craftingId && craftingProcess.account.craftingId.toNumber() == userCraft.craftingId) {
 	                            let upgradeTimeDiff = Math.max(craftingProcess.account.endTime.toNumber() - upgradeTime.starbaseTime, 0);
+	                            runtime.expectedEndAt = Date.now() + upgradeTimeDiff * 1000;
+	                            runtime.stage = 'waiting-for-upgrade-end';
 	                            let upgradeTimeStr = upgradeTime.resRemaining > 0 ? 'Upgrading [' + TimeToStr(new Date(Date.now() + upgradeTimeDiff * 1000)) + ']' : 'Paused [' + parseInt(upgradeTimeDiff/60) + 'm remaining]';
 	                            updateFleetState(userCraft, upgradeTimeStr);
 	                            await updateCraft(userCraft);
@@ -18238,7 +18318,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	                        cLog(1,`${FleetTimeStamp(userCraft.label)} Completing craft at [${targetX}, ${targetY}] for  ${craftRecipe.output.mint.toString()}`);
 	                        //updateFleetState(userCraft, 'Craft Completing');
 	                        updateFleetState(userCraft, 'Completing: ' + craftRecipe.name + (userCraft.item!=craftRecipe.name?' ('+userCraft.item+')':''));
-	                        await execCompleteCrafting(starbase, starbasePlayer, starbasePlayerCargoHoldsAndTokens, craftingProcess, userCraft);
+	                        if (!isCurrentCraftPoll(craftLabel, generation)) return;
+	                        runtime.stage = 'completing-craft';
+	                        await runCraftTransaction(() => execCompleteCrafting(starbase, starbasePlayer, starbasePlayerCargoHoldsAndTokens, craftingProcess, userCraft));
 	                        if (!userCraft.state.includes('ERROR')) {
 	                            if (userCraft.craftingId && craftingProcess.craftingId == userCraft.craftingId) {
 	                                userCraft.craftingId = 0;
@@ -18262,8 +18344,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	                        if (!upgradeTelemetryJob) {
 	                            cLog(1, `${FleetTimeStamp(userCraft.label)} No cached upgrade telemetry found for craftingId=${upgradeProcess.craftingId}`);
 	                        }
-	                        await execCompleteUpgrade(starbase, starbasePlayer, starbasePlayerCargoHoldsAndTokens, upgradeProcess, userCraft, upgradeTelemetryJob);
+	                        if (!isCurrentCraftPoll(craftLabel, generation)) return;
+	                        runtime.stage = 'completing-upgrade';
+	                        await runCraftTransaction(() => execCompleteUpgrade(starbase, starbasePlayer, starbasePlayerCargoHoldsAndTokens, upgradeProcess, userCraft, upgradeTelemetryJob));
 	                        if (!userCraft.state.includes('ERROR')) {
+	                            runtime.expectedEndAt = 0;
+	                            runtime.recoveryAttempts = 0;
 	                            if (userCraft.craftingId && upgradeProcess.craftingId == userCraft.craftingId) {
 	                                userCraft.craftingId = 0;
 					userCraft.errorCount = 0;
@@ -18368,7 +18454,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                     } else {
                         let activityInfo = activityType == 'Crafting' ? "Starting: " + targetRecipe.craftRecipe.name + (userCraft.item!=targetRecipe.craftRecipe.name?' ('+userCraft.item+')':'') : 'Upgrade Starting';
                         updateFleetState(userCraft, activityInfo);
-                        let result = await execStartCrafting(starbase, starbasePlayer, starbasePlayerCargoHoldsAndTokens, targetRecipe.craftRecipe, craftAmount, userCraft);
+                        if (!isCurrentCraftPoll(craftLabel, generation)) return;
+                        runtime.stage = 'starting-transaction';
+                        let result = await runCraftTransaction(() => execStartCrafting(starbase, starbasePlayer, starbasePlayerCargoHoldsAndTokens, targetRecipe.craftRecipe, craftAmount, userCraft));
                         if (!userCraft.state.includes('ERROR')) {
                             activityInfo = activityType == 'Crafting' ? "&#9874; " + targetRecipe.craftRecipe.name + (userCraft.item!=targetRecipe.craftRecipe.name?' ('+userCraft.item+')':'') : 'Upgrading';
                             let craftDuration = (targetRecipe.craftRecipe.duration * craftAmount) / userCraft.crew;
@@ -18458,7 +18546,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
         catch(error) {
             cLog(1,`${FleetTimeStamp(userCraft.label)} Uncaught crafting error`, error);
         }
-        setTimeout(() => { startCraft(userCraft); }, localTimeout);
+	if (!isCurrentCraftPoll(craftLabel, generation)) return;
+	runtime.pollCompletedAt = Date.now();
+	runtime.stage = 'scheduled';
+        setTimeout(() => { startCraft(userCraft, generation); }, localTimeout);
     }
 
 	async function startAssistant() {
@@ -18496,6 +18587,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 		setTimeout(fleetHealthCheck, 5000);
 		setTimeout(tokenCheck, 1000);
+		setTimeout(craftOverdueWatchdog, CRAFT_WATCHDOG_INTERVAL_MS);
 	}
 
 	async function tokenCheck() {
