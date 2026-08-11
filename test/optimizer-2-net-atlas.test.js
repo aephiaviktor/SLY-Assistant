@@ -32,9 +32,25 @@ test('Optimizer 2 is observational and ranks pools by NET ATLAS per second', () 
 	assert.match(source, /rgba\(80,170,255,0\.16\)/);
 });
 
-test('Optimizer 2 does not replace the scheduler plan input', () => {
-	assert.match(source, /getUpgradeAutomationScheduleState\(\{ neutralComponentPlan: finalPlan\.rows/);
-	assert.doesNotMatch(source, /getUpgradeAutomationScheduleState\(\{ neutralComponentPlan: optimizer2Plan\.rows/);
+test('atomic optimizer selector defaults to O2 and preserves explicit O1 fallback', () => {
+	assert.match(source, /function normalizeUpgradeAutomationOptimizerVersion\(/);
+	assert.match(source, /upgradeAutomationOptimizerVersion[^\n]+normalizeUpgradeAutomationOptimizerVersion/);
+	assert.match(source, /const selectedOptimizerPlan = selectUpgradeAutomationOptimizerPlan\(/);
+	assert.match(source, /getUpgradeAutomationScheduleState\(\{ neutralComponentPlan: selectedOptimizerPlan\.rows/);
+	assert.match(source, /optimizerVersion: selectedOptimizerPlan\.version/);
+});
+
+test('selected O2 rows become the complete execution contract', () => {
+	assert.match(source, /function selectUpgradeAutomationOptimizerPlan\(/);
+	assert.match(source, /finalCrew: Math\.max\(0, Math\.floor\(Number\(row\.optimizer2Crew/);
+	assert.match(source, /finalUpgradingHour: Math\.max\(0, Math\.floor\(Number\(row\.optimizer2UpgradingHour/);
+	assert.match(source, /neutralComponentPlan: selectedOptimizerPlan\.rows/);
+});
+
+test('Influx snapshots identify and serialize the selected optimizer plan', () => {
+	assert.match(source, /optimizer_version=\$\{influxFieldString\(executionSummary\.optimizerVersion/);
+	assert.match(source, /const componentPlanRows = executionSummary\.neutralComponentPlan \|\| \[\]/);
+	assert.match(source, /for \(const row of componentPlanRows\)/);
 });
 
 test('execution summary feeds Optimizer 2 from the current faction epoch ATLAS pool', () => {
