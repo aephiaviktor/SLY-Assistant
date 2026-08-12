@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-262
+// @aephia-version 0.7.35-263
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -15029,7 +15029,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-262', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-263', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -17933,10 +17933,17 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return candidates.filter((recipe, index, recipes) => recipe && recipe.publicKey && recipes.findIndex(item => item.publicKey.toString() === recipe.publicKey.toString()) === index);
 	}
 
-	async function findRecoverableCraftingProcess(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime) {
+	function isRecoverableStaleCompletedCraftingProcess(craftingProcess, craftTime, isCraftingRecipe) {
+		if (!isCraftingRecipe) return false;
+		const status = maybeBnToNumber(craftingProcess?.account?.status, craftingProcess?.account?.status);
+		const endTime = maybeBnToNumber(craftingProcess?.account?.endTime, craftingProcess?.account?.endTime);
+		return [2, 3].includes(status) && Number.isFinite(Number(endTime)) && Number(endTime) < Number(craftTime?.starbaseTime || 0);
+	}
+
+	async function findRecoverableCraftingProcess(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime, options = {}) {
+		const allowStaleCompletedCraft = options.allowStaleCompletedCraft === true;
 		const EMPTY_CRAFTING_SPEED_PER_TIER = [0, .2, .275, .35, .425, .5, .5];
 		const recipeCandidates = getCraftingRecoveryRecipeCandidates(targetRecipe, userCraft);
-		if (!recipeCandidates.length) return null;
 
 		const craftingInstances = await sageProgram.account.craftingInstance.all([
 			{
@@ -17959,10 +17966,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			]);
 
 			for (let craftingProcess of craftingProcesses) {
-				const recoveredRecipe = recipeCandidates.find(recipe => recipe.publicKey.toString() === craftingProcess.account.recipe.toString());
-				if (!recoveredRecipe) continue;
-
-				const isCraftingRecipe = craftRecipes.some(item => item.publicKey.toString() === recoveredRecipe.publicKey.toString());
+				const processRecipe = craftRecipes.concat(upgradeRecipes).find(recipe => recipe.publicKey.toString() === craftingProcess.account.recipe.toString());
+				if (!processRecipe) continue;
+				const isCraftingRecipe = craftRecipes.some(item => item.publicKey.toString() === processRecipe.publicKey.toString());
+				const recoveredRecipe = recipeCandidates.find(recipe => recipe.publicKey.toString() === processRecipe.publicKey.toString());
+				const staleCompletedCraft = allowStaleCompletedCraft && isRecoverableStaleCompletedCraftingProcess(craftingProcess, craftTime, isCraftingRecipe);
+				if (!recoveredRecipe && !staleCompletedCraft) continue;
 				const timeInfo = isCraftingRecipe ? craftTime : upgradeTime;
 				if (!timeInfo) continue;
 
@@ -17979,7 +17988,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						endTime: craftingProcess.account.endTime.toNumber(),
 						remainingSeconds: remainingSeconds,
 						isCraftingRecipe: isCraftingRecipe,
-						recipe: recoveredRecipe
+						recipe: recoveredRecipe || processRecipe
 					};
 				}
 			}
@@ -18010,8 +18019,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		};
 	}
 
-	async function recoverCraftingProcessForSlot(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime) {
-		const recoveredProcess = await findRecoverableCraftingProcess(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime);
+	async function recoverCraftingProcessForSlot(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime, options = {}) {
+		const recoveredProcess = await findRecoverableCraftingProcess(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime, options);
 		if (!recoveredProcess) return null;
 
 		userCraft.craftingId = recoveredProcess.craftingId;
@@ -18053,7 +18062,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					starbasePlayer = starbasePlayer.publicKey;
 					const starbasePlayerCargoHoldsAndTokens = await getStarbasePlayerCargoHolds(starbasePlayer);
 					const targetRecipe = getTargetRecipe(starbasePlayerCargoHoldsAndTokens, userCraft, Number(userCraft.amount), (userCraft.special ? userCraft.special : ''));
-					const recoveredProcess = await recoverCraftingProcessForSlot(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime);
+					const recoveredProcess = await recoverCraftingProcessForSlot(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime, { allowStaleCompletedCraft: true });
 					if (recoveredProcess) recoveredCount++;
 				} catch (error) {
 					cLog(1, `${FleetTimeStamp(label)} Failed all-slot crafting recovery triggered by ${triggerLabel || 'unknown'}`, error);
