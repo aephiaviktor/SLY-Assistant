@@ -9343,6 +9343,158 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return `cargo_cost_source_event_v1,${tags.join(',')} ${fields.join(',')} ${formatSlyaInfluxTimestamp(event.timestampMs)}`;
 	}
 
+	// Immutable break-even evidence is built only from the transaction result
+	// already fetched by txSignAndSend.  The submitted wrapper may describe
+	// exact inputs/outputs, but it is never allowed to supply the signature,
+	// slot, timestamp, or instruction coordinate.
+	function normalizeSlyaAccountingExact(value, allowZero = true) {
+		if (typeof value !== 'string' || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value.trim())) return null;
+		const text = value.trim();
+		if (!allowZero && /^0(?:\.0+)?$/.test(text)) return null;
+		return text;
+	}
+
+	function normalizeSlyaAccountingEntries(entries) {
+		if (!Array.isArray(entries)) return null;
+		const normalized = entries.map(entry => {
+			if (!entry || typeof entry !== 'object') return null;
+			const quantity = normalizeSlyaAccountingExact(entry.quantity);
+			const asset = String(entry.asset || '').trim();
+			if (!asset || quantity === null) return null;
+			return {
+				asset, mint: String(entry.mint || '').trim(), quantity,
+				unit: String(entry.unit || '').trim(), location: String(entry.location || '').trim()
+			};
+		});
+		return normalized.some(entry => !entry) ? null : normalized;
+	}
+
+	function normalizeSlyaAccountingMoney(value) {
+		if (value === undefined || value === null) return '0';
+		if (typeof value === 'string') return normalizeSlyaAccountingExact(value) || null;
+		if (!value || typeof value !== 'object') return null;
+		const normalized = {};
+		for (const key of Object.keys(value).sort()) {
+			const amount = normalizeSlyaAccountingExact(value[key]);
+			if (amount === null) return null;
+			normalized[key] = amount;
+		}
+		return normalized;
+	}
+
+	function deriveSlyaAccountingTokenDeltas(txResult) {
+		const before = new Map((txResult?.meta?.preTokenBalances || []).map((entry) => [`${entry.accountIndex}:${entry.mint}`, entry]));
+		const after = new Map((txResult?.meta?.postTokenBalances || []).map((entry) => [`${entry.accountIndex}:${entry.mint}`, entry]));
+		const inputs = [], outputs = [];
+		for (const key of new Set([...before.keys(), ...after.keys()])) {
+			const prior = BigInt(String(before.get(key)?.uiTokenAmount?.amount || '0'));
+			const next = BigInt(String(after.get(key)?.uiTokenAmount?.amount || '0'));
+			const delta = next - prior;
+			if (delta === 0n) continue;
+			const entry = after.get(key) || before.get(key);
+			const decimals = Number(entry?.uiTokenAmount?.decimals || 0);
+			const magnitude = delta < 0n ? -delta : delta;
+			const digits = magnitude.toString().padStart(decimals + 1, '0');
+			const quantity = decimals ? `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}`.replace(/0+$/, '').replace(/\.$/, '') : digits;
+			const target = { asset: String(entry?.mint || '').trim(), mint: String(entry?.mint || '').trim(), quantity: quantity || '0', unit: 'token' };
+			if (target.asset) (delta < 0n ? inputs : outputs).push(target);
+		}
+		return { inputs, outputs };
+	}
+
+	function annotateSlyaAccountingOperation(wrapper, evidenceType, details = {}) {
+		if (!wrapper || typeof wrapper !== 'object') return wrapper;
+		wrapper.slyaAccountingEvidence = {
+			schemaVersion: 1, evidenceType: String(evidenceType || '').trim().toLowerCase(),
+			inputs: Array.isArray(details.inputs) ? details.inputs : [],
+			outputs: Array.isArray(details.outputs) ? details.outputs : [],
+			directFees: details.directFees === undefined ? '0' : details.directFees,
+			transactionCosts: details.transactionCosts === undefined ? null : details.transactionCosts,
+			lineage: details.lineage && typeof details.lineage === 'object' ? details.lineage : {},
+		};
+		return wrapper;
+	}
+
+	function getSlyaAccountingEvidenceType(opName) {
+		const value = String(opName || '').toUpperCase();
+		if (value.includes('SCAN')) return 'scanning';
+		if (value.includes('MIN')) return 'mining';
+		if (value.includes('CRAFT')) return 'crafting';
+		if (value.includes('UPGRAD')) return 'upgrading';
+		return '';
+	}
+
+	async function buildConfirmedSlyaAccountingEvidence(context = {}) {
+		const metadata = context?.wrapper?.slyaAccountingEvidence;
+		const txResult = context?.txResult;
+		const evidenceType = String(metadata?.evidenceType || '').trim().toLowerCase();
+		const signature = String(txResult?.slyaTxHash || txResult?.transaction?.signatures?.[0] || '').trim();
+		const outerInstructionIndex = Number(context?.outerInstructionIndex);
+		const slot = Number(txResult?.slot), blockTime = Number(txResult?.blockTime);
+		const fleetAccount = String(context?.fleet?.publicKey?.toString?.() || context?.fleetAccount || '').trim();
+		const profile = String(metadata?.profile || context?.profile || (typeof userProfileAcct !== 'undefined' ? userProfileAcct?.toString?.() : '') || '').trim();
+		const faction = String(metadata?.faction || getUpgradeAutomationInfluxFactionTag() || '').trim();
+		if (!metadata || !['scanning', 'mining', 'crafting', 'upgrading'].includes(evidenceType) || !signature || !fleetAccount || !profile || !faction || !Number.isInteger(outerInstructionIndex) || outerInstructionIndex < 0 || !Number.isInteger(slot) || slot < 0 || !Number.isInteger(blockTime) || blockTime <= 0) return null;
+		const derivedDeltas = deriveSlyaAccountingTokenDeltas(txResult);
+		const inputs = normalizeSlyaAccountingEntries(metadata.inputs?.length ? metadata.inputs : derivedDeltas.inputs);
+		const outputs = normalizeSlyaAccountingEntries(metadata.outputs?.length ? metadata.outputs : derivedDeltas.outputs);
+		const directFees = normalizeSlyaAccountingMoney(metadata.directFees);
+		const transactionCosts = metadata.transactionCosts === null ? { solLamports: String(Math.max(0, Math.round(Number(txResult?.slyaTxFeeLamports ?? txResult?.meta?.fee ?? 0)))) } : normalizeSlyaAccountingMoney(metadata.transactionCosts);
+		if (!inputs || !outputs || directFees === null || transactionCosts === null) return null;
+		const programId = getCargoTelemetryProgramIdentity(txResult, (txResult?.transaction?.message?.compiledInstructions || txResult?.transaction?.message?.instructions || [])[outerInstructionIndex]);
+		if (!programId) return null;
+		const sourceIdentity = `${evidenceType}:${signature}:${outerInstructionIndex}`;
+		const eventId = `slya-accounting:v1:${sourceIdentity}`;
+		const payload = {
+			schemaVersion: 1, evidenceType, eventId, signature, outerInstructionIndex, programId,
+			slot, blockTime, faction, profile, fleetAccount, fleetLabel: String(context?.fleet?.label || ''),
+			inputs, outputs, directFees, transactionCosts,
+			lineage: metadata.lineage || {}, sourceProvenance: 'confirmed_transaction'
+		};
+		return { ...payload, payloadHash: await sha256CargoTelemetryText(canonicalizeCargoTelemetryEvidencePayload(payload)) };
+	}
+
+	function buildSlyaAccountingEvidenceLine(evidence) {
+		if (!evidence?.eventId || !evidence?.payloadHash || !Number.isInteger(Number(evidence.blockTime)) || Number(evidence.blockTime) <= 0) return '';
+		const tags = `eventId=${influxEscape(evidence.eventId)},evidenceType=${influxEscape(evidence.evidenceType)},schemaVersion=1`;
+		const fields = [
+			`payloadHash=${optimizationInfluxString(evidence.payloadHash)}`,
+			`signature=${optimizationInfluxString(evidence.signature)}`,
+			`outerInstructionIndex=${Number(evidence.outerInstructionIndex)}i`,
+			`slot=${Number(evidence.slot)}i`, `blockTime=${Number(evidence.blockTime)}i`,
+			`faction=${optimizationInfluxString(evidence.faction)}`, `profile=${optimizationInfluxString(evidence.profile)}`,
+			`fleetAccount=${optimizationInfluxString(evidence.fleetAccount)}`, `fleetLabel=${optimizationInfluxString(evidence.fleetLabel)}`,
+			`inputs=${optimizationInfluxString(JSON.stringify(evidence.inputs))}`, `outputs=${optimizationInfluxString(JSON.stringify(evidence.outputs))}`,
+			`directFees=${optimizationInfluxString(JSON.stringify(evidence.directFees))}`, `transactionCosts=${optimizationInfluxString(JSON.stringify(evidence.transactionCosts))}`,
+			`lineage=${optimizationInfluxString(JSON.stringify(evidence.lineage))}`, `sourceProvenance=${optimizationInfluxString(evidence.sourceProvenance)}`
+		];
+		return `slya_accounting_evidence_v1,${tags} ${fields.join(',')} ${formatSlyaInfluxTimestamp(Number(evidence.blockTime) * 1000)}`;
+	}
+
+	async function applyConfirmedSlyaAccountingEvidence(ix, fleet, txResult, opName = '') {
+		if (!txResult || txResult.meta?.err || !getSlyaAccountingEvidenceType(opName)) return 0;
+		const wrappers = (Array.isArray(ix) ? ix : [ix]).filter(Boolean);
+		const usedIndexes = new Set(); let queued = 0;
+		for (const wrapper of wrappers) {
+			if (!wrapper.slyaAccountingEvidence) annotateSlyaAccountingOperation(wrapper, getSlyaAccountingEvidenceType(opName));
+			if (!wrapper.slyaAccountingEvidence) continue;
+			const outerInstructionIndex = resolveConfirmedCargoOuterInstructionIndex(txResult, wrapper, usedIndexes);
+			if (outerInstructionIndex < 0) continue;
+			usedIndexes.add(outerInstructionIndex);
+			const evidence = await buildConfirmedSlyaAccountingEvidence({ wrapper, fleet, txResult, outerInstructionIndex });
+			const line = buildSlyaAccountingEvidenceLine(evidence);
+			if (!line) continue;
+			const outbox = await loadSlyaCostSourceOutbox();
+			const existing = outbox.get(evidence.eventId);
+			if (existing && existing.line !== line) { countSlyaCostSourceMissing('accounting_evidence_conflict'); continue; }
+			if (existing) { slyaCostSourceCounters.deduplicated += 1; continue; }
+			outbox.set(evidence.eventId, { line, queuedAtMs: Date.now(), retryAfterMs: 0, attemptCount: 0 });
+			slyaCostSourceCounters.eligible += 1; slyaCostSourceCounters.queued += 1; queued += 1;
+			await persistSlyaCostSourceOutbox();
+		}
+		return queued;
+	}
+
 	async function queueUpgradeClaimAttemptEvent(ledger) {
 		const normalized = normalizeUpgradeClaimAttemptLedger(ledger);
 		const line = buildUpgradeClaimAttemptEventLine(normalized);
@@ -10173,6 +10325,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					txResult.slyaTxHash = txHash || '';
 					txResult.slyaTxDurationMs = Date.now() - macroOpStart;
 					await queueSlyaTransactionFeeSourceEvents(txResult, fleet, fleet?.assignment || '');
+					try { await applyConfirmedSlyaAccountingEvidence(ix, fleet, txResult, opName); }
+					catch(error) { cLog(1, `${FleetTimeStamp(fleetName)} confirmed accounting evidence failed closed`, error); }
 				}
 				cLog(4, `${FleetTimeStamp(fleetName)} txResult`, txResult);
 				cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> CONFIRM ✅ ${confirmationTimeStr}`);
