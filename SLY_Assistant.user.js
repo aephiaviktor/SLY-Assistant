@@ -9405,7 +9405,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	function annotateSlyaAccountingOperation(wrapper, evidenceType, details = {}) {
 		if (!wrapper || typeof wrapper !== 'object') return wrapper;
 		wrapper.slyaAccountingEvidence = {
-			schemaVersion: 1, evidenceType: String(evidenceType || '').trim().toLowerCase(),
+			schemaVersion: 1, evidenceType: String(evidenceType || '').trim().toLowerCase(), operationId: String(details.operationId || '').trim(),
 			inputs: Array.isArray(details.inputs) ? details.inputs : [],
 			outputs: Array.isArray(details.outputs) ? details.outputs : [],
 			directFees: details.directFees === undefined ? '0' : details.directFees,
@@ -9422,6 +9422,28 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		if (value.includes('CRAFT')) return 'crafting';
 		if (value.includes('UPGRAD')) return 'upgrading';
 		return '';
+	}
+
+	function selectSlyaAccountingEvidenceCandidates(wrappers, evidenceType) {
+		const annotated = wrappers.filter(wrapper => wrapper?.slyaAccountingEvidence && typeof wrapper.slyaAccountingEvidence === 'object');
+		if (annotated.length) {
+			if (annotated.length > 1) {
+				const operationIds = annotated.map(wrapper => String(wrapper.slyaAccountingEvidence.operationId || '').trim());
+				if (operationIds.some(operationId => !operationId) || new Set(operationIds).size !== operationIds.length) return [];
+			}
+			return annotated.map(wrapper => ({ wrapper, transactionLevel: false }));
+		}
+		const anchor = wrappers[0];
+		if (!anchor) return [];
+		// Without explicit per-operation metadata, the confirmed token delta is
+		// transaction-level evidence.  Pick one deterministic wrapper only; do
+		// not attach the same aggregate to every submitted instruction.
+		return [{
+			wrapper: { ...anchor, slyaAccountingEvidence: {
+				schemaVersion: 1, evidenceType, operationId: '', inputs: [], outputs: [], directFees: '0', transactionCosts: null, lineage: {}
+			} },
+			transactionLevel: true,
+		}];
 	}
 
 	async function buildConfirmedSlyaAccountingEvidence(context = {}) {
@@ -9443,12 +9465,17 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		if (!inputs || !outputs || directFees === null || transactionCosts === null) return null;
 		const programId = getCargoTelemetryProgramIdentity(txResult, (txResult?.transaction?.message?.compiledInstructions || txResult?.transaction?.message?.instructions || [])[outerInstructionIndex]);
 		if (!programId) return null;
-		const sourceIdentity = `${evidenceType}:${signature}:${outerInstructionIndex}`;
+		const operationId = String(metadata.operationId || '').trim();
+		const sourceIdentity = context?.transactionLevel
+			? `${evidenceType}:${signature}:tx`
+			: operationId
+				? `${evidenceType}:${signature}:op:${operationId}`
+			: `${evidenceType}:${signature}:${outerInstructionIndex}`;
 		const eventId = `slya-accounting:v1:${sourceIdentity}`;
 		const payload = {
 			schemaVersion: 1, evidenceType, eventId, signature, outerInstructionIndex, programId,
 			slot, blockTime, faction, profile, fleetAccount, fleetLabel: String(context?.fleet?.label || ''),
-			inputs, outputs, directFees, transactionCosts,
+			inputs, outputs, directFees, transactionCosts, operationId,
 			lineage: metadata.lineage || {}, sourceProvenance: 'confirmed_transaction'
 		};
 		return { ...payload, payloadHash: await sha256CargoTelemetryText(canonicalizeCargoTelemetryEvidencePayload(payload)) };
@@ -9460,6 +9487,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fields = [
 			`payloadHash=${optimizationInfluxString(evidence.payloadHash)}`,
 			`signature=${optimizationInfluxString(evidence.signature)}`,
+			`operationId=${optimizationInfluxString(evidence.operationId)}`,
+			`programId=${optimizationInfluxString(evidence.programId)}`,
 			`outerInstructionIndex=${Number(evidence.outerInstructionIndex)}i`,
 			`slot=${Number(evidence.slot)}i`, `blockTime=${Number(evidence.blockTime)}i`,
 			`faction=${optimizationInfluxString(evidence.faction)}`, `profile=${optimizationInfluxString(evidence.profile)}`,
@@ -9474,16 +9503,23 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	async function applyConfirmedSlyaAccountingEvidence(ix, fleet, txResult, opName = '') {
 		if (!txResult || txResult.meta?.err || !getSlyaAccountingEvidenceType(opName)) return 0;
 		const wrappers = (Array.isArray(ix) ? ix : [ix]).filter(Boolean);
-		const usedIndexes = new Set(); let queued = 0;
-		for (const wrapper of wrappers) {
-			if (!wrapper.slyaAccountingEvidence) annotateSlyaAccountingOperation(wrapper, getSlyaAccountingEvidenceType(opName));
-			if (!wrapper.slyaAccountingEvidence) continue;
+		const candidates = selectSlyaAccountingEvidenceCandidates(wrappers, getSlyaAccountingEvidenceType(opName));
+		const usedIndexes = new Set(); const submittedLines = new Map(); let queued = 0;
+		for (const candidate of candidates) {
+			const wrapper = candidate.wrapper;
 			const outerInstructionIndex = resolveConfirmedCargoOuterInstructionIndex(txResult, wrapper, usedIndexes);
 			if (outerInstructionIndex < 0) continue;
 			usedIndexes.add(outerInstructionIndex);
-			const evidence = await buildConfirmedSlyaAccountingEvidence({ wrapper, fleet, txResult, outerInstructionIndex });
+			const evidence = await buildConfirmedSlyaAccountingEvidence({ wrapper, fleet, txResult, outerInstructionIndex, transactionLevel: candidate.transactionLevel });
 			const line = buildSlyaAccountingEvidenceLine(evidence);
 			if (!line) continue;
+			const submitted = submittedLines.get(evidence.eventId);
+			if (submitted) {
+				if (submitted !== line) countSlyaCostSourceMissing('accounting_evidence_conflict');
+				else slyaCostSourceCounters.deduplicated += 1;
+				continue;
+			}
+			submittedLines.set(evidence.eventId, line);
 			const outbox = await loadSlyaCostSourceOutbox();
 			const existing = outbox.get(evidence.eventId);
 			if (existing && existing.line !== line) { countSlyaCostSourceMissing('accounting_evidence_conflict'); continue; }
