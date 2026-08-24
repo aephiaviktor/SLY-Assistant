@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-263
+// @aephia-version 0.7.35-264
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -6112,17 +6112,104 @@
 		}
 	}
 
-	async function applyConfirmedCargoTelemetry(ix, fleet) {
-		if(!globalSettings.influxURL.length || !fleet) return;
+	function getCargoTelemetryInstructionBytes(data) {
+		if(data instanceof Uint8Array) return data;
+		if(ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+		if(Array.isArray(data)) return Uint8Array.from(data);
+		if(typeof data === 'string') { try { return Uint8Array.from(bs58.decode(data)); } catch(error) { return new Uint8Array(); } }
+		return new Uint8Array();
+	}
+
+	function getCargoTelemetryProgramIdentity(txResult, instruction) {
+		const message = txResult?.transaction?.message;
+		const programIndex = Number(instruction?.programIdIndex);
+		const key = Number.isInteger(programIndex) ? message?.staticAccountKeys?.[programIndex] : null;
+		return String(key?.toBase58?.() || key?.toString?.() || instruction?.programId?.toBase58?.() || instruction?.programId?.toString?.() || '');
+	}
+
+	function resolveConfirmedCargoOuterInstructionIndex(txResult, wrapper, usedIndexes = new Set()) {
+		const confirmed = txResult?.transaction?.message?.compiledInstructions || txResult?.transaction?.message?.instructions || [];
+		const targetData = getCargoTelemetryInstructionBytes(wrapper?.instruction?.data);
+		const targetProgram = String(wrapper?.instruction?.programId?.toBase58?.() || wrapper?.instruction?.programId?.toString?.() || '');
+		for(let index = 0; index < confirmed.length; index++) {
+			if(usedIndexes.has(index)) continue;
+			const candidateData = getCargoTelemetryInstructionBytes(confirmed[index]?.data);
+			if(candidateData.length !== targetData.length || candidateData.some((value, offset) => value !== targetData[offset])) continue;
+			const candidateProgram = getCargoTelemetryProgramIdentity(txResult, confirmed[index]);
+			if(targetProgram && candidateProgram !== targetProgram) continue;
+			return index;
+		}
+		return -1;
+	}
+
+	function decodeConfirmedCargoWithdrawRawAmount(txResult, outerInstructionIndex) {
+		const instruction = (txResult?.transaction?.message?.compiledInstructions || txResult?.transaction?.message?.instructions || [])[outerInstructionIndex];
+		const data = getCargoTelemetryInstructionBytes(instruction?.data);
+		if(data.length < 16) return '';
+		let amount = 0n;
+		for(let offset = 15; offset >= 8; offset--) amount = (amount << 8n) + BigInt(data[offset]);
+		return amount.toString();
+	}
+
+	function formatCargoTelemetryDecimalAmount(rawAmount, decimals) {
+		const raw = BigInt(String(rawAmount));
+		const places = Math.max(0, Math.floor(Number(decimals)));
+		if(places === 0) return raw.toString();
+		const negative = raw < 0n;
+		const digits = (negative ? -raw : raw).toString().padStart(places + 1, '0');
+		const whole = digits.slice(0, -places);
+		const fraction = digits.slice(-places).replace(/0+$/, '');
+		return `${negative ? '-' : ''}${whole}${fraction ? `.${fraction}` : ''}`;
+	}
+
+	function canonicalizeCargoTelemetryEvidencePayload(value) {
+		if(Array.isArray(value)) return `[${value.map(canonicalizeCargoTelemetryEvidencePayload).join(',')}]`;
+		if(value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalizeCargoTelemetryEvidencePayload(value[key])}`).join(',')}}`;
+		return JSON.stringify(value);
+	}
+
+	async function sha256CargoTelemetryText(value) {
+		const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(value)));
+		return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+	}
+
+	async function buildConfirmedCargoDeliveryEvidence(context) {
+		const signature = String(context?.txResult?.slyaTxHash || context?.txResult?.transaction?.signatures?.[0] || '');
+		const outerInstructionIndex = Number(context?.outerInstructionIndex);
+		const rawAmount = decodeConfirmedCargoWithdrawRawAmount(context?.txResult, outerInstructionIndex);
+		const mintDecimals = Number(context?.mintDecimals);
+		const slot = Number(context?.txResult?.slot), blockTime = Number(context?.txResult?.blockTime);
+		if(!signature || !Number.isInteger(outerInstructionIndex) || outerInstructionIndex < 0 || !/^\d+$/.test(rawAmount) || !Number.isInteger(mintDecimals) || mintDecimals < 0 || !Number.isInteger(slot) || slot < 0 || !Number.isInteger(blockTime) || blockTime <= 0) return null;
+		const programId = getCargoTelemetryProgramIdentity(context?.txResult, (context?.txResult?.transaction?.message?.compiledInstructions || [])[outerInstructionIndex]) || String(context?.wrapper?.instruction?.programId || '');
+		if(!programId) return null;
+		const sourceIdentity = `${programId}:${signature}:${outerInstructionIndex}:unload`;
+		const eventId = `cargo-delivery:v1:${sourceIdentity}`;
+		const payload = {
+			schemaVersion: 1, movementType: 'unload', signature, outerInstructionIndex,
+			programId, slot, blockTime,
+			rawAmount, mintDecimals, decimalAmount: formatCargoTelemetryDecimalAmount(rawAmount, mintDecimals),
+			mint: String(context.mint || ''), fleetAccount: String(context.fleetAccount || ''), fleetLabel: String(context.fleetLabel || ''),
+			factionProfile: String(context.factionProfile || ''), profileAccount: String(context.profileAccount || ''), route: String(context.route || ''), cycleId: String(context.cycleId || ''),
+			allocationId: String(context.allocationId || `${context.cycleId || ''}:${eventId}`), eventId
+		};
+		return { ...payload, payloadHash: await sha256CargoTelemetryText(canonicalizeCargoTelemetryEvidencePayload(payload)) };
+	}
+
+	async function applyConfirmedCargoTelemetry(ix, fleet, txResult) {
+		if(!globalSettings.influxURL.length || !fleet || !txResult) return;
 		const instructions = Array.isArray(ix) ? ix : [ix];
-		const operations = instructions.map(item => item?.slyaCargoTelemetry).filter(Boolean);
+		const operations = instructions.map((wrapper, sourcePosition) => ({ wrapper, sourcePosition, operation: wrapper?.slyaCargoTelemetry })).filter(item => item.operation);
 		if(!operations.length) return;
 		const fleetSavedData = await GM.getValue(fleet.publicKey.toString(), '{}');
 		const fleetParsedData = JSON.parse(fleetSavedData);
-		for(const operation of operations) {
+		const usedIndexes = new Set();
+		for(const item of operations) {
+			const outerInstructionIndex = resolveConfirmedCargoOuterInstructionIndex(txResult, item.wrapper, usedIndexes);
+			if(outerInstructionIndex >= 0) usedIndexes.add(outerInstructionIndex);
+			const operation = { ...item.operation, sourcePosition: item.sourcePosition, wrapper: item.wrapper, txResult, outerInstructionIndex };
 			if(operation.kind === 'load') {
 				await addFleetTelemetryCargoLoad(fleet, fleetParsedData, operation);
-			} else if(operation.kind === 'unload') {
+			} else if(operation.kind === 'unload' && outerInstructionIndex >= 0) {
 				await addFleetTelemetryCargoDelivery(fleet, fleetParsedData, operation);
 			}
 		}
@@ -6228,6 +6315,12 @@
 		if(!delivery || !(Number(delivery.amount || 0) > 0) || delivery.loadType !== 'cargo_out') return null;
 		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
 		const mint = String(delivery.mint || '');
+		const route = `${cycle.homeCoord || 'unknown'}->${delivery.sectorX},${delivery.sectorY}`;
+		const deliveryEvidence = delivery.txResult ? await buildConfirmedCargoDeliveryEvidence({
+			txResult: delivery.txResult, wrapper: delivery.wrapper, outerInstructionIndex: delivery.outerInstructionIndex,
+			mint, mintDecimals: delivery.mintDecimals, fleetAccount: fleet.publicKey.toString(), fleetLabel: fleet.label,
+			factionProfile: getUpgradeAutomationInfluxFactionTag(), profileAccount: String(userProfileAcct || ''), route, cycleId: cycle.id
+		}) : null;
 		let remaining = Math.max(0, Number(delivery.amount || 0));
 		const cargoSize = getCargoTelemetrySizeByMint(mint);
 		const matchingLots = cycle.lots.filter(lot => lot.mint === mint);
@@ -6244,7 +6337,7 @@
 				amount, cargoSize, cargoVolume: amount * cargoSize, starbase: delivery.starbase || 'unknown', sectorX: delivery.sectorX,
 				sectorY: delivery.sectorY, deliveredAt: Date.now(), loadedFuel: Number(lot.loadedFuel || 0) * ratio,
 				loadedTxCostSol: Number(lot.loadedTxCostSol || 0) * ratio, loadedTxFeeLamports: Number(lot.loadedTxFeeLamports || 0) * ratio,
-				loadedLegCount: Number(lot.loadedLegCount || 0) };
+				loadedLegCount: Number(lot.loadedLegCount || 0), deliveryEvidence };
 			cycle.deliveries.push(row);
 			cycle.pendingReloads.push({ deliveryId: row.id, mint, rssName: row.rssName, starbase: row.starbase, originStarbase: row.originStarbase,
 				remainingAmount: amount, originalAmount: amount, cargoSize, loadedFuel: row.loadedFuel, loadedTxCostSol: row.loadedTxCostSol,
@@ -6255,7 +6348,7 @@
 		if(remaining > 0) {
 			const row = { id: `${cycle.id}:delivery:${Date.now()}:${cycle.deliveries.length}`, mint, rssName: delivery.rssName || getCargoTelemetryNameByMint(mint),
 				originStarbase: 'unknown', amount: remaining, cargoSize, cargoVolume: remaining * cargoSize, starbase: delivery.starbase || 'unknown',
-				sectorX: delivery.sectorX, sectorY: delivery.sectorY, deliveredAt: Date.now(), loadedFuel: 0, loadedTxCostSol: 0, loadedTxFeeLamports: 0, loadedLegCount: 0 };
+				sectorX: delivery.sectorX, sectorY: delivery.sectorY, deliveredAt: Date.now(), loadedFuel: 0, loadedTxCostSol: 0, loadedTxFeeLamports: 0, loadedLegCount: 0, deliveryEvidence };
 			cycle.deliveries.push(row);
 		}
 		cycle.lots = cycle.lots.filter(lot => Number(lot.remainingAmount || 0) > 1e-9);
@@ -6300,7 +6393,7 @@
 		const allocationLines = deliveries.map((item, index) => {
 			const loadedFuel = Number(item.loadedFuel || 0), loadedTx = Number(item.loadedTxCostSol || 0), loadedFees = Number(item.loadedTxFeeLamports || 0);
 			return `cargo_cost_allocation,faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(fleet.label)},assignment=${influxEscape(fleetParsedData.assignment || 'unknown')},homeStarbase=${influxEscape(homeStarbase || 'unknown')},originStarbase=${influxEscape(item.originStarbase || 'unknown')},deliveryStarbase=${influxEscape(item.starbase || 'unknown')},rss=${influxEscape(item.rssName || 'unknown')},cycleId=${influxEscape(cycle.id || 'unknown')},allocationIndex=${index}` +
-				` amount=${Number(item.amount || 0)},cargoVolume=${Number(item.cargoVolume || 0)},assetMint=${influxFieldString(item.mint || '')},loadedLegFuel=${loadedFuel},loadedLegTxCostSol=${loadedTx},loadedLegTxFeeLamports=${Math.round(loadedFees)}i,emptyLegFuelOverhead=${overheadFuel[index]},emptyLegTxCostSolOverhead=${overheadTx[index]},emptyLegTxFeeLamportsOverhead=${Math.round(overheadFees[index])}i,allocatedFuel=${allocatedFuel[index]},allocatedTxCostSol=${allocatedTx[index]},allocatedTxFeeLamports=${Math.round(allocatedFees[index])}i,loadedLegCount=${Math.round(Number(item.loadedLegCount || 0))}i,cycleBurnedFuel=${cycle.burnedFuel},cycleTxCostSol=${cycle.txCostSol},cycleTxFeeLamports=${Math.round(cycle.txFeeLamports)}i,cycleEmptyFuel=${cycle.emptyBurnedFuel},cycleEmptyTxCostSol=${cycle.emptyTxCostSol},cycleMovementCount=${cycle.movementCount}i,cycleDeliveredVolume=${totalVolume},cycleDeliveryCount=${deliveries.length}i,deliveryIndex=${index}i`;
+				` amount=${Number(item.amount || 0)},cargoVolume=${Number(item.cargoVolume || 0)},assetMint=${influxFieldString(item.mint || '')},deliveryEvidenceSchemaVersion=${Math.round(Number(item.deliveryEvidence?.schemaVersion || 0))}i,deliveryMovementType=${influxFieldString(item.deliveryEvidence?.movementType || '')},deliverySignature=${influxFieldString(item.deliveryEvidence?.signature || '')},deliveryOuterInstructionIndex=${Math.round(Number(item.deliveryEvidence?.outerInstructionIndex ?? -1))}i,deliveryConfirmedSlot=${Math.round(Number(item.deliveryEvidence?.slot || 0))}i,deliveryConfirmedBlockTime=${Math.round(Number(item.deliveryEvidence?.blockTime || 0))}i,deliveryRawAmount=${influxFieldString(item.deliveryEvidence?.rawAmount || '')},deliveryMintDecimals=${Math.round(Number(item.deliveryEvidence?.mintDecimals || 0))}i,deliveryDecimalAmount=${influxFieldString(item.deliveryEvidence?.decimalAmount || '')},deliveryEventId=${influxFieldString(item.deliveryEvidence?.eventId || '')},deliveryEvidencePayloadHash=${influxFieldString(item.deliveryEvidence?.payloadHash || '')},deliveryProgramId=${influxFieldString(item.deliveryEvidence?.programId || '')},deliveryFleetAccount=${influxFieldString(item.deliveryEvidence?.fleetAccount || '')},deliveryFactionProfile=${influxFieldString(item.deliveryEvidence?.factionProfile || '')},deliveryProfileAccount=${influxFieldString(item.deliveryEvidence?.profileAccount || '')},deliveryRoute=${influxFieldString(item.deliveryEvidence?.route || '')},deliveryAllocationId=${influxFieldString(item.deliveryEvidence?.allocationId || '')},loadedLegFuel=${loadedFuel},loadedLegTxCostSol=${loadedTx},loadedLegTxFeeLamports=${Math.round(loadedFees)}i,emptyLegFuelOverhead=${overheadFuel[index]},emptyLegTxCostSolOverhead=${overheadTx[index]},emptyLegTxFeeLamportsOverhead=${Math.round(overheadFees[index])}i,allocatedFuel=${allocatedFuel[index]},allocatedTxCostSol=${allocatedTx[index]},allocatedTxFeeLamports=${Math.round(allocatedFees[index])}i,loadedLegCount=${Math.round(Number(item.loadedLegCount || 0))}i,cycleBurnedFuel=${cycle.burnedFuel},cycleTxCostSol=${cycle.txCostSol},cycleTxFeeLamports=${Math.round(cycle.txFeeLamports)}i,cycleEmptyFuel=${cycle.emptyBurnedFuel},cycleEmptyTxCostSol=${cycle.emptyTxCostSol},cycleMovementCount=${cycle.movementCount}i,cycleDeliveredVolume=${totalVolume},cycleDeliveryCount=${deliveries.length}i,deliveryIndex=${index}i`;
 		});
 		const completionLine = `cargo_cycle_completed,faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(fleet.label)},assignment=${influxEscape(fleetParsedData.assignment || 'unknown')},cycleId=${influxEscape(cycle.id || 'unknown')} legCount=${completedLegCount}i,movementCount=${Math.round(cycle.movementCount)}i`;
 		await sendToInflux(allocationLines.concat(completionLine).join('\n'));
@@ -9833,7 +9926,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				].join(','), `,operation=${influxEscape(opName || 'unknown')}`);
 
 				if(!instructionError && !(txResult?.meta?.err)) {
-					try { await applyConfirmedCargoTelemetry(ix, fleet); }
+					try { await applyConfirmedCargoTelemetry(ix, fleet, txResult); }
 					catch(error) { cLog(1, `${FleetTimeStamp(fleetName)} <${opName}> confirmed cargo telemetry failed`, error); }
 				}
 				resolve(txResult);
@@ -10474,6 +10567,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 							mint: tokenMint,
 							rssName: cargoItems.find(r => r.token == tokenMint)?.name,
 							amount,
+							rawBalanceAmount: String(currentResource?.account?.data?.parsed?.info?.tokenAmount?.amount || ''),
+							mintDecimals: Number(currentResource?.account?.data?.parsed?.info?.tokenAmount?.decimals),
 							starbase: validTargets.find(target => (target.x + ',' + target.y) == (starbaseX + ',' + starbaseY))?.name,
 							sectorX: starbaseX,
 							sectorY: starbaseY
@@ -10502,7 +10597,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 								amount,
 								starbase: starbaseName,
 								sectorX: starbaseX,
-								sectorY: starbaseY
+								sectorY: starbaseY,
+								rawBalanceAmount: String(currentResource?.account?.data?.parsed?.info?.tokenAmount?.amount || ''),
+								mintDecimals: Number(currentResource?.account?.data?.parsed?.info?.tokenAmount?.decimals),
+								txResult, wrapper: tx, outerInstructionIndex: resolveConfirmedCargoOuterInstructionIndex(txResult, tx, new Set())
 							}) : null;
 							if(deliveryCycle) scheduleFleetTelemetryCostCycleFinalization(fleet, fleetParsedData, starbaseName);
 						}
@@ -15029,7 +15127,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-263', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-264', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
