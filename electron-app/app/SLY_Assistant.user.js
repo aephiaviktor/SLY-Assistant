@@ -6535,7 +6535,10 @@
 			`,txFeeLamportsComplete=${Math.round(getSlyaTxFeeLamports(userCraft?.slyaUpgradeCompleteTxResult))}i` +
 			`,startedAt=${maybeBnToNumber(job.startedAt, 0)}` +
 			`,completedAt=${completedAt}` +
-			`,state=${influxFieldString(userCraft?.state || '')}`;
+			`,state=${influxFieldString(userCraft?.state || '')}` +
+			`,completionTelemetryId=${influxFieldString(userCraft?.slyaUpgradeClaimAttemptLedger?.completionTelemetryId || '')}` +
+			`,claimAttemptIdentity=${influxFieldString(userCraft?.slyaUpgradeClaimAttemptLedger?.attemptIdentity || '')}` +
+			`,claimAttemptFinalState=${influxFieldString(userCraft?.slyaUpgradeClaimAttemptLedger?.authoritativeFinalState || '')}`;
 		await sendToInflux(line);
 		await recordUpgradeAutomationEvent({
 			ts: completedAt,
@@ -8993,7 +8996,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const normalized = [];
 		for (const [identity, record] of entries) {
 			const line = typeof record === 'string' ? record : record?.line;
-			if (!String(identity).trim() || typeof line !== 'string' || !line.startsWith('cargo_cost_source_event_v1,')) continue;
+			if (!String(identity).trim() || typeof line !== 'string' || !/^(cargo_cost_source_event_v1|upgrade_claim_attempt_v1),/.test(line)) continue;
 			const queuedAtMs = Number(typeof record === 'string' ? Date.now() : record?.queuedAtMs);
 			const retryAfterMs = Number(typeof record === 'string' ? 0 : record?.retryAfterMs);
 			const attemptCount = Number(typeof record === 'string' ? 0 : record?.attemptCount);
@@ -9077,6 +9080,116 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return `${faction}:${instance}`;
 	}
 
+	function buildUpgradeClaimAttemptIdentity(input) {
+		const faction = String(input?.faction || '').trim();
+		const instance = String(input?.instance || '').trim();
+		const profile = String(input?.profile || '').trim();
+		const craftingProcess = String(input?.craftingProcess || '').trim();
+		const craftingId = String(input?.craftingId || '').trim();
+		return [faction, instance, profile, craftingProcess, craftingId].every(Boolean)
+			? `${faction}:${instance}:${profile}:${craftingProcess}:${craftingId}`
+			: '';
+	}
+
+	function normalizeUpgradeClaimAttemptLedger(raw) {
+		let value = raw;
+		if (typeof value === 'string') { try { value = JSON.parse(value); } catch (error) { return null; } }
+		if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+		const attemptIdentity = String(value.attemptIdentity || buildUpgradeClaimAttemptIdentity(value)).trim();
+		if (!attemptIdentity) return null;
+		const integer = (field, fallback = 0) => Number.isSafeInteger(Number(value[field])) && Number(value[field]) >= 0 ? Number(value[field]) : fallback;
+		return {
+			...value,
+			attemptIdentity,
+			attemptNumber: Math.max(1, integer('attemptNumber', 1)),
+			detectedAtMs: integer('detectedAtMs'),
+			queuedAtMs: integer('queuedAtMs'),
+			sendStartedAtMs: integer('sendStartedAtMs'),
+			sendResultAtMs: integer('sendResultAtMs'),
+			confirmedAtMs: integer('confirmedAtMs'),
+			finalResultAtMs: integer('finalResultAtMs'),
+			nextScheduledRetryAtMs: integer('nextScheduledRetryAtMs'),
+			transactionSignature: String(value.transactionSignature || ''),
+			errorClassification: String(value.errorClassification || ''),
+			retryReason: String(value.retryReason || ''),
+			error: String(value.error || ''),
+			authoritativeFinalState: String(value.authoritativeFinalState || 'queued'),
+		};
+	}
+
+	function applyUpgradeClaimAttemptTransition(current, event) {
+		const type = String(event?.type || '').trim();
+		const atMs = Number.isSafeInteger(Number(event?.atMs)) && Number(event.atMs) >= 0 ? Number(event.atMs) : 0;
+		let ledger = normalizeUpgradeClaimAttemptLedger(current);
+		if (!ledger) {
+			if (type !== 'queued') return null;
+			ledger = normalizeUpgradeClaimAttemptLedger({ ...event, attemptNumber: 1, authoritativeFinalState: 'queued' });
+		}
+		if (!ledger) return null;
+		const next = { ...ledger };
+		if (type === 'send_started') {
+			if (next.authoritativeFinalState === 'retry_scheduled') next.attemptNumber += 1;
+			next.sendStartedAtMs = atMs;
+			next.sendResultAtMs = 0;
+			next.confirmedAtMs = 0;
+			next.finalResultAtMs = 0;
+			next.nextScheduledRetryAtMs = 0;
+			next.authoritativeFinalState = 'sending';
+		} else if (type === 'send_result') {
+			next.sendResultAtMs = atMs;
+			next.transactionSignature = String(event.transactionSignature || next.transactionSignature || '');
+			next.authoritativeFinalState = 'sent';
+		} else if (type === 'retry_scheduled') {
+			next.finalResultAtMs = atMs;
+			next.errorClassification = String(event.errorClassification || next.errorClassification || '');
+			next.retryReason = String(event.retryReason || '');
+			next.nextScheduledRetryAtMs = Number(event.nextScheduledRetryAtMs || 0);
+			next.authoritativeFinalState = 'retry_scheduled';
+		} else if (type === 'confirmed') {
+			next.confirmedAtMs = atMs;
+			next.finalResultAtMs = atMs;
+			next.authoritativeFinalState = 'confirmed';
+		} else if (type === 'failed') {
+			next.finalResultAtMs = atMs;
+			next.transactionSignature = String(event.transactionSignature || next.transactionSignature || '');
+			next.errorClassification = String(event.errorClassification || 'unknown_error');
+			next.error = String(event.error || '');
+			next.confirmedAtMs = 0;
+			next.authoritativeFinalState = 'failed';
+		}
+		return normalizeUpgradeClaimAttemptLedger(next);
+	}
+
+	function buildUpgradeClaimAttemptEventLine(ledger) {
+		const event = normalizeUpgradeClaimAttemptLedger(ledger);
+		if (!event) return '';
+		const timestampMs = event.finalResultAtMs || event.sendResultAtMs || event.sendStartedAtMs || event.queuedAtMs || event.detectedAtMs;
+		if (!timestampMs) return '';
+		const tags = `attemptIdentity=${influxEscape(event.attemptIdentity)},faction=${influxEscape(event.faction || 'unknown')},instance=${influxEscape(event.instance || 'unknown')},schemaVersion=1`;
+		const fields = [
+			`craftingId=${Number(event.craftingId || 0)}i`,
+			`attemptNumber=${Number(event.attemptNumber || 1)}i`,
+			`profile=${optimizationInfluxString(event.profile || '')}`,
+			`applicationVersion=${optimizationInfluxString(event.applicationVersion || '')}`,
+			`craftingProcess=${optimizationInfluxString(event.craftingProcess || '')}`,
+			`completionTelemetryId=${optimizationInfluxString(event.completionTelemetryId || '')}`,
+			`triggeringPath=${optimizationInfluxString(event.triggeringPath || '')}`,
+			`detectedAtMs=${Number(event.detectedAtMs || 0)}i`,
+			`queuedAtMs=${Number(event.queuedAtMs || 0)}i`,
+			`sendStartedAtMs=${Number(event.sendStartedAtMs || 0)}i`,
+			`sendResultAtMs=${Number(event.sendResultAtMs || 0)}i`,
+			`transactionSignature=${optimizationInfluxString(event.transactionSignature || '')}`,
+			`confirmedAtMs=${Number(event.confirmedAtMs || 0)}i`,
+			`finalResultAtMs=${Number(event.finalResultAtMs || 0)}i`,
+			`errorClassification=${optimizationInfluxString(event.errorClassification || '')}`,
+			`retryReason=${optimizationInfluxString(event.retryReason || '')}`,
+			`nextScheduledRetryAtMs=${Number(event.nextScheduledRetryAtMs || 0)}i`,
+			`authoritativeFinalState=${optimizationInfluxString(event.authoritativeFinalState || '')}`,
+			`error=${optimizationInfluxString(event.error || '')}`,
+		];
+		return `upgrade_claim_attempt_v1,${tags} ${fields.join(',')} ${formatSlyaInfluxTimestamp(timestampMs)}`;
+	}
+
 	function getSlyaCostEventTimestamp(txResult) {
 		const blockTime = Number(txResult?.blockTime);
 		if (!Number.isInteger(blockTime) || blockTime <= 0) return null;
@@ -9135,6 +9248,32 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			: [`txFeeLamports=${Math.round(Number(event.txFeeLamports))}i`, `transactionSignature=${optimizationInfluxString(event.transactionSignature)}`].concat(event.eventPosition == null ? [] : [`eventPosition=${Number(event.eventPosition)}i`]);
 		fields.push(`timestampProvenance=${optimizationInfluxString(event.timestampProvenance)}`, `sourceProvenance=${optimizationInfluxString(event.sourceProvenance)}`, `faction=${optimizationInfluxString(getUpgradeAutomationInfluxFactionTag() || 'unknown')}`, `instance=${optimizationInfluxString(getSlyaInfluxInstanceTag() || 'unknown')}`, `fleetAccount=${optimizationInfluxString(event.fleetAccount || '')}`, `fleetLabel=${optimizationInfluxString(event.fleetLabel)}`, `assignment=${optimizationInfluxString(event.assignment)}`);
 		return `cargo_cost_source_event_v1,${tags.join(',')} ${fields.join(',')} ${formatSlyaInfluxTimestamp(event.timestampMs)}`;
+	}
+
+	async function queueUpgradeClaimAttemptEvent(ledger) {
+		const normalized = normalizeUpgradeClaimAttemptLedger(ledger);
+		const line = buildUpgradeClaimAttemptEventLine(normalized);
+		if (!normalized || !line) return false;
+		const eventAtMs = normalized.finalResultAtMs || normalized.sendResultAtMs || normalized.sendStartedAtMs || normalized.queuedAtMs || normalized.detectedAtMs;
+		const identity = `upgrade_claim:${normalized.attemptIdentity}:${normalized.attemptNumber}:${normalized.authoritativeFinalState}:${eventAtMs}`;
+		const outbox = await loadSlyaCostSourceOutbox();
+		if (outbox.has(identity)) return true;
+		outbox.set(identity, { line, queuedAtMs: Date.now(), retryAfterMs: 0, attemptCount: 0 });
+		await persistSlyaCostSourceOutbox();
+		return true;
+	}
+
+	async function recordUpgradeClaimAttemptTransition(userCraft, transition) {
+		try {
+			const next = applyUpgradeClaimAttemptTransition(userCraft?.slyaUpgradeClaimAttemptLedger || null, transition);
+			if (!next || !userCraft) return null;
+			userCraft.slyaUpgradeClaimAttemptLedger = next;
+			await queueUpgradeClaimAttemptEvent(next);
+			return next;
+		} catch (error) {
+			cLog(1, `${FleetTimeStamp(userCraft?.label || 'unknown')} Upgrade claim attempt telemetry failed closed`, error);
+			return userCraft?.slyaUpgradeClaimAttemptLedger || null;
+		}
 	}
 
 	async function queueSlyaCostSourceEvent(event, missingReason = 'event_invalid') {
@@ -9768,6 +9907,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 			let confirmed = false;
 			while (!confirmed) {
+				if (fleet?.slyaUpgradeClaimAttemptLedger) await recordUpgradeClaimAttemptTransition(fleet, { type: 'send_started', atMs: Date.now() });
 				//let tx = new solanaWeb3.Transaction();
 
 				//the fee is applied to the default compute limit and it is in microLamports. The default compute limit is 200k and microLamports to Lamports is 1M, therefore: 1M / 200k = we need to multiply by 5
@@ -9857,6 +9997,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				let response = await sendAndConfirmTx(txSerialized, latestBH.lastValidBlockHeight, null, fleet, opName);
 				let txHash = response.txHash;
 				let confirmation = response.confirmation;
+				if (fleet?.slyaUpgradeClaimAttemptLedger) await recordUpgradeClaimAttemptTransition(fleet, { type: 'send_result', atMs: Date.now(), transactionSignature: txHash || '' });
 				let txResult = txHash ? await solanaReadConnection.getTransaction(txHash, {commitment: 'confirmed', maxSupportedTransactionVersion: 1}) : undefined;
                 const instructionError = getTransactionInstructionError(confirmation, txResult);
                 if (instructionError) {
@@ -9893,6 +10034,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				const confirmationTimeStr = `${Date.now() - microOpStart}ms`;
 
 				if (confirmation && confirmation.name == 'TransactionExpiredBlockheightExceededError' && !txResult) {
+					if (fleet?.slyaUpgradeClaimAttemptLedger) await recordUpgradeClaimAttemptTransition(fleet, { type: 'retry_scheduled', atMs: Date.now(), errorClassification: 'blockheight_timeout', retryReason: confirmation.name, nextScheduledRetryAtMs: Date.now() });
 					cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> CONFIRM ❌ ${confirmationTimeStr}`);
 					cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> RESEND 🔂`);
 					await alterStats('Txs Resent',opName,(Date.now() - macroOpStart)/1000,'Seconds',1); //statsadd
@@ -9915,6 +10057,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						if(!txResult) await wait(1000);
 					}
 					if(tryCount >= 130) {
+						if (fleet?.slyaUpgradeClaimAttemptLedger) await recordUpgradeClaimAttemptTransition(fleet, { type: 'retry_scheduled', atMs: Date.now(), errorClassification: 'confirmation_timeout', retryReason: 'transaction_not_observed', nextScheduledRetryAtMs: Date.now() });
 						continue;
 					}
 				}
@@ -9948,6 +10091,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					...getScanningOptimizationMovementFields(fleet, opName)
 				].join(','), `,operation=${influxEscape(opName || 'unknown')}`);
 
+				if (fleet?.slyaUpgradeClaimAttemptLedger) {
+					const claimError = instructionError || txResult?.meta?.err;
+					await recordUpgradeClaimAttemptTransition(fleet, claimError
+						? { type: 'failed', atMs: Date.now(), transactionSignature: txHash || '', errorClassification: 'instruction_error', error: JSON.stringify(claimError) }
+						: { type: 'confirmed', atMs: Date.now() });
+				}
 				if(!instructionError && !(txResult?.meta?.err)) {
 					try { await applyConfirmedCargoTelemetry(ix, fleet, txResult); }
 					catch(error) { cLog(1, `${FleetTimeStamp(fleetName)} <${opName}> confirmed cargo telemetry failed`, error); }
@@ -11727,6 +11876,25 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
             }).instruction()};
             transactions.push(tx2);
 
+            const detectedAtMs = Date.now();
+            const completionTelemetryId = `${getSlyaCostSourceScope()}:${String(craftingProcess.craftingId)}`;
+            const claimAttemptBase = {
+                faction: getUpgradeAutomationInfluxFactionTag(),
+                instance: getSlyaInfluxInstanceTag(),
+                profile: String(userProfileAcct?.toString?.() || ''),
+                applicationVersion: AEPHIA_SLYA_VERSION,
+                craftingId: maybeBnToNumber(craftingProcess.craftingId, 0),
+                craftingProcess: String(craftingProcess.craftingProcess?.toString?.() || ''),
+                completionTelemetryId,
+                detectedAtMs,
+                queuedAtMs: Date.now(),
+                triggeringPath: 'craft_poll_completion',
+            };
+            await recordUpgradeClaimAttemptTransition(userCraft, {
+                ...claimAttemptBase,
+                type: 'queued',
+                attemptIdentity: buildUpgradeClaimAttemptIdentity(claimAttemptBase),
+            });
             let txResult = await txSignAndSend(transactions, userCraft, 'COMPLETING UPGRADE', Math.min(globalSettings.craftingTxMultiplier, 500), userRedemptionAcct);
 
             if (!userCraft.state.includes('ERROR') && txResult) {
