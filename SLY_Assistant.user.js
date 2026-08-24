@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-264
+// @aephia-version 0.7.35-265
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -6358,6 +6358,25 @@
 
 	const fleetTelemetryFinalizeTimers = new Map();
 
+	function selectCargoDeliveryEvidenceAnchors(deliveries) {
+		const rows = Array.isArray(deliveries) ? deliveries : [];
+		const groups = new Map();
+		rows.forEach((item, index) => {
+			const evidence = item?.deliveryEvidence;
+			const eventId = String(evidence?.eventId || '');
+			const payloadHash = String(evidence?.payloadHash || '');
+			if(!eventId || !payloadHash) return;
+			const existing = groups.get(eventId);
+			if(!existing) groups.set(eventId, { firstIndex: index, payloadHash, evidence, conflict: false });
+			else if(existing.payloadHash !== payloadHash) existing.conflict = true;
+		});
+		const anchors = rows.map(() => null);
+		for(const group of groups.values()) {
+			if(!group.conflict) anchors[group.firstIndex] = group.evidence;
+		}
+		return anchors;
+	}
+
 	function scheduleFleetTelemetryCostCycleFinalization(fleet, fleetParsedData, starbaseName) {
 		const key = fleet.publicKey.toString();
 		if(fleetTelemetryFinalizeTimers.has(key)) clearTimeout(fleetTelemetryFinalizeTimers.get(key));
@@ -6390,10 +6409,14 @@
 		const overheadTx = splitTelemetryCost(cycle.emptyTxCostSol, volumeWeights);
 		const overheadFees = splitTelemetryCost(cycle.emptyTxFeeLamports, volumeWeights);
 		const completedLegCount = Math.max(1, Math.round(Number(legCount || cycle.movementCount || 1)));
+		const deliveryEvidenceAnchors = selectCargoDeliveryEvidenceAnchors(deliveries);
 		const allocationLines = deliveries.map((item, index) => {
 			const loadedFuel = Number(item.loadedFuel || 0), loadedTx = Number(item.loadedTxCostSol || 0), loadedFees = Number(item.loadedTxFeeLamports || 0);
+			const evidence = deliveryEvidenceAnchors[index];
+			const evidenceFields = evidence ?
+				`,deliveryEvidenceSchemaVersion=${Math.round(Number(evidence.schemaVersion || 0))}i,deliveryMovementType=${influxFieldString(evidence.movementType || '')},deliverySignature=${influxFieldString(evidence.signature || '')},deliveryOuterInstructionIndex=${Math.round(Number(evidence.outerInstructionIndex ?? -1))}i,deliveryConfirmedSlot=${Math.round(Number(evidence.slot || 0))}i,deliveryConfirmedBlockTime=${Math.round(Number(evidence.blockTime || 0))}i,deliveryRawAmount=${influxFieldString(evidence.rawAmount || '')},deliveryMintDecimals=${Math.round(Number(evidence.mintDecimals || 0))}i,deliveryDecimalAmount=${influxFieldString(evidence.decimalAmount || '')},deliveryEventId=${influxFieldString(evidence.eventId || '')},deliveryEvidencePayloadHash=${influxFieldString(evidence.payloadHash || '')},deliveryProgramId=${influxFieldString(evidence.programId || '')},deliveryFleetAccount=${influxFieldString(evidence.fleetAccount || '')},deliveryFactionProfile=${influxFieldString(evidence.factionProfile || '')},deliveryProfileAccount=${influxFieldString(evidence.profileAccount || '')},deliveryRoute=${influxFieldString(evidence.route || '')},deliveryAllocationId=${influxFieldString(evidence.allocationId || '')}` : '';
 			return `cargo_cost_allocation,faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(fleet.label)},assignment=${influxEscape(fleetParsedData.assignment || 'unknown')},homeStarbase=${influxEscape(homeStarbase || 'unknown')},originStarbase=${influxEscape(item.originStarbase || 'unknown')},deliveryStarbase=${influxEscape(item.starbase || 'unknown')},rss=${influxEscape(item.rssName || 'unknown')},cycleId=${influxEscape(cycle.id || 'unknown')},allocationIndex=${index}` +
-				` amount=${Number(item.amount || 0)},cargoVolume=${Number(item.cargoVolume || 0)},assetMint=${influxFieldString(item.mint || '')},deliveryEvidenceSchemaVersion=${Math.round(Number(item.deliveryEvidence?.schemaVersion || 0))}i,deliveryMovementType=${influxFieldString(item.deliveryEvidence?.movementType || '')},deliverySignature=${influxFieldString(item.deliveryEvidence?.signature || '')},deliveryOuterInstructionIndex=${Math.round(Number(item.deliveryEvidence?.outerInstructionIndex ?? -1))}i,deliveryConfirmedSlot=${Math.round(Number(item.deliveryEvidence?.slot || 0))}i,deliveryConfirmedBlockTime=${Math.round(Number(item.deliveryEvidence?.blockTime || 0))}i,deliveryRawAmount=${influxFieldString(item.deliveryEvidence?.rawAmount || '')},deliveryMintDecimals=${Math.round(Number(item.deliveryEvidence?.mintDecimals || 0))}i,deliveryDecimalAmount=${influxFieldString(item.deliveryEvidence?.decimalAmount || '')},deliveryEventId=${influxFieldString(item.deliveryEvidence?.eventId || '')},deliveryEvidencePayloadHash=${influxFieldString(item.deliveryEvidence?.payloadHash || '')},deliveryProgramId=${influxFieldString(item.deliveryEvidence?.programId || '')},deliveryFleetAccount=${influxFieldString(item.deliveryEvidence?.fleetAccount || '')},deliveryFactionProfile=${influxFieldString(item.deliveryEvidence?.factionProfile || '')},deliveryProfileAccount=${influxFieldString(item.deliveryEvidence?.profileAccount || '')},deliveryRoute=${influxFieldString(item.deliveryEvidence?.route || '')},deliveryAllocationId=${influxFieldString(item.deliveryEvidence?.allocationId || '')},loadedLegFuel=${loadedFuel},loadedLegTxCostSol=${loadedTx},loadedLegTxFeeLamports=${Math.round(loadedFees)}i,emptyLegFuelOverhead=${overheadFuel[index]},emptyLegTxCostSolOverhead=${overheadTx[index]},emptyLegTxFeeLamportsOverhead=${Math.round(overheadFees[index])}i,allocatedFuel=${allocatedFuel[index]},allocatedTxCostSol=${allocatedTx[index]},allocatedTxFeeLamports=${Math.round(allocatedFees[index])}i,loadedLegCount=${Math.round(Number(item.loadedLegCount || 0))}i,cycleBurnedFuel=${cycle.burnedFuel},cycleTxCostSol=${cycle.txCostSol},cycleTxFeeLamports=${Math.round(cycle.txFeeLamports)}i,cycleEmptyFuel=${cycle.emptyBurnedFuel},cycleEmptyTxCostSol=${cycle.emptyTxCostSol},cycleMovementCount=${cycle.movementCount}i,cycleDeliveredVolume=${totalVolume},cycleDeliveryCount=${deliveries.length}i,deliveryIndex=${index}i`;
+				` amount=${Number(item.amount || 0)},cargoVolume=${Number(item.cargoVolume || 0)},assetMint=${influxFieldString(item.mint || '')}${evidenceFields},loadedLegFuel=${loadedFuel},loadedLegTxCostSol=${loadedTx},loadedLegTxFeeLamports=${Math.round(loadedFees)}i,emptyLegFuelOverhead=${overheadFuel[index]},emptyLegTxCostSolOverhead=${overheadTx[index]},emptyLegTxFeeLamportsOverhead=${Math.round(overheadFees[index])}i,allocatedFuel=${allocatedFuel[index]},allocatedTxCostSol=${allocatedTx[index]},allocatedTxFeeLamports=${Math.round(allocatedFees[index])}i,loadedLegCount=${Math.round(Number(item.loadedLegCount || 0))}i,cycleBurnedFuel=${cycle.burnedFuel},cycleTxCostSol=${cycle.txCostSol},cycleTxFeeLamports=${Math.round(cycle.txFeeLamports)}i,cycleEmptyFuel=${cycle.emptyBurnedFuel},cycleEmptyTxCostSol=${cycle.emptyTxCostSol},cycleMovementCount=${cycle.movementCount}i,cycleDeliveredVolume=${totalVolume},cycleDeliveryCount=${deliveries.length}i,deliveryIndex=${index}i`;
 		});
 		const completionLine = `cargo_cycle_completed,faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(fleet.label)},assignment=${influxEscape(fleetParsedData.assignment || 'unknown')},cycleId=${influxEscape(cycle.id || 'unknown')} legCount=${completedLegCount}i,movementCount=${Math.round(cycle.movementCount)}i`;
 		await sendToInflux(allocationLines.concat(completionLine).join('\n'));
@@ -15127,7 +15150,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-264', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-265', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),

@@ -28,7 +28,8 @@ const names = [
   'getCargoTelemetryInstructionBytes', 'getCargoTelemetryProgramIdentity',
   'resolveConfirmedCargoOuterInstructionIndex', 'decodeConfirmedCargoWithdrawRawAmount',
   'formatCargoTelemetryDecimalAmount', 'canonicalizeCargoTelemetryEvidencePayload',
-  'sha256CargoTelemetryText', 'buildConfirmedCargoDeliveryEvidence'
+  'sha256CargoTelemetryText', 'buildConfirmedCargoDeliveryEvidence',
+  'selectCargoDeliveryEvidenceAnchors'
 ];
 const context = { Uint8Array, ArrayBuffer, BigInt, String, Number, TextEncoder, crypto: webcrypto };
 vm.createContext(context);
@@ -116,6 +117,44 @@ function ix(programIdIndex, data) { return { programIdIndex, data }; }
 
   assert.equal(context.resolveConfirmedCargoOuterInstructionIndex(txResult([]), wrapper, new Set()), -1, 'a balance without a confirmed unload has no evidence coordinate');
 
+  const splitEvidence = { ...evidence, rawAmount: '9999', decimalAmount: '9999', eventId: 'cargo-delivery:v1:split:3:unload', payloadHash: 'a'.repeat(64) };
+  const splitRows = [
+    { amount: 20, cargoVolume: 20, deliveryEvidence: splitEvidence },
+    { amount: 9979, cargoVolume: 9979, deliveryEvidence: splitEvidence },
+  ];
+  const splitAnchors = context.selectCargoDeliveryEvidenceAnchors(splitRows);
+  assert.deepEqual(splitAnchors.map(Boolean), [true, false], '9999 split as 20 + 9979 must publish evidence on one deterministic allocation row');
+  assert.equal(splitRows.reduce((sum, row) => sum + row.amount, 0), 9999, 'anchoring must not alter allocation amounts');
+  assert.deepEqual(context.selectCargoDeliveryEvidenceAnchors(splitRows).map(Boolean), [true, false], 'replay must select the same anchor');
+
+  const sixEvents = Array.from({ length: 6 }, (_, eventIndex) => {
+    const itemEvidence = { ...splitEvidence, eventId: `cargo-delivery:v1:event-${eventIndex}`, payloadHash: String(eventIndex).repeat(64) };
+    return [
+      { amount: 1, deliveryEvidence: itemEvidence },
+      { amount: 99, deliveryEvidence: itemEvidence },
+    ];
+  }).flat();
+  assert.equal(context.selectCargoDeliveryEvidenceAnchors(sixEvents).filter(Boolean).length, 6, 'six unloads must not produce twelve evidence-bearing rows');
+
+  assert.deepEqual(context.selectCargoDeliveryEvidenceAnchors([{ amount: 9999, deliveryEvidence: splitEvidence }]).map(Boolean), [true], 'one-row unload retains its evidence');
+
+  const distinctInstructionRows = [
+    { amount: 50, deliveryEvidence: { ...splitEvidence, outerInstructionIndex: 3, eventId: 'cargo-delivery:v1:sig:3:unload', payloadHash: '3'.repeat(64) } },
+    { amount: 75, deliveryEvidence: { ...splitEvidence, outerInstructionIndex: 4, eventId: 'cargo-delivery:v1:sig:4:unload', payloadHash: '4'.repeat(64) } },
+  ];
+  assert.deepEqual(context.selectCargoDeliveryEvidenceAnchors(distinctInstructionRows).map(item => item?.outerInstructionIndex), [3, 4], 'multiple unload instructions remain distinct');
+
+  const conflictRows = [
+    { amount: 20, deliveryEvidence: splitEvidence },
+    { amount: 9979, deliveryEvidence: { ...splitEvidence, payloadHash: 'b'.repeat(64) } },
+  ];
+  assert.deepEqual(context.selectCargoDeliveryEvidenceAnchors(conflictRows).map(Boolean), [false, false], 'payload conflict must fail closed instead of selecting an arbitrary row');
+
+  assert.deepEqual(context.selectCargoDeliveryEvidenceAnchors([
+    { amount: 20, deliveryEvidence: { ...splitEvidence, eventId: '', payloadHash: '' } },
+    { amount: 9979 },
+  ]).map(Boolean), [false, false], 'missing authoritative identity must fail closed');
+
   const apply = extractFunction('applyConfirmedCargoTelemetry');
   assert.match(apply, /txResult/);
   assert.match(apply, /sourcePosition/);
@@ -123,6 +162,7 @@ function ix(programIdIndex, data) { return { programIdIndex, data }; }
   assert.doesNotMatch(apply, /getTransaction|getParsedTokenAccounts|fetch\(/, 'evidence handoff must not add RPC work');
 
   const finalize = extractFunction('maybeFinalizeFleetTelemetryCostCycle');
+  assert.match(finalize, /selectCargoDeliveryEvidenceAnchors/);
   assert.match(finalize, /deliveryEvidenceSchemaVersion/);
   assert.match(finalize, /deliveryEvidencePayloadHash/);
   assert.match(finalize, /amount=\$\{Number\(item\.amount \|\| 0\)\},cargoVolume=/, 'legacy fields remain intact');
