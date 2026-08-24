@@ -9091,6 +9091,99 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			: '';
 	}
 
+	const UPGRADE_CLAIM_RECOVERY_STATE_KEY = 'upgradeClaimRecoveryStateV1';
+	const upgradeClaimRecoveryInFlight = new Map();
+	let upgradeClaimRecoveryPersistTail = Promise.resolve();
+
+	function buildUpgradeClaimRecoveryKey(input) {
+		return buildUpgradeClaimAttemptIdentity(input);
+	}
+
+	function normalizeUpgradeClaimRecoveryState(raw, identity = null) {
+		let value = raw;
+		if (typeof value === 'string') { try { value = JSON.parse(value); } catch (error) { value = null; } }
+		const base = identity && typeof identity === 'object' ? identity : {};
+		const recoveryKey = String(value?.recoveryKey || buildUpgradeClaimRecoveryKey(value || base)).trim();
+		if (!recoveryKey) return null;
+		return {
+			...base, ...(value && typeof value === 'object' ? value : {}), recoveryKey,
+			attemptNumber: Math.max(0, Number(value?.attemptNumber || 0)),
+			state: String(value?.state || 'queued'),
+			transactionSignature: String(value?.transactionSignature || ''),
+			completionFinalized: Boolean(value?.completionFinalized),
+			telemetryFinalized: Boolean(value?.telemetryFinalized),
+		};
+	}
+
+	function decideUpgradeClaimRecoveryAction(state, evidence = {}) {
+		if (state?.state === 'completed' || state?.state === 'failed_permanent') return state.state === 'completed' ? 'finalize' : 'stop';
+		if (String(evidence.authoritativeState || '') === 'completed') return 'finalize';
+		if (state?.state === 'sent') {
+			if (evidence.signatureStatus === 'confirmed') return 'finalize';
+			if (evidence.signatureStatus === 'failed_permanent') return 'fail_permanent';
+			if (evidence.signatureStatus === 'absent' || evidence.signatureStatus === 'expired') return 'send';
+			return 'wait';
+		}
+		return 'send';
+	}
+
+	async function runIdempotentUpgradeClaimRecovery(identity, operations) {
+		const recoveryKey = buildUpgradeClaimRecoveryKey(identity);
+		if (!recoveryKey) throw new Error('Upgrade claim recovery identity is incomplete');
+		if (upgradeClaimRecoveryInFlight.has(recoveryKey)) return upgradeClaimRecoveryInFlight.get(recoveryKey);
+		const task = (async () => {
+			let state = normalizeUpgradeClaimRecoveryState(await operations.loadState(recoveryKey), identity)
+				|| normalizeUpgradeClaimRecoveryState({ ...identity, recoveryKey }, identity);
+			const persist = async next => { state = normalizeUpgradeClaimRecoveryState(next, identity); await operations.saveState(state); return state; };
+			const finalize = async () => {
+				if (!state.completionFinalized) { await operations.finalizeCompletion(state); state.completionFinalized = true; await persist(state); }
+				if (!state.telemetryFinalized) { try { await operations.finalizeTelemetry(state); state.telemetryFinalized = true; await persist(state); } catch (error) {} }
+				return persist({ ...state, state: 'completed', finalizedAtMs: state.finalizedAtMs || Date.now() });
+			};
+			if (state.state === 'completed') return finalize();
+			if (state.state === 'failed_permanent') return state;
+			let authoritativeState = '';
+			let signatureStatus = '';
+			if (state.state === 'sent' && state.transactionSignature) {
+				signatureStatus = await operations.verifySignature(state.transactionSignature, state);
+				if (signatureStatus === 'pending') return state;
+				if (signatureStatus === 'confirmed') return finalize();
+				if (signatureStatus === 'failed_permanent') return persist({ ...state, state: 'failed_permanent' });
+			}
+			if (state.state !== 'sent' || ['absent', 'expired'].includes(signatureStatus)) {
+				authoritativeState = await operations.readAuthoritativeState(state);
+				if (authoritativeState === 'completed') return finalize();
+			}
+			if (decideUpgradeClaimRecoveryAction(state, { authoritativeState, signatureStatus }) !== 'send') return state;
+			state = await persist({ ...state, state: 'sending', attemptNumber: state.attemptNumber + 1, triggeringPath: identity.triggeringPath || state.triggeringPath || '' });
+			const result = await operations.send(state);
+			if (result?.status === 'confirmed') {
+				state = await persist({ ...state, state: 'sent', transactionSignature: String(result.signature || '') });
+				return finalize();
+			}
+			if (result?.status === 'failed_permanent') return persist({ ...state, state: 'failed_permanent', errorClassification: String(result.errorClassification || 'instruction_error') });
+			return persist({ ...state, state: 'sent', transactionSignature: String(result?.signature || state.transactionSignature || ''), lastValidBlockHeight: Number(result?.lastValidBlockHeight || state.lastValidBlockHeight || 0) });
+		})();
+		upgradeClaimRecoveryInFlight.set(recoveryKey, task);
+		try { return await task; } finally { upgradeClaimRecoveryInFlight.delete(recoveryKey); }
+	}
+
+	async function loadUpgradeClaimRecoveryState(recoveryKey) {
+		let values = {};
+		try { values = JSON.parse(await GM.getValue(UPGRADE_CLAIM_RECOVERY_STATE_KEY, '{}')) || {}; } catch (error) {}
+		return values[String(recoveryKey)] || null;
+	}
+
+	async function saveUpgradeClaimRecoveryState(state) {
+		upgradeClaimRecoveryPersistTail = upgradeClaimRecoveryPersistTail.catch(() => {}).then(async () => {
+			let values = {};
+			try { values = JSON.parse(await GM.getValue(UPGRADE_CLAIM_RECOVERY_STATE_KEY, '{}')) || {}; } catch (error) {}
+			values[state.recoveryKey] = state;
+			await GM.setValue(UPGRADE_CLAIM_RECOVERY_STATE_KEY, JSON.stringify(values));
+		});
+		await upgradeClaimRecoveryPersistTail;
+	}
+
 	function normalizeUpgradeClaimAttemptLedger(raw) {
 		let value = raw;
 		if (typeof value === 'string') { try { value = JSON.parse(value); } catch (error) { return null; } }
@@ -9993,6 +10086,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 				let microOpStart = Date.now();
 				cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> SEND ➡️ lastValidBlockHeight: `, latestBH.lastValidBlockHeight);
+				if (fleet?.slyaUpgradeClaimPrepared) {
+					const preparedSignature = tx.signatures?.[0] ? bs58.encode(tx.signatures[0]) : '';
+					await fleet.slyaUpgradeClaimPrepared(preparedSignature, latestBH.lastValidBlockHeight);
+				}
                 // Adding a 25 block buffer before considering a transaction expired
 				let response = await sendAndConfirmTx(txSerialized, latestBH.lastValidBlockHeight, null, fleet, opName);
 				let txHash = response.txHash;
@@ -10036,6 +10133,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				if (confirmation && confirmation.name == 'TransactionExpiredBlockheightExceededError' && !txResult) {
 					if (fleet?.slyaUpgradeClaimAttemptLedger) await recordUpgradeClaimAttemptTransition(fleet, { type: 'retry_scheduled', atMs: Date.now(), errorClassification: 'blockheight_timeout', retryReason: confirmation.name, nextScheduledRetryAtMs: Date.now() });
 					cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> CONFIRM ❌ ${confirmationTimeStr}`);
+					if (fleet?.slyaUpgradeClaimRecoveryControlled) {
+						resolve({ slyaClaimAmbiguous: true, slyaTxHash: txHash || '', slyaLastValidBlockHeight: latestBH.lastValidBlockHeight, slyaConclusiveStatus: 'expired' });
+						return;
+					}
 					cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> RESEND 🔂`);
 					await alterStats('Txs Resent',opName,(Date.now() - macroOpStart)/1000,'Seconds',1); //statsadd
 					await alterFees(-1, opName); //autofee
@@ -10058,6 +10159,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					}
 					if(tryCount >= 130) {
 						if (fleet?.slyaUpgradeClaimAttemptLedger) await recordUpgradeClaimAttemptTransition(fleet, { type: 'retry_scheduled', atMs: Date.now(), errorClassification: 'confirmation_timeout', retryReason: 'transaction_not_observed', nextScheduledRetryAtMs: Date.now() });
+						if (fleet?.slyaUpgradeClaimRecoveryControlled) {
+							resolve({ slyaClaimAmbiguous: true, slyaTxHash: txHash || '', slyaLastValidBlockHeight: latestBH.lastValidBlockHeight });
+							return;
+						}
 						continue;
 					}
 				}
@@ -11895,26 +12000,60 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                 type: 'queued',
                 attemptIdentity: buildUpgradeClaimAttemptIdentity(claimAttemptBase),
             });
-            let txResult = await txSignAndSend(transactions, userCraft, 'COMPLETING UPGRADE', Math.min(globalSettings.craftingTxMultiplier, 500), userRedemptionAcct);
-
-            if (!userCraft.state.includes('ERROR') && txResult) {
-                userCraft.slyaUpgradeCompleteTxResult = txResult;
-                if (upgradeTelemetryJob) {
-                    try {
-                        if (!upgradeTelemetryJob.feeAtlas && userCraft.feeAtlas) {
-                            upgradeTelemetryJob.feeAtlas = Number(userCraft.feeAtlas || 0);
-                        }
+            let completedTxResult = null;
+            await runIdempotentUpgradeClaimRecovery(claimAttemptBase, {
+                loadState: loadUpgradeClaimRecoveryState,
+                saveState: saveUpgradeClaimRecoveryState,
+                readAuthoritativeState: async () => {
+                    const account = await solanaReadConnection.getAccountInfo(craftingProcess.craftingProcess, 'confirmed');
+                    return account ? 'pending' : 'completed';
+                },
+                verifySignature: async (signature, recoveryState) => {
+                    const response = await solanaReadConnection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+                    const status = response?.value?.[0];
+                    if (status?.err) return 'failed_permanent';
+                    if (status && ['confirmed', 'finalized'].includes(String(status.confirmationStatus || ''))) return 'confirmed';
+                    const lastValidBlockHeight = Number(recoveryState?.lastValidBlockHeight || 0);
+                    if (lastValidBlockHeight > 0) {
+                        const currentBlockHeight = await solanaReadConnection.getBlockHeight('confirmed');
+                        if (currentBlockHeight > lastValidBlockHeight) return 'expired';
+                    }
+                    return 'pending';
+                },
+                send: async recoveryState => {
+                    userCraft.slyaUpgradeClaimRecoveryControlled = true;
+                    userCraft.slyaUpgradeClaimPrepared = async (signature, lastValidBlockHeight) => saveUpgradeClaimRecoveryState({
+                        ...recoveryState,
+                        state: 'sent',
+                        transactionSignature: String(signature || ''),
+                        lastValidBlockHeight: Number(lastValidBlockHeight || 0),
+                    });
+                    try { completedTxResult = await txSignAndSend(transactions, userCraft, 'COMPLETING UPGRADE', Math.min(globalSettings.craftingTxMultiplier, 500), userRedemptionAcct); }
+                    finally {
+                        userCraft.slyaUpgradeClaimRecoveryControlled = false;
+                        userCraft.slyaUpgradeClaimPrepared = null;
+                    }
+                    const signature = String(completedTxResult?.slyaTxHash || '');
+                    if (completedTxResult?.slyaClaimAmbiguous) return { status: 'sent', signature, lastValidBlockHeight: completedTxResult.slyaLastValidBlockHeight };
+                    if (completedTxResult?.meta?.err) return { status: 'failed_permanent', signature, errorClassification: 'instruction_error' };
+                    return { status: 'confirmed', signature };
+                },
+                finalizeCompletion: async () => {
+                    if (completedTxResult) userCraft.slyaUpgradeCompleteTxResult = completedTxResult;
+                },
+                finalizeTelemetry: async () => {
+                    if (upgradeTelemetryJob) {
+                        if (!upgradeTelemetryJob.feeAtlas && userCraft.feeAtlas) upgradeTelemetryJob.feeAtlas = Number(userCraft.feeAtlas || 0);
                         await emitUpgradeCompletionTelemetry(upgradeTelemetryJob, userCraft);
                         await deleteUpgradeTelemetryJob(upgradeTelemetryJob.craftingId);
-                    } catch (error) {
-                        cLog(1, `${FleetTimeStamp(userCraft.label)} Failed to emit upgrade completion telemetry for craftingId=${upgradeTelemetryJob.craftingId}`, error);
+                    } else {
+                        cLog(1, `${FleetTimeStamp(userCraft.label)} Upgrade completed but telemetry cache entry is missing for craftingId=${craftingProcess.craftingId}`);
                     }
-                } else {
-                    cLog(1, `${FleetTimeStamp(userCraft.label)} Upgrade completed but telemetry cache entry is missing for craftingId=${craftingProcess.craftingId}`);
-                }
-            }
+                    await recordUpgradeClaimAttemptTransition(userCraft, { type: 'confirmed', atMs: Date.now() });
+                },
+            });
 
-            resolve(txResult);
+            resolve(completedTxResult);
         });
     }
 
