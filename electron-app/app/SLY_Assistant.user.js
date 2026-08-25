@@ -8952,6 +8952,123 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	}
 
 
+	function canonicalizeUpgradeOptimizerDecisionValue(value) {
+		if (Array.isArray(value)) return `[${value.map(canonicalizeUpgradeOptimizerDecisionValue).join(',')}]`;
+		if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalizeUpgradeOptimizerDecisionValue(value[key])}`).join(',')}}`;
+		return JSON.stringify(value);
+	}
+
+	function hashUpgradeOptimizerDecisionText(value) {
+		const text = String(value || '');
+		let first = 0x811c9dc5;
+		let second = 0x9e3779b9;
+		for (let index = 0; index < text.length; index += 1) {
+			const code = text.charCodeAt(index);
+			first = Math.imul(first ^ code, 0x01000193) >>> 0;
+			second = Math.imul(second ^ code, 0x85ebca6b) >>> 0;
+		}
+		return first.toString(16).padStart(8, '0') + second.toString(16).padStart(8, '0');
+	}
+
+	function normalizeUpgradeOptimizerDecisionCandidate(candidate = {}) {
+		const nullableNumber = value => value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
+		const component = String(candidate.component || candidate.name || '').trim() || 'unknown';
+		const upgrade = String(candidate.upgrade || (component === '__NO_UPGRADE__' ? '__NO_UPGRADE__' : `${component} Upgrade`));
+		const rejectionReasons = [...new Set((Array.isArray(candidate.rejectionReasons) ? candidate.rejectionReasons : []).map(String).filter(Boolean))].sort();
+		const identityInput = { component, upgrade };
+		return {
+			candidateId: `lp-candidate:v1:${hashUpgradeOptimizerDecisionText(canonicalizeUpgradeOptimizerDecisionValue(identityInput))}`,
+			component,
+			upgrade,
+			eligible: !!candidate.eligible,
+			selected: !!candidate.selected,
+			lpGain: nullableNumber(candidate.lpGain),
+			costAtlas: nullableNumber(candidate.costAtlas),
+			atlasPerLp: nullableNumber(candidate.atlasPerLp),
+			secondsPerUnit: nullableNumber(candidate.secondsPerUnit),
+			crewRequired: nullableNumber(candidate.crewRequired),
+			durationSeconds: nullableNumber(candidate.durationSeconds),
+			score: nullableNumber(candidate.score),
+			scoreBreakdown: candidate.scoreBreakdown && typeof candidate.scoreBreakdown === 'object' ? candidate.scoreBreakdown : {},
+			rank: nullableNumber(candidate.rank),
+			rejectionReasons,
+			selectionReason: String(candidate.selectionReason || ''),
+			tieBreakReason: String(candidate.tieBreakReason || ''),
+			price: {
+				atlas: nullableNumber(candidate.priceAtlas),
+				source: String(candidate.priceSource || 'NOT_OBSERVED'),
+				timestampMs: nullableNumber(candidate.priceTimestampMs),
+				status: String(candidate.priceStatus || (nullableNumber(candidate.priceAtlas) === null ? 'NOT_OBSERVED' : 'observed')),
+			},
+		};
+	}
+
+	function buildUpgradeOptimizerDecisionEvidence(input = {}) {
+		const nullableNumber = value => value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
+		const decidedAtMs = nullableNumber(input.decidedAtMs) || Date.now();
+		let candidates = (Array.isArray(input.candidates) ? input.candidates : []).map(normalizeUpgradeOptimizerDecisionCandidate);
+		candidates.sort((a, b) => String(a.component).localeCompare(String(b.component)) || String(a.upgrade).localeCompare(String(b.upgrade)));
+		const selected = candidates.filter(candidate => candidate.selected);
+		const noUpgradeSelected = selected.length === 0;
+		if (selected.length > 1) throw new Error('optimizer_decision_multiple_selected_candidates');
+		candidates.push(normalizeUpgradeOptimizerDecisionCandidate({
+			component: '__NO_UPGRADE__', upgrade: '__NO_UPGRADE__', eligible: true, selected: noUpgradeSelected,
+			rank: noUpgradeSelected ? 1 : null,
+			selectionReason: noUpgradeSelected ? String(input.noUpgradeReason || 'no_eligible_upgrade') : '',
+			rejectionReasons: noUpgradeSelected ? [] : ['upgrade_candidate_selected'],
+		}));
+		const expectedSourceAtMs = nullableNumber(input.expectedLpSourceTimestampMs);
+		const expectedLp = {
+			additionalLp: nullableNumber(input.expectedAdditionalLp),
+			totalLp: nullableNumber(input.expectedTotalLp),
+			sourceTimestampMs: expectedSourceAtMs,
+			ageMs: expectedSourceAtMs === null ? null : Math.max(0, decidedAtMs - expectedSourceAtMs),
+			provenance: String(input.expectedLpProvenance || 'NOT_OBSERVED'),
+			status: String(input.expectedLpStatus || 'NOT_OBSERVED'),
+		};
+		const identityPayload = {
+			faction: String(input.faction || 'unknown'), instance: String(input.instance || 'unknown'), profile: String(input.profile || ''),
+			optimizerVersion: String(input.optimizerVersion || 'unknown'), policyVersion: String(input.policyVersion || 'unknown'),
+			inputSnapshotId: String(input.inputSnapshotId || ''), decidedAtMs, expectedLp,
+			installedLp: nullableNumber(input.installedLp), neutralTargetLp: nullableNumber(input.neutralTargetLp),
+			requestedTargetLp: nullableNumber(input.requestedTargetLp), optimizerTargetLp: nullableNumber(input.optimizerTargetLp),
+			candidates,
+		};
+		const decisionId = `lp-decision:v1:${hashUpgradeOptimizerDecisionText(canonicalizeUpgradeOptimizerDecisionValue(identityPayload))}`;
+		return {
+			decisionId, schemaVersion: 1, faction: identityPayload.faction, instance: identityPayload.instance, profile: identityPayload.profile,
+			applicationVersion: String(input.applicationVersion || 'unknown'), optimizerVersion: identityPayload.optimizerVersion,
+			policyVersion: identityPayload.policyVersion, decidedAtMs, inputSnapshotId: identityPayload.inputSnapshotId, expectedLp,
+			inputs: { installedLp: identityPayload.installedLp, neutralTargetLp: identityPayload.neutralTargetLp, requestedTargetLp: identityPayload.requestedTargetLp, optimizerTargetLp: identityPayload.optimizerTargetLp },
+			selectedCandidateId: candidates.find(candidate => candidate.selected)?.candidateId || '', candidates,
+		};
+	}
+
+	function buildUpgradeOptimizerDecisionEventLines(decision) {
+		if (!decision?.decisionId || !Array.isArray(decision.candidates)) return [];
+		const timestamp = formatSlyaInfluxTimestamp(decision.decidedAtMs);
+		const nullableField = (name, value) => value === null || value === undefined || !Number.isFinite(Number(value)) ? '' : `,${name}=${Number(value)}`;
+		const decisionTags = `decisionId=${influxEscape(decision.decisionId)},faction=${influxEscape(decision.faction || 'unknown')},instance=${influxEscape(decision.instance || 'unknown')},schemaVersion=1`;
+		const header = `lp_optimizer_decision_v1,${decisionTags} candidateCount=${decision.candidates.length}i,optimizerVersion=${influxFieldString(decision.optimizerVersion || '')},policyVersion=${influxFieldString(decision.policyVersion || '')},applicationVersion=${influxFieldString(decision.applicationVersion || '')},profile=${influxFieldString(decision.profile || '')},inputSnapshotId=${influxFieldString(decision.inputSnapshotId || '')},selectedCandidateId=${influxFieldString(decision.selectedCandidateId || '')},expectedLpStatus=${influxFieldString(decision.expectedLp?.status || 'NOT_OBSERVED')},expectedLpProvenance=${influxFieldString(decision.expectedLp?.provenance || 'NOT_OBSERVED')}${nullableField('expectedAdditionalLp', decision.expectedLp?.additionalLp)}${nullableField('expectedTotalLp', decision.expectedLp?.totalLp)}${nullableField('expectedLpSourceTimestampMs', decision.expectedLp?.sourceTimestampMs)}${nullableField('expectedLpAgeMs', decision.expectedLp?.ageMs)}${nullableField('installedLp', decision.inputs?.installedLp)}${nullableField('neutralTargetLp', decision.inputs?.neutralTargetLp)}${nullableField('requestedTargetLp', decision.inputs?.requestedTargetLp)}${nullableField('optimizerTargetLp', decision.inputs?.optimizerTargetLp)} ${timestamp}`;
+		const candidateLines = decision.candidates.map(candidate => `lp_optimizer_candidate_v1,decisionId=${influxEscape(decision.decisionId)},candidateId=${influxEscape(candidate.candidateId)},component=${influxEscape(candidate.component)},schemaVersion=1 eligible=${candidate.eligible ? 1 : 0}i,selected=${candidate.selected ? 1 : 0}i,upgrade=${influxFieldString(candidate.upgrade)},rejectionReasons=${influxFieldString(candidate.rejectionReasons.join(','))},selectionReason=${influxFieldString(candidate.selectionReason)},tieBreakReason=${influxFieldString(candidate.tieBreakReason)},priceSource=${influxFieldString(candidate.price.source)},priceStatus=${influxFieldString(candidate.price.status)},scoreBreakdown=${influxFieldString(canonicalizeUpgradeOptimizerDecisionValue(candidate.scoreBreakdown))}${nullableField('lpGain', candidate.lpGain)}${nullableField('costAtlas', candidate.costAtlas)}${nullableField('atlasPerLp', candidate.atlasPerLp)}${nullableField('secondsPerUnit', candidate.secondsPerUnit)}${nullableField('crewRequired', candidate.crewRequired)}${nullableField('durationSeconds', candidate.durationSeconds)}${nullableField('score', candidate.score)}${nullableField('rank', candidate.rank)}${nullableField('priceAtlas', candidate.price.atlas)}${nullableField('priceTimestampMs', candidate.price.timestampMs)} ${timestamp}`);
+		return [header, ...candidateLines];
+	}
+
+	async function queueUpgradeOptimizerDecisionEvidence(decision) {
+		const lines = buildUpgradeOptimizerDecisionEventLines(decision);
+		if (!lines.length) return false;
+		const outbox = await loadSlyaCostSourceOutbox();
+		let changed = false;
+		lines.forEach((line, index) => {
+			const identity = `optimizer_decision:${decision.decisionId}:${index}`;
+			if (outbox.has(identity)) return;
+			outbox.set(identity, { line, queuedAtMs: Date.now(), retryAfterMs: 0, attemptCount: 0 });
+			changed = true;
+		});
+		if (changed) await persistSlyaCostSourceOutbox();
+		return changed;
+	}
+
 	const SLYA_COST_SOURCE_OUTBOX_KEY = 'slyaCostSourceEventOutbox_v1';
 	let pendingSlyaCostSourceEventLines = null;
 	let slyaCostSourcePersistTail = Promise.resolve();
