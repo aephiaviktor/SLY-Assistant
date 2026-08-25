@@ -119,3 +119,13 @@ test('production wiring reuses the durable outbox and adds no acquisition cadenc
   assert.match(source, /decisionId/);
   assert.doesNotMatch(source, /setInterval\([^\n]*lp_optimizer_decision_v1|setTimeout\([^\n]*lp_optimizer_decision_v1|fetch\([^\n]*lp_optimizer_decision_v1/);
 });
+
+test('decision lineage survives scheduler row, craft slot, job cache, claim and completion', () => {
+  assert.match(source, /lpAutomationDecisionId: String\(row\?\.decisionId \|\| ''\)/);
+  assert.match(source, /lpAutomationCandidateId: String\(row\?\.candidateId \|\| ''\)/);
+  assert.match(source, /decisionId: String\(userCraft\.lpAutomationDecisionId \|\| ''\)/);
+  assert.match(source, /candidateId: String\(userCraft\.lpAutomationCandidateId \|\| ''\)/);
+  assert.match(source, /decisionId: String\(upgradeTelemetryJob\?\.decisionId \|\| userCraft\?\.lpAutomationDecisionId \|\| ''\)/);
+  assert.match(source, /optimizerDecisionId=\$\{influxFieldString\(job\.decisionId \|\| ''\)\}/);
+  assert.match(source, /optimizerCandidateId=\$\{influxFieldString\(job\.candidateId \|\| ''\)\}/);
+});

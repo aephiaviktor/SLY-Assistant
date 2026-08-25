@@ -3076,6 +3076,9 @@
 				lpAutomationManaged: true,
 				lpAutomationUpdatedAt: now.toISOString(),
 				lpAutomationCycleStamp: cycleStamp,
+				lpAutomationDecisionId: String(row?.decisionId || ''),
+				lpAutomationCandidateId: String(row?.candidateId || ''),
+				lpAutomationInputSnapshotId: String(row?.inputSnapshotId || ''),
 				lpAutomationSecondsPerUnit: Math.max(1, Number(row?.secondsPerUnit || 1)),
 				lpAutomationUpgradingHour: Math.max(0, Math.floor(Number(row?.finalUpgradingHour || row?.upgradingHour || 0))),
 				lpAutomationTargetFinishAtUtc: String(row?.nextXx59Utc || targetFinishAtUtc || ''),
@@ -6476,7 +6479,10 @@
 			startedAt: maybeBnToNumber(job.startedAt, Date.now()),
 			feeAtlas: Number(job.feeAtlas || 0),
 			txCostSolStart: Number(job.txCostSolStart || 0),
-			txFeeLamportsStart: Math.max(0, Math.round(Number(job.txFeeLamportsStart || 0)))
+			txFeeLamportsStart: Math.max(0, Math.round(Number(job.txFeeLamportsStart || 0))),
+			decisionId: String(job.decisionId || ''),
+			candidateId: String(job.candidateId || ''),
+			inputSnapshotId: String(job.inputSnapshotId || '')
 		};
 
 		upgradeTelemetryCache.set(key, payload);
@@ -6538,7 +6544,10 @@
 			`,state=${influxFieldString(userCraft?.state || '')}` +
 			`,completionTelemetryId=${influxFieldString(userCraft?.slyaUpgradeClaimAttemptLedger?.completionTelemetryId || '')}` +
 			`,claimAttemptIdentity=${influxFieldString(userCraft?.slyaUpgradeClaimAttemptLedger?.attemptIdentity || '')}` +
-			`,claimAttemptFinalState=${influxFieldString(userCraft?.slyaUpgradeClaimAttemptLedger?.authoritativeFinalState || '')}`;
+			`,claimAttemptFinalState=${influxFieldString(userCraft?.slyaUpgradeClaimAttemptLedger?.authoritativeFinalState || '')}` +
+			`,optimizerDecisionId=${influxFieldString(job.decisionId || '')}` +
+			`,optimizerCandidateId=${influxFieldString(job.candidateId || '')}` +
+			`,optimizerInputSnapshotId=${influxFieldString(job.inputSnapshotId || '')}`;
 		await sendToInflux(line);
 		await recordUpgradeAutomationEvent({
 			ts: completedAt,
@@ -12294,6 +12303,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                 detectedAtMs,
                 queuedAtMs: Date.now(),
                 triggeringPath: 'craft_poll_completion',
+                decisionId: String(upgradeTelemetryJob?.decisionId || userCraft?.lpAutomationDecisionId || ''),
+                candidateId: String(upgradeTelemetryJob?.candidateId || userCraft?.lpAutomationCandidateId || ''),
             };
             await recordUpgradeClaimAttemptTransition(userCraft, {
                 ...claimAttemptBase,
@@ -19235,7 +19246,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                                         startedAt: Date.now(),
                                         feeAtlas: result.feeAtlas || 0,
                                         txCostSolStart: userCraft.txCostSolStart || 0,
-                                        txFeeLamportsStart: userCraft.txFeeLamportsStart || 0
+                                        txFeeLamportsStart: userCraft.txFeeLamportsStart || 0,
+                                        decisionId: String(userCraft.lpAutomationDecisionId || ''),
+                                        candidateId: String(userCraft.lpAutomationCandidateId || ''),
+                                        inputSnapshotId: String(userCraft.lpAutomationInputSnapshotId || '')
                                     });
                                 } catch (error) {
                                     cLog(1, `${FleetTimeStamp(userCraft.label)} Failed to cache upgrade telemetry for craftingId=${result.craftingId}`, error);
