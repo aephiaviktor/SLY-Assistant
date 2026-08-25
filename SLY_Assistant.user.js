@@ -1862,8 +1862,20 @@
 
 	async function persistUpgradeAutomationSchedulerPlanFromSummary(stage, summary, settings = {}, now = new Date()) {
 		const capture = getUpgradeAutomationSchedulerRowsFromSummary(summary, settings, now);
-		const payload = await persistUpgradeAutomationSchedulerPlan(stage, capture.rows, { targetFinishAtUtc: capture.targetFinishAtUtc }, settings, now);
-		return { ...capture, payload };
+		const evidenceContext = {
+			faction: getUpgradeAutomationInfluxFactionTag(),
+			instance: getSlyaInfluxInstanceTag(),
+			profile: String(userProfileAcct?.toString?.() || ''),
+			applicationVersion: AEPHIA_SLYA_VERSION,
+			decidedAtMs: now.getTime(),
+			inputSnapshotId: getUpgradeAutomationCycleStamp(now, settings),
+			priceTimestampMs: Number(upgradeAutomationGmPriceCache?.fetchedAt || 0) || null,
+		};
+		const decisions = buildUpgradeOptimizerDecisionEvidenceBatch(summary || {}, evidenceContext);
+		for (const decision of decisions) await queueUpgradeOptimizerDecisionEvidence(decision);
+		const evidenceRows = attachUpgradeOptimizerDecisionEvidenceToScheduleRows(summary || {}, capture.rows, evidenceContext);
+		const payload = await persistUpgradeAutomationSchedulerPlan(stage, evidenceRows, { targetFinishAtUtc: capture.targetFinishAtUtc }, settings, now);
+		return { ...capture, rows: evidenceRows, decisions, payload };
 	}
 
 	async function refreshUpgradeAutomationExecutionSummaryForScheduler(stage, now = new Date(), timeoutMs = 12000) {
@@ -9051,6 +9063,66 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			inputs: { installedLp: identityPayload.installedLp, neutralTargetLp: identityPayload.neutralTargetLp, requestedTargetLp: identityPayload.requestedTargetLp, optimizerTargetLp: identityPayload.optimizerTargetLp },
 			selectedCandidateId: candidates.find(candidate => candidate.selected)?.candidateId || '', candidates,
 		};
+	}
+
+	function buildUpgradeOptimizerDecisionEvidenceBatch(summary = {}, context = {}) {
+		const rows = Array.isArray(summary.neutralComponentPlan) ? summary.neutralComponentPlan : [];
+		const selectedRows = rows.filter(row => Math.max(0, Math.floor(Number(row.finalCrew ?? row.crew ?? 0))) > 0);
+		const priceTimestampMs = context.priceTimestampMs == null ? null : Number(context.priceTimestampMs);
+		const rankable = rows.filter(row => Number.isFinite(Number(row.optimizer2NetAtlasPerSecond ?? row.lpPerSecond)));
+		const rankedNames = [...rankable].sort((a, b) => Number(b.optimizer2NetAtlasPerSecond ?? b.lpPerSecond) - Number(a.optimizer2NetAtlasPerSecond ?? a.lpPerSecond) || String(a.displayName || a.name || '').localeCompare(String(b.displayName || b.name || ''))).map(row => String(row.displayName || row.name || ''));
+		const candidateFor = (row, selectedName) => {
+			const component = String(row.displayName || row.name || 'unknown');
+			const selected = component === selectedName;
+			const eligible = !!row.phantomUpgradeEligible && !row.specialRiskBlocked && !row.phantomInventoryBlocked && !row.targetPhaseBlocked;
+			const rejectionReasons = [];
+			if (row.specialRiskBlocked) rejectionReasons.push('special_risk_blocked');
+			if (row.phantomInventoryBlocked) rejectionReasons.push('phantom_inventory_blocked');
+			if (row.targetPhaseBlocked) rejectionReasons.push('target_phase_blocked');
+			if (!row.phantomUpgradeEligible && !rejectionReasons.length) rejectionReasons.push('phantom_ineligible');
+			if (eligible && !selected) rejectionReasons.push('ranked_lower_or_not_allocated');
+			const priceAtlas = Number.isFinite(Number(row.optimizer2GmPrice)) ? Number(row.optimizer2GmPrice) : null;
+			return {
+				component, upgrade: component === 'Survey Data Unit' ? 'SDU Upgrade' : `${component} Upgrade`, eligible, selected,
+				lpGain: Number.isFinite(Number(row.lpPerUnit)) ? Number(row.lpPerUnit) : null,
+				costAtlas: priceAtlas,
+				atlasPerLp: priceAtlas !== null && Number(row.lpPerUnit) > 0 ? priceAtlas / Number(row.lpPerUnit) : null,
+				secondsPerUnit: Number.isFinite(Number(row.secondsPerUnit)) ? Number(row.secondsPerUnit) : null,
+				crewRequired: Math.max(0, Math.floor(Number(row.finalCrew ?? row.crew ?? 0))),
+				score: Number.isFinite(Number(row.optimizer2NetAtlasPerSecond ?? row.lpPerSecond)) ? Number(row.optimizer2NetAtlasPerSecond ?? row.lpPerSecond) : null,
+				scoreBreakdown: { netAtlasPerSecond: Number.isFinite(Number(row.optimizer2NetAtlasPerSecond)) ? Number(row.optimizer2NetAtlasPerSecond) : null, lpPerSecond: Number.isFinite(Number(row.lpPerSecond)) ? Number(row.lpPerSecond) : null, finalBufferDays: Number.isFinite(Number(row.finalBufferDays)) ? Number(row.finalBufferDays) : null },
+				rank: rankedNames.includes(component) ? rankedNames.indexOf(component) + 1 : null,
+				rejectionReasons, selectionReason: selected ? 'optimizer_allocated_crew' : '',
+				tieBreakReason: selected ? String(row.optimizerTieBreakReason || '') : '',
+				priceAtlas, priceSource: priceAtlas === null ? 'NOT_OBSERVED' : 'aephia_gm_price_cache', priceTimestampMs,
+				priceStatus: priceAtlas === null ? 'NOT_OBSERVED' : 'observed',
+			};
+		};
+		const expectedSnapshotMs = Date.parse(String(summary.expectedLpByEodSnapshotTime || ''));
+		const common = {
+			...context, optimizerVersion: String(summary.optimizerVersion || 'unknown'), policyVersion: 'slya.lp.optimizer-policy.v1',
+			expectedAdditionalLp: summary.expectedLpByEod ?? null, expectedTotalLp: summary.expectedTotalLpByEod ?? null,
+			expectedLpSourceTimestampMs: Number.isFinite(expectedSnapshotMs) ? expectedSnapshotMs : null,
+			expectedLpProvenance: summary.expectedLpByEodSnapshotTime ? 'influx:expected_lp_by_eod' : 'NOT_OBSERVED',
+			expectedLpStatus: summary.expectedLpByEodSnapshotTime ? (summary.expectedLpByEodAgeMs > 15 * 60 * 1000 ? 'stale' : 'fresh_complete') : 'NOT_OBSERVED',
+			installedLp: summary.installedToday ?? null, neutralTargetLp: summary.neutralLpTarget ?? null,
+			requestedTargetLp: summary.requestedLpTargetOpt ?? null, optimizerTargetLp: summary.achievableLpTargetOpt ?? null,
+		};
+		if (!selectedRows.length) return [buildUpgradeOptimizerDecisionEvidence({ ...common, candidates: rows.map(row => candidateFor(row, '')), noUpgradeReason: rows.length ? 'optimizer_allocated_no_crew' : 'optimizer_summary_unavailable' })];
+		return selectedRows.map(selectedRow => buildUpgradeOptimizerDecisionEvidence({ ...common, candidates: rows.map(row => candidateFor(row, String(selectedRow.displayName || selectedRow.name || ''))) }));
+	}
+
+	function attachUpgradeOptimizerDecisionEvidenceToScheduleRows(summary = {}, scheduleRows = [], context = {}) {
+		const decisions = buildUpgradeOptimizerDecisionEvidenceBatch(summary, context);
+		const byComponent = new Map();
+		for (const decision of decisions) {
+			const selected = decision.candidates.find(candidate => candidate.selected && candidate.component !== '__NO_UPGRADE__');
+			if (selected) byComponent.set(selected.component, { decision, selected });
+		}
+		return (Array.isArray(scheduleRows) ? scheduleRows : []).map(row => {
+			const linked = byComponent.get(String(row.component || row.displayName || row.name || ''));
+			return { ...row, decisionId: linked?.decision.decisionId || '', candidateId: linked?.selected.candidateId || '', inputSnapshotId: linked?.decision.inputSnapshotId || '' };
+		});
 	}
 
 	function buildUpgradeOptimizerDecisionEventLines(decision) {

@@ -34,6 +34,8 @@ function api() {
     'hashUpgradeOptimizerDecisionText',
     'normalizeUpgradeOptimizerDecisionCandidate',
     'buildUpgradeOptimizerDecisionEvidence',
+    'buildUpgradeOptimizerDecisionEvidenceBatch',
+    'attachUpgradeOptimizerDecisionEvidenceToScheduleRows',
     'buildUpgradeOptimizerDecisionEventLines',
   ];
   const context = vm.createContext({ Date, JSON, Math, Number, Object, String, Array, Map,
@@ -102,6 +104,34 @@ test('no-upgrade and unavailable inputs are explicit rather than silently zero',
   assert.equal(result.candidates.at(-1).selectionReason, 'optimizer_inputs_unavailable');
 });
 
+test('actual optimizer summary creates one decision per selected job with the complete universe', () => {
+  const decisionApi = api();
+  const summary = {
+    optimizerVersion: 'O2', expectedLpByEod: 1234, expectedTotalLpByEod: 5678,
+    expectedLpByEodSnapshotTime: '2026-08-25T09:25:40.000Z', installedToday: 1000,
+    neutralLpTarget: 4000, requestedLpTargetOpt: 5000, achievableLpTargetOpt: 4800,
+    neutralComponentPlan: [
+      { name: 'Framework', displayName: 'Framework', phantomUpgradeEligible: true, finalCrew: 10, lpPerUnit: 68, secondsPerUnit: 12, optimizer2GmPrice: 0.004, optimizer2NetAtlasPerSecond: 1.2 },
+      { name: 'Electronics', displayName: 'Electronics', phantomUpgradeEligible: true, finalCrew: 20, lpPerUnit: 92, secondsPerUnit: 14, optimizer2GmPrice: 0.005, optimizer2NetAtlasPerSecond: 1.4 },
+      { name: 'Field Stabilizer', displayName: 'Field Stabilizer', phantomUpgradeEligible: false, finalCrew: 0, lpPerUnit: 100, secondsPerUnit: 16, optimizer2GmPrice: null, optimizer2NetAtlasPerSecond: null, specialRiskBlocked: true },
+    ],
+  };
+  const decisions = decisionApi.buildUpgradeOptimizerDecisionEvidenceBatch(summary, {
+    faction: 'ONI', instance: 'ONI', profile: 'profile', applicationVersion: '0.7.35-268',
+    decidedAtMs: Date.parse('2026-08-25T09:26:40.000Z'), inputSnapshotId: 'cycle', priceTimestampMs: Date.parse('2026-08-25T09:26:00.000Z'),
+  });
+  assert.equal(decisions.length, 2);
+  assert.deepEqual(decisions.map(item => item.candidates.length), [4, 4]);
+  assert.deepEqual(decisions.map(item => item.candidates.find(row => row.selected).component).sort(), ['Electronics', 'Framework']);
+  assert.equal(decisions[0].candidates.find(row => row.component === 'Field Stabilizer').rejectionReasons[0], 'special_risk_blocked');
+  const rows = decisionApi.attachUpgradeOptimizerDecisionEvidenceToScheduleRows(summary, [
+    { component: 'Framework' }, { component: 'Electronics' }, { component: 'Field Stabilizer' },
+  ], { faction: 'ONI', instance: 'ONI', profile: 'profile', applicationVersion: '0.7.35-268', decidedAtMs: Date.parse('2026-08-25T09:26:40.000Z'), inputSnapshotId: 'cycle' });
+  assert.match(rows[0].decisionId, /^lp-decision:v1:/);
+  assert.match(rows[1].candidateId, /^lp-candidate:v1:/);
+  assert.equal(rows[2].decisionId, '');
+});
+
 test('decision and candidates serialize as joinable append-only Influx events', () => {
   const decisionApi = api();
   const result = decisionApi.buildUpgradeOptimizerDecisionEvidence(base);
@@ -114,7 +144,9 @@ test('decision and candidates serialize as joinable append-only Influx events', 
 });
 
 test('production wiring reuses the durable outbox and adds no acquisition cadence', () => {
-  assert.match(source, /queueUpgradeOptimizerDecisionEvidence/);
+  assert.match(source, /const decisions = buildUpgradeOptimizerDecisionEvidenceBatch\(summary \|\| \{\}, evidenceContext\)/);
+  assert.match(source, /for \(const decision of decisions\) await queueUpgradeOptimizerDecisionEvidence\(decision\)/);
+  assert.match(source, /attachUpgradeOptimizerDecisionEvidenceToScheduleRows\(summary \|\| \{\}, capture\.rows, evidenceContext\)/);
   assert.match(source, /SLYA_COST_SOURCE_OUTBOX_KEY/);
   assert.match(source, /decisionId/);
   assert.doesNotMatch(source, /setInterval\([^\n]*lp_optimizer_decision_v1|setTimeout\([^\n]*lp_optimizer_decision_v1|fetch\([^\n]*lp_optimizer_decision_v1/);
