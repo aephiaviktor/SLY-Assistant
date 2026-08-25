@@ -9433,17 +9433,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			}
 			return annotated.map(wrapper => ({ wrapper, transactionLevel: false }));
 		}
-		const anchor = wrappers[0];
-		if (!anchor) return [];
-		// Without explicit per-operation metadata, the confirmed token delta is
-		// transaction-level evidence.  Pick one deterministic wrapper only; do
-		// not attach the same aggregate to every submitted instruction.
-		return [{
-			wrapper: { ...anchor, slyaAccountingEvidence: {
-				schemaVersion: 1, evidenceType, operationId: '', inputs: [], outputs: [], directFees: '0', transactionCosts: null, lineage: {}
-			} },
-			transactionLevel: true,
-		}];
+		// Generic transaction-level token deltas cannot prove which operation,
+		// asset accounts, fleet, or location produced them.  Evidence is emitted
+		// only by explicitly annotated operation wrappers; unsupported call sites
+		// remain absent/pending in the consumer instead of mutating inventory.
+		return [];
 	}
 
 	async function buildConfirmedSlyaAccountingEvidence(context = {}) {
@@ -9457,9 +9451,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const profile = String(metadata?.profile || context?.profile || (typeof userProfileAcct !== 'undefined' ? userProfileAcct?.toString?.() : '') || '').trim();
 		const faction = String(metadata?.faction || getUpgradeAutomationInfluxFactionTag() || '').trim();
 		if (!metadata || !['scanning', 'mining', 'crafting', 'upgrading'].includes(evidenceType) || !signature || !fleetAccount || !profile || !faction || !Number.isInteger(outerInstructionIndex) || outerInstructionIndex < 0 || !Number.isInteger(slot) || slot < 0 || !Number.isInteger(blockTime) || blockTime <= 0) return null;
-		const derivedDeltas = deriveSlyaAccountingTokenDeltas(txResult);
-		const inputs = normalizeSlyaAccountingEntries(metadata.inputs?.length ? metadata.inputs : derivedDeltas.inputs);
-		const outputs = normalizeSlyaAccountingEntries(metadata.outputs?.length ? metadata.outputs : derivedDeltas.outputs);
+		const inputs = normalizeSlyaAccountingEntries(metadata.inputs);
+		const outputs = normalizeSlyaAccountingEntries(metadata.outputs);
 		const directFees = normalizeSlyaAccountingMoney(metadata.directFees);
 		const transactionCosts = metadata.transactionCosts === null ? { solLamports: String(Math.max(0, Math.round(Number(txResult?.slyaTxFeeLamports ?? txResult?.meta?.fee ?? 0)))) } : normalizeSlyaAccountingMoney(metadata.transactionCosts);
 		if (!inputs || !outputs || directFees === null || transactionCosts === null) return null;

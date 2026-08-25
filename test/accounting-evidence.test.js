@@ -92,48 +92,27 @@ test('confirmed evidence has immutable identity, exact quantities, lineage and c
   assert.match(api.buildSlyaAccountingEvidenceLine(evidence), /programId=/);
   const replay = await api.buildConfirmedSlyaAccountingEvidence({ wrapper, txResult: tx(), fleet: { label: 'Fleet', publicKey: { toString: () => 'fleet-1' } }, outerInstructionIndex: 0 });
   assert.deepEqual(JSON.parse(JSON.stringify(replay)), JSON.parse(JSON.stringify(evidence)));
-  const derivedTx = { ...tx(), meta: { fee: 9, preTokenBalances: [{ accountIndex: 1, mint: 'MINT-IN', uiTokenAmount: { amount: '1000', decimals: 2 } }], postTokenBalances: [{ accountIndex: 1, mint: 'MINT-IN', uiTokenAmount: { amount: '250', decimals: 2 } }, { accountIndex: 2, mint: 'MINT-OUT', uiTokenAmount: { amount: '125', decimals: 2 } }] } };
-  const derivedWrapper = { ...wrapper, slyaAccountingEvidence: { ...wrapper.slyaAccountingEvidence, inputs: [], outputs: [] } };
-  const derived = await api.buildConfirmedSlyaAccountingEvidence({ wrapper: derivedWrapper, txResult: derivedTx, fleet: { publicKey: { toString: () => 'fleet-1' } }, outerInstructionIndex: 0 });
-  assert.deepEqual(JSON.parse(JSON.stringify(derived.inputs.map((entry) => [entry.mint, entry.quantity]))), [['MINT-IN', '7.5']]);
-  assert.deepEqual(JSON.parse(JSON.stringify(derived.outputs.map((entry) => [entry.mint, entry.quantity]))), [['MINT-OUT', '1.25']]);
+  const unboundWrapper = { ...wrapper, slyaAccountingEvidence: { ...wrapper.slyaAccountingEvidence, inputs: [], outputs: [] } };
+  const unbound = await api.buildConfirmedSlyaAccountingEvidence({ wrapper: unboundWrapper, txResult: tx(), fleet: { publicKey: { toString: () => 'fleet-1' } }, outerInstructionIndex: 0 });
+  assert.deepEqual(JSON.parse(JSON.stringify(unbound.inputs)), []);
+  assert.deepEqual(JSON.parse(JSON.stringify(unbound.outputs)), []);
   const changed = { ...wrapper, slyaAccountingEvidence: { ...wrapper.slyaAccountingEvidence, lineage: { craftingProcess: 'process-2' } } };
   const conflict = await api.buildConfirmedSlyaAccountingEvidence({ wrapper: changed, txResult: tx(), fleet: { label: 'Fleet', publicKey: { toString: () => 'fleet-1' } }, outerInstructionIndex: 0 });
   assert.equal(conflict.eventId, evidence.eventId);
   assert.notEqual(conflict.payloadHash, evidence.payloadHash);
 });
 
-test('multi-wrapper unannotated transactions use one deterministic transaction anchor and conflict on changed replay', async () => {
+test('multi-wrapper unannotated transactions emit no generic token-delta evidence', () => {
   const api = load();
-  const wrappers = [{ instruction: { programId: { toString: () => 'SAGE_PROGRAM' }, data: new Uint8Array([7, 8, 9]) } }, { instruction: { programId: { toString: () => 'SAGE_PROGRAM' }, data: new Uint8Array([7, 8, 9]) } }];
-  const candidates = api.selectSlyaAccountingEvidenceCandidates(wrappers, 'mining');
-  assert.equal(candidates.length, 1);
-  assert.equal(candidates[0].transactionLevel, true);
-  const first = await api.buildConfirmedSlyaAccountingEvidence({ wrapper: candidates[0].wrapper, transactionLevel: true, txResult: tx(), fleet: { publicKey: { toString: () => 'fleet-1' } }, outerInstructionIndex: 0 });
-  const replay = await api.buildConfirmedSlyaAccountingEvidence({ wrapper: candidates[0].wrapper, transactionLevel: true, txResult: tx(), fleet: { publicKey: { toString: () => 'fleet-1' } }, outerInstructionIndex: 0 });
-  assert.equal(first.eventId, 'slya-accounting:v1:mining:confirmed-signature:tx');
-  assert.equal(replay.eventId, first.eventId);
-  assert.equal(replay.payloadHash, first.payloadHash);
-  const changed = { ...candidates[0].wrapper, slyaAccountingEvidence: { ...candidates[0].wrapper.slyaAccountingEvidence, lineage: { starbase: 'changed' } } };
-  const conflict = await api.buildConfirmedSlyaAccountingEvidence({ wrapper: changed, transactionLevel: true, txResult: tx(), fleet: { publicKey: { toString: () => 'fleet-1' } }, outerInstructionIndex: 0 });
-  assert.equal(conflict.eventId, first.eventId);
-  assert.notEqual(conflict.payloadHash, first.payloadHash);
+  const wrappers = [{ instruction: { programId: { toString: () => 'SAGE_PROGRAM' }, data: new Uint8Array([7, 8, 9]) } }];
+  assert.deepEqual(JSON.parse(JSON.stringify(api.selectSlyaAccountingEvidenceCandidates(wrappers, 'mining'))), []);
 });
 
-test('apply publishes one unannotated aggregate, replays idempotently, and quarantines a payload conflict', async () => {
+test('apply skips unannotated aggregate evidence without mutating the outbox', async () => {
   const api = load();
-  const wrappers = [{ instruction: { programId: { toString: () => 'SAGE_PROGRAM' }, data: new Uint8Array([7, 8, 9]) } }, { instruction: { programId: { toString: () => 'SAGE_PROGRAM' }, data: new Uint8Array([7, 8, 9]) } }];
-  const confirmed = { ...tx(), transaction: { ...tx().transaction, message: { ...tx().transaction.message, compiledInstructions: [{ programIdIndex: 0, data: new Uint8Array([7, 8, 9]) }] } } };
-  assert.equal(await api.applyConfirmedSlyaAccountingEvidence(wrappers, { publicKey: { toString: () => 'fleet-1' } }, confirmed, 'MINING'), 1);
-  assert.equal(api.outbox.size, 1);
-  assert.equal(await api.applyConfirmedSlyaAccountingEvidence(wrappers, { publicKey: { toString: () => 'fleet-1' } }, confirmed, 'MINING'), 0);
-  assert.equal(api.counters.deduplicated, 1);
-  const candidate = api.selectSlyaAccountingEvidenceCandidates(wrappers, 'mining')[0];
-  const changed = { ...candidate.wrapper, slyaAccountingEvidence: { ...candidate.wrapper.slyaAccountingEvidence, lineage: { changed: true } } };
-  const conflictEvidence = await api.buildConfirmedSlyaAccountingEvidence({ wrapper: changed, transactionLevel: true, txResult: confirmed, fleet: { publicKey: { toString: () => 'fleet-1' } }, outerInstructionIndex: 0 });
-  api.outbox.set(conflictEvidence.eventId, { line: api.buildSlyaAccountingEvidenceLine(conflictEvidence) });
-  assert.equal(await api.applyConfirmedSlyaAccountingEvidence(wrappers, { publicKey: { toString: () => 'fleet-1' } }, confirmed, 'MINING'), 0);
-  assert.equal(api.missing(), 1);
+  const wrappers = [{ instruction: { programId: { toString: () => 'SAGE_PROGRAM' }, data: new Uint8Array([7, 8, 9]) } }];
+  assert.equal(await api.applyConfirmedSlyaAccountingEvidence(wrappers, { publicKey: { toString: () => 'fleet-1' } }, tx(), 'MINING'), 0);
+  assert.equal(api.outbox.size, 0);
 });
 
 test('missing confirmed coordinates or authoritative scope fail closed', async () => {
