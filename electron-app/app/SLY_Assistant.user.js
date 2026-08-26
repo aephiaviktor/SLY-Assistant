@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-271
+// @aephia-version 0.7.35-272
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -9098,8 +9098,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const overlapEndMs = Math.min(observedEndMs, dayStartMs + SLYA_RENTAL_DAY_MS);
 			const overlapSeconds = Math.max(0, (overlapEndMs - overlapStartMs) / 1000);
 			if (overlapSeconds <= 0) continue;
+			const crewObservationDayStartMs = Math.floor((observedEndMs - 1) / SLYA_RENTAL_DAY_MS) * SLYA_RENTAL_DAY_MS;
 			points.push({ ...interval, fleetAccount, contractId, rentalId, startTimeMs: startMs, endTimeMs: endMs,
-				dayStartMs, overlapSeconds, dailyRateAtlas, rentalCostAtlas: dailyRateAtlas * overlapSeconds / 86400 });
+				dayStartMs, overlapSeconds, dailyRateAtlas, rentalCostAtlas: dailyRateAtlas * overlapSeconds / 86400,
+				crewObservedForDay: dayStartMs === crewObservationDayStartMs });
 		}
 		return points;
 	}
@@ -9119,6 +9121,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			`faction=${optimizationInfluxString(point.faction || '')}`,
 			`programGeneration=${optimizationInfluxString(point.programGeneration || '')}`,
 		];
+		if (point.crewObservedForDay && Number.isFinite(Number(point.requiredCrew)) && Number.isFinite(Number(point.crewCount))) {
+			fields.push(`requiredCrew=${Math.max(0, Math.trunc(Number(point.requiredCrew)))}i`);
+			fields.push(`crewCount=${Math.max(0, Math.trunc(Number(point.crewCount)))}i`);
+			fields.push(`crewSnapshotSource=${optimizationInfluxString('fleet_account_observed')}`);
+		}
 		return `fleet_rental_daily_v1,${tags} ${fields.join(',')} ${formatSlyaInfluxTimestamp(Number(point.dayStartMs))}`;
 	}
 
@@ -9127,7 +9134,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const fleetAccount = fleet?.publicKey?.toString ? fleet.publicKey.toString() : String(fleet?.publicKey || '');
 			const config = configsByFleet[fleetAccount];
 			const assignment = String(config?.assignment || '').trim();
-			return fleetAccount && assignment ? [{ fleetAccount, fleetLabel: String(fleet?.label || config?.name || ''), assignment }] : [];
+			const requiredCrew = Math.max(0, Math.trunc(Number(fleet?.requiredCrew) || 0));
+			const crewCount = Math.max(0, Math.trunc(Number(fleet?.crewCount) || 0));
+			return fleetAccount && assignment ? [{ fleetAccount, fleetLabel: String(fleet?.label || config?.name || ''), assignment, requiredCrew, crewCount }] : [];
 		});
 	}
 
@@ -9187,6 +9196,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					contractId: entry.contract.toString(), rentalId: entry.rental.toString(), programGeneration: entry.name,
 					profile: userProfileAcct?.publicKey?.toString ? userProfileAcct.publicKey.toString() : String(userProfileAcct || ''),
 					faction: getUpgradeAutomationInfluxFactionTag(),
+					requiredCrew: entry.requiredCrew, crewCount: entry.crewCount,
 					startTimeMs: Number(decodedRental.startTimeSeconds) * 1000,
 					endTimeMs: Number(decodedRental.endTimeSeconds) * 1000,
 					dailyRateAtlas,
@@ -15267,7 +15277,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-271', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-272', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),

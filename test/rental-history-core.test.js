@@ -70,18 +70,29 @@ test('invalid, owned, or incomplete interval data fails closed', () => {
   assert.deepEqual(Array.from(buildSlyaRentalDailyPoints({ fleetAccount: 'fleet', contractId: '', rentalId: '', startTimeMs: 0, endTimeMs: 1, dailyRateAtlas: 0 }, 1)), []);
 });
 
-test('only fleet-config entries with a non-empty assignment own emission', () => {
+test('only fleet-config entries with a non-empty assignment own emission and carry observed crew facts', () => {
   const { getSlyaAssignedRentalFleetConfigs } = loadCore();
   const fleets = [
-    { publicKey: { toString: () => 'assigned' }, label: 'Fleet A' },
-    { publicKey: { toString: () => 'unassigned' }, label: 'Fleet B' },
+    { publicKey: { toString: () => 'assigned' }, label: 'Fleet A', requiredCrew: 42, crewCount: 42 },
+    { publicKey: { toString: () => 'unassigned' }, label: 'Fleet B', requiredCrew: 7, crewCount: 0 },
     { publicKey: { toString: () => 'missing' }, label: 'Fleet C' },
   ];
   const result = getSlyaAssignedRentalFleetConfigs(fleets, { assigned: { assignment: 'Scan' }, unassigned: { assignment: '' } });
-  assert.deepEqual(JSON.parse(JSON.stringify(result)), [{ fleetAccount: 'assigned', fleetLabel: 'Fleet A', assignment: 'Scan' }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), [{ fleetAccount: 'assigned', fleetLabel: 'Fleet A', assignment: 'Scan', requiredCrew: 42, crewCount: 42 }]);
+});
+
+test('daily rental points preserve fleet-account crew facts without claiming crew provenance', () => {
+  const { buildSlyaRentalDailyPoints, buildSlyaRentalDailyPointLine } = loadCore();
+  const [point] = buildSlyaRentalDailyPoints({ fleetAccount: 'fleet', contractId: 'contract', rentalId: 'rental', startTimeMs: 0, endTimeMs: 86400000, dailyRateAtlas: 5, requiredCrew: 42, crewCount: 42 }, 86400000);
+  const line = buildSlyaRentalDailyPointLine(point);
+  assert.match(line, /requiredCrew=42i/);
+  assert.match(line, /crewCount=42i/);
+  assert.match(line, /crewSnapshotSource="fleet_account_observed"/);
+  assert.doesNotMatch(line, /crewIncluded|rentedWithCrew|crewProvidedByRental/);
 });
 
 test('integration batches contract and rental reads and schedules replayable refreshes', () => {
+  assert.match(source, /requiredCrew: entry\.requiredCrew, crewCount: entry\.crewCount/);
   assert.match(source, /getMultipleAccountsInfo\(candidates\.map\(\(entry\) => entry\.contract\), 'confirmed'\)/);
   assert.match(source, /getMultipleAccountsInfo\(active\.map\(\(entry\) => entry\.rental\), 'confirmed'\)/);
   assert.match(source, /await sendToInflux\(lines\.join\('\\n'\)\)/);
