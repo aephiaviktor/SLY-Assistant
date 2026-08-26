@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-270
+// @aephia-version 0.7.35-271
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -7746,6 +7746,11 @@ function renderAssistStats() {
     let userRedemptionConfigAcct = null;
 	let userFleetAccts = null;
 	let userFleets = [];
+	// Rental points are safe to replay. Delay the first pass until profile/fleet
+	// initialization has settled, then refresh often enough to finish today's
+	// partial UTC allocation and backfill every observed day after downtime.
+	setTimeout(() => { refreshSlyaRentalHistory(); }, 2 * 60 * 1000);
+	setInterval(() => { refreshSlyaRentalHistory(); }, 15 * 60 * 1000);
     let userXpAccounts = {
         userCouncilRankXpAccounts: {},
         userDataRunningXpAccounts: {},
@@ -9004,6 +9009,200 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const blockTime = Number(txResult?.blockTime);
 		if (!Number.isInteger(blockTime) || blockTime <= 0) return null;
 		return { timestampMs: blockTime * 1000, timestampProvenance: 'solana_block_time' };
+	}
+
+	const SLYA_RENTAL_DAY_MS = 86400000;
+	const SLYA_CURRENT_RENTAL_PROGRAM_ID = 'SRSLYxcFnjd5jG2DpJw4as6UEyjwJQK1U4J1TD1hvZH';
+	const SLYA_LEGACY_RENTAL_PROGRAM_ID = 'SRSLY1fq9TJqCk1gNSE7VZL2bztvTn9wm4VR8u8jMKT';
+	const SLYA_CURRENT_RENTAL_CONTRACT_OFFSETS = Object.freeze({ rate: 14, fleet: 80, activeRental: 176 });
+	const SLYA_LEGACY_RENTAL_CONTRACT_OFFSETS = Object.freeze({ activeRental: 99 });
+	const SLYA_CURRENT_RENTAL_OFFSETS = Object.freeze({ borrowerProfile: 77, contract: 109, rate: 141, startTime: 165, endTime: 173, serviceFee: 181, referrer: 191 });
+	const SLYA_LEGACY_RENTAL_OFFSETS = Object.freeze({ effectiveRate: 137, startTime: 145, endTime: 153, cancelled: 161 });
+	let slyaRentalHistoryRefreshInFlight = false;
+
+	function readSlyaRentalPublicKeyBytes(data, offset) {
+		if (!data || data.length < offset + 32) return null;
+		const bytes = data.subarray(offset, offset + 32);
+		return bytes.every((value) => value === 0) ? null : bytes;
+	}
+
+	function decodeSlyaCurrentRentalContract(data) {
+		const fleetBytes = readSlyaRentalPublicKeyBytes(data, SLYA_CURRENT_RENTAL_CONTRACT_OFFSETS.fleet);
+		const activeRentalBytes = readSlyaRentalPublicKeyBytes(data, SLYA_CURRENT_RENTAL_CONTRACT_OFFSETS.activeRental);
+		if (!fleetBytes || !activeRentalBytes || data.length < SLYA_CURRENT_RENTAL_CONTRACT_OFFSETS.rate + 8) return null;
+		return { fleetBytes, activeRentalBytes, rate: data.readBigUInt64LE(SLYA_CURRENT_RENTAL_CONTRACT_OFFSETS.rate) };
+	}
+
+	function decodeSlyaLegacyRentalContract(data) {
+		const activeRentalBytes = readSlyaRentalPublicKeyBytes(data, SLYA_LEGACY_RENTAL_CONTRACT_OFFSETS.activeRental);
+		return activeRentalBytes ? { activeRentalBytes } : null;
+	}
+
+	function decodeSlyaCurrentRental(data) {
+		if (!data || data.length < SLYA_CURRENT_RENTAL_OFFSETS.referrer + 2) return null;
+		const startTimeSeconds = data.readBigInt64LE(SLYA_CURRENT_RENTAL_OFFSETS.startTime);
+		const endTimeSeconds = data.readBigInt64LE(SLYA_CURRENT_RENTAL_OFFSETS.endTime);
+		if (startTimeSeconds <= 0n || endTimeSeconds <= startTimeSeconds) return null;
+		const referrerOption = data.readUInt8(SLYA_CURRENT_RENTAL_OFFSETS.referrer);
+		if (referrerOption !== 0 && referrerOption !== 1) return null;
+		const discountBpsOffset = SLYA_CURRENT_RENTAL_OFFSETS.referrer + 1 + (referrerOption === 1 ? 32 : 0);
+		const bidAtlasOffset = discountBpsOffset + 2 + 8;
+		if (data.length < bidAtlasOffset + 8) return null;
+		return {
+			borrowerProfileBytes: data.subarray(SLYA_CURRENT_RENTAL_OFFSETS.borrowerProfile, SLYA_CURRENT_RENTAL_OFFSETS.borrowerProfile + 32),
+			contractBytes: data.subarray(SLYA_CURRENT_RENTAL_OFFSETS.contract, SLYA_CURRENT_RENTAL_OFFSETS.contract + 32),
+			rate: data.readBigUInt64LE(SLYA_CURRENT_RENTAL_OFFSETS.rate),
+			startTimeSeconds,
+			endTimeSeconds,
+			serviceFee: data.readBigUInt64LE(SLYA_CURRENT_RENTAL_OFFSETS.serviceFee),
+			bidAtlas: data.readBigUInt64LE(bidAtlasOffset),
+		};
+	}
+
+	function decodeSlyaLegacyRental(data) {
+		if (!data || data.length <= SLYA_LEGACY_RENTAL_OFFSETS.cancelled || data.readUInt8(SLYA_LEGACY_RENTAL_OFFSETS.cancelled) !== 0) return null;
+		const effectiveRateAtlasPerDay = data.readDoubleLE(SLYA_LEGACY_RENTAL_OFFSETS.effectiveRate);
+		const startTimeSeconds = data.readBigInt64LE(SLYA_LEGACY_RENTAL_OFFSETS.startTime);
+		const endTimeSeconds = data.readBigInt64LE(SLYA_LEGACY_RENTAL_OFFSETS.endTime);
+		if (!Number.isFinite(effectiveRateAtlasPerDay) || effectiveRateAtlasPerDay <= 0 || startTimeSeconds <= 0n || endTimeSeconds <= startTimeSeconds) return null;
+		return { effectiveRateAtlasPerDay, startTimeSeconds, endTimeSeconds };
+	}
+
+	function getSlyaRenterPaidDailyRate(decodedRental, programGeneration) {
+		if (!decodedRental) return null;
+		if (programGeneration === 'legacy') {
+			const rate = Number(decodedRental.effectiveRateAtlasPerDay);
+			return Number.isFinite(rate) && rate > 0 ? rate : null;
+		}
+		const durationDays = Number(decodedRental.endTimeSeconds - decodedRental.startTimeSeconds) / 86400;
+		if (!Number.isFinite(durationDays) || durationDays <= 0) return null;
+		const baseRate = Number(decodedRental.rate) / 1e8;
+		const oneTimeCosts = (Number(decodedRental.serviceFee) + Number(decodedRental.bidAtlas)) / 1e8;
+		const rate = baseRate + oneTimeCosts / durationDays;
+		return Number.isFinite(rate) && rate > 0 ? rate : null;
+	}
+
+	function buildSlyaRentalDailyPoints(interval, observedThroughMs = Date.now()) {
+		const fleetAccount = String(interval?.fleetAccount || '').trim();
+		const contractId = String(interval?.contractId || '').trim();
+		const rentalId = String(interval?.rentalId || '').trim();
+		const startMs = Number(interval?.startTimeMs);
+		const endMs = Number(interval?.endTimeMs);
+		const dailyRateAtlas = Number(interval?.dailyRateAtlas);
+		const observedEndMs = Math.min(endMs, Number(observedThroughMs));
+		if (!fleetAccount || !contractId || !rentalId || !Number.isFinite(startMs) || !Number.isFinite(endMs)
+			|| endMs <= startMs || !Number.isFinite(dailyRateAtlas) || dailyRateAtlas <= 0 || observedEndMs <= startMs) return [];
+		const points = [];
+		for (let dayStartMs = Math.floor(startMs / SLYA_RENTAL_DAY_MS) * SLYA_RENTAL_DAY_MS; dayStartMs < observedEndMs; dayStartMs += SLYA_RENTAL_DAY_MS) {
+			const overlapStartMs = Math.max(startMs, dayStartMs);
+			const overlapEndMs = Math.min(observedEndMs, dayStartMs + SLYA_RENTAL_DAY_MS);
+			const overlapSeconds = Math.max(0, (overlapEndMs - overlapStartMs) / 1000);
+			if (overlapSeconds <= 0) continue;
+			points.push({ ...interval, fleetAccount, contractId, rentalId, startTimeMs: startMs, endTimeMs: endMs,
+				dayStartMs, overlapSeconds, dailyRateAtlas, rentalCostAtlas: dailyRateAtlas * overlapSeconds / 86400 });
+		}
+		return points;
+	}
+
+	function buildSlyaRentalDailyPointLine(point) {
+		if (!point || !Number.isFinite(Number(point.dayStartMs)) || !Number.isFinite(Number(point.rentalCostAtlas))) return '';
+		const tags = `fleetAccount=${influxEscape(String(point.fleetAccount))},contractId=${influxEscape(String(point.contractId))},rentalId=${influxEscape(String(point.rentalId))},schemaVersion=1`;
+		const fields = [
+			`rentalCostAtlas=${Number(point.rentalCostAtlas)}`,
+			`dailyRateAtlas=${Number(point.dailyRateAtlas)}`,
+			`overlapSeconds=${Number(point.overlapSeconds)}`,
+			`rentalStartMs=${Math.trunc(Number(point.startTimeMs))}i`,
+			`rentalEndMs=${Math.trunc(Number(point.endTimeMs))}i`,
+			`fleetLabel=${optimizationInfluxString(point.fleetLabel || '')}`,
+			`assignment=${optimizationInfluxString(point.assignment || '')}`,
+			`profile=${optimizationInfluxString(point.profile || '')}`,
+			`faction=${optimizationInfluxString(point.faction || '')}`,
+			`programGeneration=${optimizationInfluxString(point.programGeneration || '')}`,
+		];
+		return `fleet_rental_daily_v1,${tags} ${fields.join(',')} ${formatSlyaInfluxTimestamp(Number(point.dayStartMs))}`;
+	}
+
+	function getSlyaAssignedRentalFleetConfigs(fleets, configsByFleet = {}) {
+		return (Array.isArray(fleets) ? fleets : []).flatMap((fleet) => {
+			const fleetAccount = fleet?.publicKey?.toString ? fleet.publicKey.toString() : String(fleet?.publicKey || '');
+			const config = configsByFleet[fleetAccount];
+			const assignment = String(config?.assignment || '').trim();
+			return fleetAccount && assignment ? [{ fleetAccount, fleetLabel: String(fleet?.label || config?.name || ''), assignment }] : [];
+		});
+	}
+
+	async function loadSlyaAssignedRentalFleetConfigs() {
+		const configsByFleet = {};
+		for (const fleet of Array.isArray(userFleets) ? userFleets : []) {
+			const fleetAccount = fleet?.publicKey?.toString ? fleet.publicKey.toString() : '';
+			if (!fleetAccount) continue;
+			configsByFleet[fleetAccount] = await getParsedGmValue(fleetAccount, null);
+		}
+		return getSlyaAssignedRentalFleetConfigs(userFleets, configsByFleet);
+	}
+
+	function deriveSlyaRentalContract(fleetAccount, programId) {
+		return solanaWeb3.PublicKey.findProgramAddressSync([
+			BrowserBuffer.Buffer.Buffer.from('rental_contract'),
+			new solanaWeb3.PublicKey(fleetAccount).toBuffer(),
+		], new solanaWeb3.PublicKey(programId))[0];
+	}
+
+	function sameSlyaRentalPublicKey(bytes, publicKey) {
+		try { return new solanaWeb3.PublicKey(bytes).equals(publicKey); } catch (e) { return false; }
+	}
+
+	async function refreshSlyaRentalHistory() {
+		if (slyaRentalHistoryRefreshInFlight || !String(globalSettings?.influxURL || '').trim()) return false;
+		slyaRentalHistoryRefreshInFlight = true;
+		try {
+			const assignedFleets = await loadSlyaAssignedRentalFleetConfigs();
+			if (!assignedFleets.length) return false;
+			const generations = [
+				{ name: 'current', programId: SLYA_CURRENT_RENTAL_PROGRAM_ID, decodeContract: decodeSlyaCurrentRentalContract },
+				{ name: 'legacy', programId: SLYA_LEGACY_RENTAL_PROGRAM_ID, decodeContract: decodeSlyaLegacyRentalContract },
+			];
+			const candidates = generations.flatMap((generation) => assignedFleets.map((fleet) => ({
+				...fleet, ...generation, contract: deriveSlyaRentalContract(fleet.fleetAccount, generation.programId),
+			})));
+			const contractInfos = await solanaReadConnection.getMultipleAccountsInfo(candidates.map((entry) => entry.contract), 'confirmed');
+			const active = [];
+			candidates.forEach((entry, index) => {
+				const decodedContract = entry.decodeContract(contractInfos[index]?.data);
+				if (!decodedContract?.activeRentalBytes) return;
+				const decodedFleetAccount = decodedContract.fleetBytes ? new solanaWeb3.PublicKey(decodedContract.fleetBytes).toString() : entry.fleetAccount;
+				if (decodedFleetAccount !== entry.fleetAccount) return;
+				active.push({ ...entry, rental: new solanaWeb3.PublicKey(decodedContract.activeRentalBytes) });
+			});
+			if (!active.length) return false;
+			const rentalInfos = await solanaReadConnection.getMultipleAccountsInfo(active.map((entry) => entry.rental), 'confirmed');
+			const observedThroughMs = Date.now();
+			const lines = [];
+			active.forEach((entry, index) => {
+				const decodedRental = entry.name === 'current' ? decodeSlyaCurrentRental(rentalInfos[index]?.data) : decodeSlyaLegacyRental(rentalInfos[index]?.data);
+				if (!decodedRental || (entry.name === 'current' && !sameSlyaRentalPublicKey(decodedRental.contractBytes, entry.contract))) return;
+				const dailyRateAtlas = getSlyaRenterPaidDailyRate(decodedRental, entry.name);
+				const points = buildSlyaRentalDailyPoints({
+					fleetAccount: entry.fleetAccount, fleetLabel: entry.fleetLabel, assignment: entry.assignment,
+					contractId: entry.contract.toString(), rentalId: entry.rental.toString(), programGeneration: entry.name,
+					profile: userProfileAcct?.publicKey?.toString ? userProfileAcct.publicKey.toString() : String(userProfileAcct || ''),
+					faction: getUpgradeAutomationInfluxFactionTag(),
+					startTimeMs: Number(decodedRental.startTimeSeconds) * 1000,
+					endTimeMs: Number(decodedRental.endTimeSeconds) * 1000,
+					dailyRateAtlas,
+				}, observedThroughMs);
+				lines.push(...points.map(buildSlyaRentalDailyPointLine).filter(Boolean));
+			});
+			if (!lines.length) return false;
+			await sendToInflux(lines.join('\n'));
+			cLog(2, `[SLYA-RENTAL] refreshed ${lines.length} deterministic fleet/day point(s) for ${assignedFleets.length} assigned fleet(s)`);
+			return true;
+		} catch (error) {
+			cLog(1, '[SLYA-RENTAL] rental history refresh failed', error?.message || error);
+			return false;
+		} finally {
+			slyaRentalHistoryRefreshInFlight = false;
+		}
 	}
 
 	function buildSlyaFuelCostSourceEvent(input = {}) {
@@ -15068,7 +15267,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-270', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-271', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
