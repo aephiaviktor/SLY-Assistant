@@ -35,6 +35,7 @@ vm.createContext(context);
 vm.runInContext(`
   ${extractFunction('buildUpgradeAutomationLpPerProfileRpcPlan')}
   ${extractFunction('mergeUpgradeAutomationLpPerProfileSignatureState')}
+  ${extractFunction('shouldDiscoverUpgradeAutomationLpPerProfileSignatures')}
   ${extractFunction('updateUpgradeAutomationLpPerProfileWatchCohort')}
   ${extractFunction('computeUpgradeAutomationSageEodSeconds')}
   ${extractFunction('medianUpgradeAutomationRestartDelay')}
@@ -48,6 +49,7 @@ vm.runInContext(`
   ${extractFunction('formatUpgradeAutomationLpProcessHistoryInfluxLine')}
   this.buildPlan = buildUpgradeAutomationLpPerProfileRpcPlan;
   this.mergeState = mergeUpgradeAutomationLpPerProfileSignatureState;
+  this.shouldDiscover = shouldDiscoverUpgradeAutomationLpPerProfileSignatures;
   this.updateCohort = updateUpgradeAutomationLpPerProfileWatchCohort;
   this.sageEod = computeUpgradeAutomationSageEodSeconds;
   this.estimateRestartDelay = estimateUpgradeAutomationRestartDelay;
@@ -74,6 +76,9 @@ const merged = context.mergeState(
 );
 assert.equal(merged.cursor, 'sig-new');
 assert.deepEqual(merged.pending.map(row => row.signature), ['sig-pending', 'sig-new'], 'pending signatures survive restart, deduplicate, and exclude failed transactions');
+assert.equal(context.shouldDiscover({ pending: Array.from({ length: 499 }) }, 500), true, 'discovery continues below the per-profile backpressure threshold');
+assert.equal(context.shouldDiscover({ pending: Array.from({ length: 500 }) }, 500), false, 'discovery pauses at the threshold without discarding queued signatures');
+assert.equal(context.shouldDiscover({ pending: Array.from({ length: 501 }) }, 500), false, 'oversized migrated queues remain lossless and drain before discovery resumes');
 
 const now = 1_725_000_000;
 const cohort = context.updateCohort({ profiles: {
@@ -143,6 +148,10 @@ const historyRunner = extractFunction('runUpgradeAutomationLpPerProfileRedemptio
 assert.match(historyRunner, /getSignaturesForAddress\(new solanaWeb3\.PublicKey\(profile\)/, 'history queries watched profile addresses directly');
 assert.doesNotMatch(historyRunner, /starbaseKeys|getSignaturesForAddress\(starbase/, 'history no longer scans the high-volume starbase address');
 assert.match(historyRunner, /buildUpgradeAutomationLpPerProfileTransactionQueue\(state\.profiles, 250\)/, 'transaction inspection has one global per-cycle cap');
+assert.match(historyRunner, /shouldDiscoverUpgradeAutomationLpPerProfileSignatures\(entry/, 'signature discovery applies per-profile lossless backpressure');
+assert.match(source, /slyaUpgradeLpPerProfileHistory_v4_meta_/, 'history metadata uses the sharded v4 storage format');
+assert.match(source, /slyaUpgradeLpPerProfileHistory_v4_profile_/, 'each watched profile is persisted in its own storage shard');
+assert.match(source, /GM\.deleteValue\(legacyKey\)/, 'the legacy monolithic value is deleted only by the successful v4 save path');
 assert.match(historyRunner, /offset \+= 8/, 'transaction RPCs use bounded concurrency');
 assert.match(historyRunner, /\[HISTORY-DIAG\]/, 'history cycle logs categorized rejection counters');
 assert.match(source, /lp_redemption_total,[^`]*totalLp=/, 'authoritative cumulative LP total is recorded for hourly deltas');
