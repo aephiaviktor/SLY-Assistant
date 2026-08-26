@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-267
+// @aephia-version 0.7.35-269
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -6112,104 +6112,17 @@
 		}
 	}
 
-	function getCargoTelemetryInstructionBytes(data) {
-		if(data instanceof Uint8Array) return data;
-		if(ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-		if(Array.isArray(data)) return Uint8Array.from(data);
-		if(typeof data === 'string') { try { return Uint8Array.from(bs58.decode(data)); } catch(error) { return new Uint8Array(); } }
-		return new Uint8Array();
-	}
-
-	function getCargoTelemetryProgramIdentity(txResult, instruction) {
-		const message = txResult?.transaction?.message;
-		const programIndex = Number(instruction?.programIdIndex);
-		const key = Number.isInteger(programIndex) ? message?.staticAccountKeys?.[programIndex] : null;
-		return String(key?.toBase58?.() || key?.toString?.() || instruction?.programId?.toBase58?.() || instruction?.programId?.toString?.() || '');
-	}
-
-	function resolveConfirmedCargoOuterInstructionIndex(txResult, wrapper, usedIndexes = new Set()) {
-		const confirmed = txResult?.transaction?.message?.compiledInstructions || txResult?.transaction?.message?.instructions || [];
-		const targetData = getCargoTelemetryInstructionBytes(wrapper?.instruction?.data);
-		const targetProgram = String(wrapper?.instruction?.programId?.toBase58?.() || wrapper?.instruction?.programId?.toString?.() || '');
-		for(let index = 0; index < confirmed.length; index++) {
-			if(usedIndexes.has(index)) continue;
-			const candidateData = getCargoTelemetryInstructionBytes(confirmed[index]?.data);
-			if(candidateData.length !== targetData.length || candidateData.some((value, offset) => value !== targetData[offset])) continue;
-			const candidateProgram = getCargoTelemetryProgramIdentity(txResult, confirmed[index]);
-			if(targetProgram && candidateProgram !== targetProgram) continue;
-			return index;
-		}
-		return -1;
-	}
-
-	function decodeConfirmedCargoWithdrawRawAmount(txResult, outerInstructionIndex) {
-		const instruction = (txResult?.transaction?.message?.compiledInstructions || txResult?.transaction?.message?.instructions || [])[outerInstructionIndex];
-		const data = getCargoTelemetryInstructionBytes(instruction?.data);
-		if(data.length < 16) return '';
-		let amount = 0n;
-		for(let offset = 15; offset >= 8; offset--) amount = (amount << 8n) + BigInt(data[offset]);
-		return amount.toString();
-	}
-
-	function formatCargoTelemetryDecimalAmount(rawAmount, decimals) {
-		const raw = BigInt(String(rawAmount));
-		const places = Math.max(0, Math.floor(Number(decimals)));
-		if(places === 0) return raw.toString();
-		const negative = raw < 0n;
-		const digits = (negative ? -raw : raw).toString().padStart(places + 1, '0');
-		const whole = digits.slice(0, -places);
-		const fraction = digits.slice(-places).replace(/0+$/, '');
-		return `${negative ? '-' : ''}${whole}${fraction ? `.${fraction}` : ''}`;
-	}
-
-	function canonicalizeCargoTelemetryEvidencePayload(value) {
-		if(Array.isArray(value)) return `[${value.map(canonicalizeCargoTelemetryEvidencePayload).join(',')}]`;
-		if(value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalizeCargoTelemetryEvidencePayload(value[key])}`).join(',')}}`;
-		return JSON.stringify(value);
-	}
-
-	async function sha256CargoTelemetryText(value) {
-		const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(value)));
-		return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
-	}
-
-	async function buildConfirmedCargoDeliveryEvidence(context) {
-		const signature = String(context?.txResult?.slyaTxHash || context?.txResult?.transaction?.signatures?.[0] || '');
-		const outerInstructionIndex = Number(context?.outerInstructionIndex);
-		const rawAmount = decodeConfirmedCargoWithdrawRawAmount(context?.txResult, outerInstructionIndex);
-		const mintDecimals = Number(context?.mintDecimals);
-		const slot = Number(context?.txResult?.slot), blockTime = Number(context?.txResult?.blockTime);
-		if(!signature || !Number.isInteger(outerInstructionIndex) || outerInstructionIndex < 0 || !/^\d+$/.test(rawAmount) || !Number.isInteger(mintDecimals) || mintDecimals < 0 || !Number.isInteger(slot) || slot < 0 || !Number.isInteger(blockTime) || blockTime <= 0) return null;
-		const programId = getCargoTelemetryProgramIdentity(context?.txResult, (context?.txResult?.transaction?.message?.compiledInstructions || [])[outerInstructionIndex]) || String(context?.wrapper?.instruction?.programId || '');
-		if(!programId) return null;
-		const sourceIdentity = `${programId}:${signature}:${outerInstructionIndex}:unload`;
-		const eventId = `cargo-delivery:v1:${sourceIdentity}`;
-		const payload = {
-			schemaVersion: 1, movementType: 'unload', signature, outerInstructionIndex,
-			programId, slot, blockTime,
-			rawAmount, mintDecimals, decimalAmount: formatCargoTelemetryDecimalAmount(rawAmount, mintDecimals),
-			mint: String(context.mint || ''), fleetAccount: String(context.fleetAccount || ''), fleetLabel: String(context.fleetLabel || ''),
-			factionProfile: String(context.factionProfile || ''), profileAccount: String(context.profileAccount || ''), route: String(context.route || ''), cycleId: String(context.cycleId || ''),
-			allocationId: String(context.allocationId || `${context.cycleId || ''}:${eventId}`), eventId
-		};
-		return { ...payload, payloadHash: await sha256CargoTelemetryText(canonicalizeCargoTelemetryEvidencePayload(payload)) };
-	}
-
-	async function applyConfirmedCargoTelemetry(ix, fleet, txResult) {
-		if(!globalSettings.influxURL.length || !fleet || !txResult) return;
+	async function applyConfirmedCargoTelemetry(ix, fleet) {
+		if(!globalSettings.influxURL.length || !fleet) return;
 		const instructions = Array.isArray(ix) ? ix : [ix];
-		const operations = instructions.map((wrapper, sourcePosition) => ({ wrapper, sourcePosition, operation: wrapper?.slyaCargoTelemetry })).filter(item => item.operation);
+		const operations = instructions.map(item => item?.slyaCargoTelemetry).filter(Boolean);
 		if(!operations.length) return;
 		const fleetSavedData = await GM.getValue(fleet.publicKey.toString(), '{}');
 		const fleetParsedData = JSON.parse(fleetSavedData);
-		const usedIndexes = new Set();
-		for(const item of operations) {
-			const outerInstructionIndex = resolveConfirmedCargoOuterInstructionIndex(txResult, item.wrapper, usedIndexes);
-			if(outerInstructionIndex >= 0) usedIndexes.add(outerInstructionIndex);
-			const operation = { ...item.operation, sourcePosition: item.sourcePosition, wrapper: item.wrapper, txResult, outerInstructionIndex };
+		for(const operation of operations) {
 			if(operation.kind === 'load') {
 				await addFleetTelemetryCargoLoad(fleet, fleetParsedData, operation);
-			} else if(operation.kind === 'unload' && outerInstructionIndex >= 0) {
+			} else if(operation.kind === 'unload') {
 				await addFleetTelemetryCargoDelivery(fleet, fleetParsedData, operation);
 			}
 		}
@@ -6315,12 +6228,6 @@
 		if(!delivery || !(Number(delivery.amount || 0) > 0) || delivery.loadType !== 'cargo_out') return null;
 		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
 		const mint = String(delivery.mint || '');
-		const route = `${cycle.homeCoord || 'unknown'}->${delivery.sectorX},${delivery.sectorY}`;
-		const deliveryEvidence = delivery.txResult ? await buildConfirmedCargoDeliveryEvidence({
-			txResult: delivery.txResult, wrapper: delivery.wrapper, outerInstructionIndex: delivery.outerInstructionIndex,
-			mint, mintDecimals: delivery.mintDecimals, fleetAccount: fleet.publicKey.toString(), fleetLabel: fleet.label,
-			factionProfile: getUpgradeAutomationInfluxFactionTag(), profileAccount: String(userProfileAcct || ''), route, cycleId: cycle.id
-		}) : null;
 		let remaining = Math.max(0, Number(delivery.amount || 0));
 		const cargoSize = getCargoTelemetrySizeByMint(mint);
 		const matchingLots = cycle.lots.filter(lot => lot.mint === mint);
@@ -6337,7 +6244,7 @@
 				amount, cargoSize, cargoVolume: amount * cargoSize, starbase: delivery.starbase || 'unknown', sectorX: delivery.sectorX,
 				sectorY: delivery.sectorY, deliveredAt: Date.now(), loadedFuel: Number(lot.loadedFuel || 0) * ratio,
 				loadedTxCostSol: Number(lot.loadedTxCostSol || 0) * ratio, loadedTxFeeLamports: Number(lot.loadedTxFeeLamports || 0) * ratio,
-				loadedLegCount: Number(lot.loadedLegCount || 0), deliveryEvidence };
+				loadedLegCount: Number(lot.loadedLegCount || 0) };
 			cycle.deliveries.push(row);
 			cycle.pendingReloads.push({ deliveryId: row.id, mint, rssName: row.rssName, starbase: row.starbase, originStarbase: row.originStarbase,
 				remainingAmount: amount, originalAmount: amount, cargoSize, loadedFuel: row.loadedFuel, loadedTxCostSol: row.loadedTxCostSol,
@@ -6348,7 +6255,7 @@
 		if(remaining > 0) {
 			const row = { id: `${cycle.id}:delivery:${Date.now()}:${cycle.deliveries.length}`, mint, rssName: delivery.rssName || getCargoTelemetryNameByMint(mint),
 				originStarbase: 'unknown', amount: remaining, cargoSize, cargoVolume: remaining * cargoSize, starbase: delivery.starbase || 'unknown',
-				sectorX: delivery.sectorX, sectorY: delivery.sectorY, deliveredAt: Date.now(), loadedFuel: 0, loadedTxCostSol: 0, loadedTxFeeLamports: 0, loadedLegCount: 0, deliveryEvidence };
+				sectorX: delivery.sectorX, sectorY: delivery.sectorY, deliveredAt: Date.now(), loadedFuel: 0, loadedTxCostSol: 0, loadedTxFeeLamports: 0, loadedLegCount: 0 };
 			cycle.deliveries.push(row);
 		}
 		cycle.lots = cycle.lots.filter(lot => Number(lot.remainingAmount || 0) > 1e-9);
@@ -6357,25 +6264,6 @@
 	}
 
 	const fleetTelemetryFinalizeTimers = new Map();
-
-	function selectCargoDeliveryEvidenceAnchors(deliveries) {
-		const rows = Array.isArray(deliveries) ? deliveries : [];
-		const groups = new Map();
-		rows.forEach((item, index) => {
-			const evidence = item?.deliveryEvidence;
-			const eventId = String(evidence?.eventId || '');
-			const payloadHash = String(evidence?.payloadHash || '');
-			if(!eventId || !payloadHash) return;
-			const existing = groups.get(eventId);
-			if(!existing) groups.set(eventId, { firstIndex: index, payloadHash, evidence, conflict: false });
-			else if(existing.payloadHash !== payloadHash) existing.conflict = true;
-		});
-		const anchors = rows.map(() => null);
-		for(const group of groups.values()) {
-			if(!group.conflict) anchors[group.firstIndex] = group.evidence;
-		}
-		return anchors;
-	}
 
 	function scheduleFleetTelemetryCostCycleFinalization(fleet, fleetParsedData, starbaseName) {
 		const key = fleet.publicKey.toString();
@@ -6409,14 +6297,10 @@
 		const overheadTx = splitTelemetryCost(cycle.emptyTxCostSol, volumeWeights);
 		const overheadFees = splitTelemetryCost(cycle.emptyTxFeeLamports, volumeWeights);
 		const completedLegCount = Math.max(1, Math.round(Number(legCount || cycle.movementCount || 1)));
-		const deliveryEvidenceAnchors = selectCargoDeliveryEvidenceAnchors(deliveries);
 		const allocationLines = deliveries.map((item, index) => {
 			const loadedFuel = Number(item.loadedFuel || 0), loadedTx = Number(item.loadedTxCostSol || 0), loadedFees = Number(item.loadedTxFeeLamports || 0);
-			const evidence = deliveryEvidenceAnchors[index];
-			const evidenceFields = evidence ?
-				`,deliveryEvidenceSchemaVersion=${Math.round(Number(evidence.schemaVersion || 0))}i,deliveryMovementType=${influxFieldString(evidence.movementType || '')},deliverySignature=${influxFieldString(evidence.signature || '')},deliveryOuterInstructionIndex=${Math.round(Number(evidence.outerInstructionIndex ?? -1))}i,deliveryConfirmedSlot=${Math.round(Number(evidence.slot || 0))}i,deliveryConfirmedBlockTime=${Math.round(Number(evidence.blockTime || 0))}i,deliveryRawAmount=${influxFieldString(evidence.rawAmount || '')},deliveryMintDecimals=${Math.round(Number(evidence.mintDecimals || 0))}i,deliveryDecimalAmount=${influxFieldString(evidence.decimalAmount || '')},deliveryEventId=${influxFieldString(evidence.eventId || '')},deliveryEvidencePayloadHash=${influxFieldString(evidence.payloadHash || '')},deliveryProgramId=${influxFieldString(evidence.programId || '')},deliveryFleetAccount=${influxFieldString(evidence.fleetAccount || '')},deliveryFactionProfile=${influxFieldString(evidence.factionProfile || '')},deliveryProfileAccount=${influxFieldString(evidence.profileAccount || '')},deliveryRoute=${influxFieldString(evidence.route || '')},deliveryAllocationId=${influxFieldString(evidence.allocationId || '')}` : '';
 			return `cargo_cost_allocation,faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(fleet.label)},assignment=${influxEscape(fleetParsedData.assignment || 'unknown')},homeStarbase=${influxEscape(homeStarbase || 'unknown')},originStarbase=${influxEscape(item.originStarbase || 'unknown')},deliveryStarbase=${influxEscape(item.starbase || 'unknown')},rss=${influxEscape(item.rssName || 'unknown')},cycleId=${influxEscape(cycle.id || 'unknown')},allocationIndex=${index}` +
-				` amount=${Number(item.amount || 0)},cargoVolume=${Number(item.cargoVolume || 0)},assetMint=${influxFieldString(item.mint || '')}${evidenceFields},loadedLegFuel=${loadedFuel},loadedLegTxCostSol=${loadedTx},loadedLegTxFeeLamports=${Math.round(loadedFees)}i,emptyLegFuelOverhead=${overheadFuel[index]},emptyLegTxCostSolOverhead=${overheadTx[index]},emptyLegTxFeeLamportsOverhead=${Math.round(overheadFees[index])}i,allocatedFuel=${allocatedFuel[index]},allocatedTxCostSol=${allocatedTx[index]},allocatedTxFeeLamports=${Math.round(allocatedFees[index])}i,loadedLegCount=${Math.round(Number(item.loadedLegCount || 0))}i,cycleBurnedFuel=${cycle.burnedFuel},cycleTxCostSol=${cycle.txCostSol},cycleTxFeeLamports=${Math.round(cycle.txFeeLamports)}i,cycleEmptyFuel=${cycle.emptyBurnedFuel},cycleEmptyTxCostSol=${cycle.emptyTxCostSol},cycleMovementCount=${cycle.movementCount}i,cycleDeliveredVolume=${totalVolume},cycleDeliveryCount=${deliveries.length}i,deliveryIndex=${index}i`;
+				` amount=${Number(item.amount || 0)},cargoVolume=${Number(item.cargoVolume || 0)},assetMint=${influxFieldString(item.mint || '')},loadedLegFuel=${loadedFuel},loadedLegTxCostSol=${loadedTx},loadedLegTxFeeLamports=${Math.round(loadedFees)}i,emptyLegFuelOverhead=${overheadFuel[index]},emptyLegTxCostSolOverhead=${overheadTx[index]},emptyLegTxFeeLamportsOverhead=${Math.round(overheadFees[index])}i,allocatedFuel=${allocatedFuel[index]},allocatedTxCostSol=${allocatedTx[index]},allocatedTxFeeLamports=${Math.round(allocatedFees[index])}i,loadedLegCount=${Math.round(Number(item.loadedLegCount || 0))}i,cycleBurnedFuel=${cycle.burnedFuel},cycleTxCostSol=${cycle.txCostSol},cycleTxFeeLamports=${Math.round(cycle.txFeeLamports)}i,cycleEmptyFuel=${cycle.emptyBurnedFuel},cycleEmptyTxCostSol=${cycle.emptyTxCostSol},cycleMovementCount=${cycle.movementCount}i,cycleDeliveredVolume=${totalVolume},cycleDeliveryCount=${deliveries.length}i,deliveryIndex=${index}i`;
 		});
 		const completionLine = `cargo_cycle_completed,faction=${influxEscape(getUpgradeAutomationInfluxFactionTag())},fleet=${influxEscape(fleet.label)},assignment=${influxEscape(fleetParsedData.assignment || 'unknown')},cycleId=${influxEscape(cycle.id || 'unknown')} legCount=${completedLegCount}i,movementCount=${Math.round(cycle.movementCount)}i`;
 		await sendToInflux(allocationLines.concat(completionLine).join('\n'));
@@ -6535,10 +6419,7 @@
 			`,txFeeLamportsComplete=${Math.round(getSlyaTxFeeLamports(userCraft?.slyaUpgradeCompleteTxResult))}i` +
 			`,startedAt=${maybeBnToNumber(job.startedAt, 0)}` +
 			`,completedAt=${completedAt}` +
-			`,state=${influxFieldString(userCraft?.state || '')}` +
-			`,completionTelemetryId=${influxFieldString(userCraft?.slyaUpgradeClaimAttemptLedger?.completionTelemetryId || '')}` +
-			`,claimAttemptIdentity=${influxFieldString(userCraft?.slyaUpgradeClaimAttemptLedger?.attemptIdentity || '')}` +
-			`,claimAttemptFinalState=${influxFieldString(userCraft?.slyaUpgradeClaimAttemptLedger?.authoritativeFinalState || '')}`;
+			`,state=${influxFieldString(userCraft?.state || '')}`;
 		await sendToInflux(line);
 		await recordUpgradeAutomationEvent({
 			ts: completedAt,
@@ -8996,7 +8877,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const normalized = [];
 		for (const [identity, record] of entries) {
 			const line = typeof record === 'string' ? record : record?.line;
-			if (!String(identity).trim() || typeof line !== 'string' || !/^(cargo_cost_source_event_v1|upgrade_claim_attempt_v1),/.test(line)) continue;
+			if (!String(identity).trim() || typeof line !== 'string' || !line.startsWith('cargo_cost_source_event_v1,')) continue;
 			const queuedAtMs = Number(typeof record === 'string' ? Date.now() : record?.queuedAtMs);
 			const retryAfterMs = Number(typeof record === 'string' ? 0 : record?.retryAfterMs);
 			const attemptCount = Number(typeof record === 'string' ? 0 : record?.attemptCount);
@@ -9080,209 +8961,6 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return `${faction}:${instance}`;
 	}
 
-	function buildUpgradeClaimAttemptIdentity(input) {
-		const faction = String(input?.faction || '').trim();
-		const instance = String(input?.instance || '').trim();
-		const profile = String(input?.profile || '').trim();
-		const craftingProcess = String(input?.craftingProcess || '').trim();
-		const craftingId = String(input?.craftingId || '').trim();
-		return [faction, instance, profile, craftingProcess, craftingId].every(Boolean)
-			? `${faction}:${instance}:${profile}:${craftingProcess}:${craftingId}`
-			: '';
-	}
-
-	const UPGRADE_CLAIM_RECOVERY_STATE_KEY = 'upgradeClaimRecoveryStateV1';
-	const upgradeClaimRecoveryInFlight = new Map();
-	let upgradeClaimRecoveryPersistTail = Promise.resolve();
-
-	function buildUpgradeClaimRecoveryKey(input) {
-		return buildUpgradeClaimAttemptIdentity(input);
-	}
-
-	function normalizeUpgradeClaimRecoveryState(raw, identity = null) {
-		let value = raw;
-		if (typeof value === 'string') { try { value = JSON.parse(value); } catch (error) { value = null; } }
-		const base = identity && typeof identity === 'object' ? identity : {};
-		const recoveryKey = String(value?.recoveryKey || buildUpgradeClaimRecoveryKey(value || base)).trim();
-		if (!recoveryKey) return null;
-		return {
-			...base, ...(value && typeof value === 'object' ? value : {}), recoveryKey,
-			attemptNumber: Math.max(0, Number(value?.attemptNumber || 0)),
-			state: String(value?.state || 'queued'),
-			transactionSignature: String(value?.transactionSignature || ''),
-			completionFinalized: Boolean(value?.completionFinalized),
-			telemetryFinalized: Boolean(value?.telemetryFinalized),
-		};
-	}
-
-	function decideUpgradeClaimRecoveryAction(state, evidence = {}) {
-		if (state?.state === 'completed' || state?.state === 'failed_permanent') return state.state === 'completed' ? 'finalize' : 'stop';
-		if (String(evidence.authoritativeState || '') === 'completed') return 'finalize';
-		if (state?.state === 'sent') {
-			if (evidence.signatureStatus === 'confirmed') return 'finalize';
-			if (evidence.signatureStatus === 'failed_permanent') return 'fail_permanent';
-			if (evidence.signatureStatus === 'absent' || evidence.signatureStatus === 'expired') return 'send';
-			return 'wait';
-		}
-		return 'send';
-	}
-
-	async function runIdempotentUpgradeClaimRecovery(identity, operations) {
-		const recoveryKey = buildUpgradeClaimRecoveryKey(identity);
-		if (!recoveryKey) throw new Error('Upgrade claim recovery identity is incomplete');
-		if (upgradeClaimRecoveryInFlight.has(recoveryKey)) return upgradeClaimRecoveryInFlight.get(recoveryKey);
-		const task = (async () => {
-			let state = normalizeUpgradeClaimRecoveryState(await operations.loadState(recoveryKey), identity)
-				|| normalizeUpgradeClaimRecoveryState({ ...identity, recoveryKey }, identity);
-			const persist = async next => { state = normalizeUpgradeClaimRecoveryState(next, identity); await operations.saveState(state); return state; };
-			const finalize = async () => {
-				if (!state.completionFinalized) { await operations.finalizeCompletion(state); state.completionFinalized = true; await persist(state); }
-				if (!state.telemetryFinalized) { try { await operations.finalizeTelemetry(state); state.telemetryFinalized = true; await persist(state); } catch (error) {} }
-				return persist({ ...state, state: 'completed', finalizedAtMs: state.finalizedAtMs || Date.now() });
-			};
-			if (state.state === 'completed') return finalize();
-			if (state.state === 'failed_permanent') return state;
-			let authoritativeState = '';
-			let signatureStatus = '';
-			if (state.state === 'sent' && state.transactionSignature) {
-				signatureStatus = await operations.verifySignature(state.transactionSignature, state);
-				if (signatureStatus === 'pending') return state;
-				if (signatureStatus === 'confirmed') return finalize();
-				if (signatureStatus === 'failed_permanent') return persist({ ...state, state: 'failed_permanent' });
-			}
-			if (state.state !== 'sent' || ['absent', 'expired'].includes(signatureStatus)) {
-				authoritativeState = await operations.readAuthoritativeState(state);
-				if (authoritativeState === 'completed') return finalize();
-			}
-			if (decideUpgradeClaimRecoveryAction(state, { authoritativeState, signatureStatus }) !== 'send') return state;
-			state = await persist({ ...state, state: 'sending', attemptNumber: state.attemptNumber + 1, triggeringPath: identity.triggeringPath || state.triggeringPath || '' });
-			const result = await operations.send(state);
-			if (result?.status === 'confirmed') {
-				state = await persist({ ...state, state: 'sent', transactionSignature: String(result.signature || '') });
-				return finalize();
-			}
-			if (result?.status === 'failed_permanent') return persist({ ...state, state: 'failed_permanent', errorClassification: String(result.errorClassification || 'instruction_error') });
-			return persist({ ...state, state: 'sent', transactionSignature: String(result?.signature || state.transactionSignature || ''), lastValidBlockHeight: Number(result?.lastValidBlockHeight || state.lastValidBlockHeight || 0) });
-		})();
-		upgradeClaimRecoveryInFlight.set(recoveryKey, task);
-		try { return await task; } finally { upgradeClaimRecoveryInFlight.delete(recoveryKey); }
-	}
-
-	async function loadUpgradeClaimRecoveryState(recoveryKey) {
-		let values = {};
-		try { values = JSON.parse(await GM.getValue(UPGRADE_CLAIM_RECOVERY_STATE_KEY, '{}')) || {}; } catch (error) {}
-		return values[String(recoveryKey)] || null;
-	}
-
-	async function saveUpgradeClaimRecoveryState(state) {
-		upgradeClaimRecoveryPersistTail = upgradeClaimRecoveryPersistTail.catch(() => {}).then(async () => {
-			let values = {};
-			try { values = JSON.parse(await GM.getValue(UPGRADE_CLAIM_RECOVERY_STATE_KEY, '{}')) || {}; } catch (error) {}
-			values[state.recoveryKey] = state;
-			await GM.setValue(UPGRADE_CLAIM_RECOVERY_STATE_KEY, JSON.stringify(values));
-		});
-		await upgradeClaimRecoveryPersistTail;
-	}
-
-	function normalizeUpgradeClaimAttemptLedger(raw) {
-		let value = raw;
-		if (typeof value === 'string') { try { value = JSON.parse(value); } catch (error) { return null; } }
-		if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-		const attemptIdentity = String(value.attemptIdentity || buildUpgradeClaimAttemptIdentity(value)).trim();
-		if (!attemptIdentity) return null;
-		const integer = (field, fallback = 0) => Number.isSafeInteger(Number(value[field])) && Number(value[field]) >= 0 ? Number(value[field]) : fallback;
-		return {
-			...value,
-			attemptIdentity,
-			attemptNumber: Math.max(1, integer('attemptNumber', 1)),
-			detectedAtMs: integer('detectedAtMs'),
-			queuedAtMs: integer('queuedAtMs'),
-			sendStartedAtMs: integer('sendStartedAtMs'),
-			sendResultAtMs: integer('sendResultAtMs'),
-			confirmedAtMs: integer('confirmedAtMs'),
-			finalResultAtMs: integer('finalResultAtMs'),
-			nextScheduledRetryAtMs: integer('nextScheduledRetryAtMs'),
-			transactionSignature: String(value.transactionSignature || ''),
-			errorClassification: String(value.errorClassification || ''),
-			retryReason: String(value.retryReason || ''),
-			error: String(value.error || ''),
-			authoritativeFinalState: String(value.authoritativeFinalState || 'queued'),
-		};
-	}
-
-	function applyUpgradeClaimAttemptTransition(current, event) {
-		const type = String(event?.type || '').trim();
-		const atMs = Number.isSafeInteger(Number(event?.atMs)) && Number(event.atMs) >= 0 ? Number(event.atMs) : 0;
-		let ledger = normalizeUpgradeClaimAttemptLedger(current);
-		if (!ledger) {
-			if (type !== 'queued') return null;
-			ledger = normalizeUpgradeClaimAttemptLedger({ ...event, attemptNumber: 1, authoritativeFinalState: 'queued' });
-		}
-		if (!ledger) return null;
-		const next = { ...ledger };
-		if (type === 'send_started') {
-			if (next.authoritativeFinalState === 'retry_scheduled') next.attemptNumber += 1;
-			next.sendStartedAtMs = atMs;
-			next.sendResultAtMs = 0;
-			next.confirmedAtMs = 0;
-			next.finalResultAtMs = 0;
-			next.nextScheduledRetryAtMs = 0;
-			next.authoritativeFinalState = 'sending';
-		} else if (type === 'send_result') {
-			next.sendResultAtMs = atMs;
-			next.transactionSignature = String(event.transactionSignature || next.transactionSignature || '');
-			next.authoritativeFinalState = 'sent';
-		} else if (type === 'retry_scheduled') {
-			next.finalResultAtMs = atMs;
-			next.errorClassification = String(event.errorClassification || next.errorClassification || '');
-			next.retryReason = String(event.retryReason || '');
-			next.nextScheduledRetryAtMs = Number(event.nextScheduledRetryAtMs || 0);
-			next.authoritativeFinalState = 'retry_scheduled';
-		} else if (type === 'confirmed') {
-			next.confirmedAtMs = atMs;
-			next.finalResultAtMs = atMs;
-			next.authoritativeFinalState = 'confirmed';
-		} else if (type === 'failed') {
-			next.finalResultAtMs = atMs;
-			next.transactionSignature = String(event.transactionSignature || next.transactionSignature || '');
-			next.errorClassification = String(event.errorClassification || 'unknown_error');
-			next.error = String(event.error || '');
-			next.confirmedAtMs = 0;
-			next.authoritativeFinalState = 'failed';
-		}
-		return normalizeUpgradeClaimAttemptLedger(next);
-	}
-
-	function buildUpgradeClaimAttemptEventLine(ledger) {
-		const event = normalizeUpgradeClaimAttemptLedger(ledger);
-		if (!event) return '';
-		const timestampMs = event.finalResultAtMs || event.sendResultAtMs || event.sendStartedAtMs || event.queuedAtMs || event.detectedAtMs;
-		if (!timestampMs) return '';
-		const tags = `attemptIdentity=${influxEscape(event.attemptIdentity)},faction=${influxEscape(event.faction || 'unknown')},instance=${influxEscape(event.instance || 'unknown')},schemaVersion=1`;
-		const fields = [
-			`craftingId=${Number(event.craftingId || 0)}i`,
-			`attemptNumber=${Number(event.attemptNumber || 1)}i`,
-			`profile=${optimizationInfluxString(event.profile || '')}`,
-			`applicationVersion=${optimizationInfluxString(event.applicationVersion || '')}`,
-			`craftingProcess=${optimizationInfluxString(event.craftingProcess || '')}`,
-			`completionTelemetryId=${optimizationInfluxString(event.completionTelemetryId || '')}`,
-			`triggeringPath=${optimizationInfluxString(event.triggeringPath || '')}`,
-			`detectedAtMs=${Number(event.detectedAtMs || 0)}i`,
-			`queuedAtMs=${Number(event.queuedAtMs || 0)}i`,
-			`sendStartedAtMs=${Number(event.sendStartedAtMs || 0)}i`,
-			`sendResultAtMs=${Number(event.sendResultAtMs || 0)}i`,
-			`transactionSignature=${optimizationInfluxString(event.transactionSignature || '')}`,
-			`confirmedAtMs=${Number(event.confirmedAtMs || 0)}i`,
-			`finalResultAtMs=${Number(event.finalResultAtMs || 0)}i`,
-			`errorClassification=${optimizationInfluxString(event.errorClassification || '')}`,
-			`retryReason=${optimizationInfluxString(event.retryReason || '')}`,
-			`nextScheduledRetryAtMs=${Number(event.nextScheduledRetryAtMs || 0)}i`,
-			`authoritativeFinalState=${optimizationInfluxString(event.authoritativeFinalState || '')}`,
-			`error=${optimizationInfluxString(event.error || '')}`,
-		];
-		return `upgrade_claim_attempt_v1,${tags} ${fields.join(',')} ${formatSlyaInfluxTimestamp(timestampMs)}`;
-	}
-
 	function getSlyaCostEventTimestamp(txResult) {
 		const blockTime = Number(txResult?.blockTime);
 		if (!Number.isInteger(blockTime) || blockTime <= 0) return null;
@@ -9341,213 +9019,6 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			: [`txFeeLamports=${Math.round(Number(event.txFeeLamports))}i`, `transactionSignature=${optimizationInfluxString(event.transactionSignature)}`].concat(event.eventPosition == null ? [] : [`eventPosition=${Number(event.eventPosition)}i`]);
 		fields.push(`timestampProvenance=${optimizationInfluxString(event.timestampProvenance)}`, `sourceProvenance=${optimizationInfluxString(event.sourceProvenance)}`, `faction=${optimizationInfluxString(getUpgradeAutomationInfluxFactionTag() || 'unknown')}`, `instance=${optimizationInfluxString(getSlyaInfluxInstanceTag() || 'unknown')}`, `fleetAccount=${optimizationInfluxString(event.fleetAccount || '')}`, `fleetLabel=${optimizationInfluxString(event.fleetLabel)}`, `assignment=${optimizationInfluxString(event.assignment)}`);
 		return `cargo_cost_source_event_v1,${tags.join(',')} ${fields.join(',')} ${formatSlyaInfluxTimestamp(event.timestampMs)}`;
-	}
-
-	// Immutable break-even evidence is built only from the transaction result
-	// already fetched by txSignAndSend.  The submitted wrapper may describe
-	// exact inputs/outputs, but it is never allowed to supply the signature,
-	// slot, timestamp, or instruction coordinate.
-	function normalizeSlyaAccountingExact(value, allowZero = true) {
-		if (typeof value !== 'string' || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value.trim())) return null;
-		const text = value.trim();
-		if (!allowZero && /^0(?:\.0+)?$/.test(text)) return null;
-		return text;
-	}
-
-	function normalizeSlyaAccountingEntries(entries) {
-		if (!Array.isArray(entries)) return null;
-		const normalized = entries.map(entry => {
-			if (!entry || typeof entry !== 'object') return null;
-			const quantity = normalizeSlyaAccountingExact(entry.quantity);
-			const asset = String(entry.asset || '').trim();
-			if (!asset || quantity === null) return null;
-			return {
-				asset, mint: String(entry.mint || '').trim(), quantity,
-				unit: String(entry.unit || '').trim(), location: String(entry.location || '').trim()
-			};
-		});
-		return normalized.some(entry => !entry) ? null : normalized;
-	}
-
-	function normalizeSlyaAccountingMoney(value) {
-		if (value === undefined || value === null) return '0';
-		if (typeof value === 'string') return normalizeSlyaAccountingExact(value) || null;
-		if (!value || typeof value !== 'object') return null;
-		const normalized = {};
-		for (const key of Object.keys(value).sort()) {
-			const amount = normalizeSlyaAccountingExact(value[key]);
-			if (amount === null) return null;
-			normalized[key] = amount;
-		}
-		return normalized;
-	}
-
-	function deriveSlyaAccountingTokenDeltas(txResult) {
-		const before = new Map((txResult?.meta?.preTokenBalances || []).map((entry) => [`${entry.accountIndex}:${entry.mint}`, entry]));
-		const after = new Map((txResult?.meta?.postTokenBalances || []).map((entry) => [`${entry.accountIndex}:${entry.mint}`, entry]));
-		const inputs = [], outputs = [];
-		for (const key of new Set([...before.keys(), ...after.keys()])) {
-			const prior = BigInt(String(before.get(key)?.uiTokenAmount?.amount || '0'));
-			const next = BigInt(String(after.get(key)?.uiTokenAmount?.amount || '0'));
-			const delta = next - prior;
-			if (delta === 0n) continue;
-			const entry = after.get(key) || before.get(key);
-			const decimals = Number(entry?.uiTokenAmount?.decimals || 0);
-			const magnitude = delta < 0n ? -delta : delta;
-			const digits = magnitude.toString().padStart(decimals + 1, '0');
-			const quantity = decimals ? `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}`.replace(/0+$/, '').replace(/\.$/, '') : digits;
-			const target = { asset: String(entry?.mint || '').trim(), mint: String(entry?.mint || '').trim(), quantity: quantity || '0', unit: 'token' };
-			if (target.asset) (delta < 0n ? inputs : outputs).push(target);
-		}
-		return { inputs, outputs };
-	}
-
-	function annotateSlyaAccountingOperation(wrapper, evidenceType, details = {}) {
-		if (!wrapper || typeof wrapper !== 'object') return wrapper;
-		wrapper.slyaAccountingEvidence = {
-			schemaVersion: 1, evidenceType: String(evidenceType || '').trim().toLowerCase(), operationId: String(details.operationId || '').trim(),
-			inputs: Array.isArray(details.inputs) ? details.inputs : [],
-			outputs: Array.isArray(details.outputs) ? details.outputs : [],
-			directFees: details.directFees === undefined ? '0' : details.directFees,
-			transactionCosts: details.transactionCosts === undefined ? null : details.transactionCosts,
-			lineage: details.lineage && typeof details.lineage === 'object' ? details.lineage : {},
-		};
-		return wrapper;
-	}
-
-	function getSlyaAccountingEvidenceType(opName) {
-		const value = String(opName || '').toUpperCase();
-		if (value.includes('SCAN')) return 'scanning';
-		if (value.includes('MIN')) return 'mining';
-		if (value.includes('CRAFT')) return 'crafting';
-		if (value.includes('UPGRAD')) return 'upgrading';
-		return '';
-	}
-
-	function selectSlyaAccountingEvidenceCandidates(wrappers, evidenceType) {
-		const annotated = wrappers.filter(wrapper => wrapper?.slyaAccountingEvidence && typeof wrapper.slyaAccountingEvidence === 'object');
-		if (annotated.length) {
-			if (annotated.length > 1) {
-				const operationIds = annotated.map(wrapper => String(wrapper.slyaAccountingEvidence.operationId || '').trim());
-				if (operationIds.some(operationId => !operationId) || new Set(operationIds).size !== operationIds.length) return [];
-			}
-			return annotated.map(wrapper => ({ wrapper, transactionLevel: false }));
-		}
-		// Generic transaction-level token deltas cannot prove which operation,
-		// asset accounts, fleet, or location produced them.  Evidence is emitted
-		// only by explicitly annotated operation wrappers; unsupported call sites
-		// remain absent/pending in the consumer instead of mutating inventory.
-		return [];
-	}
-
-	async function buildConfirmedSlyaAccountingEvidence(context = {}) {
-		const metadata = context?.wrapper?.slyaAccountingEvidence;
-		const txResult = context?.txResult;
-		const evidenceType = String(metadata?.evidenceType || '').trim().toLowerCase();
-		const signature = String(txResult?.slyaTxHash || txResult?.transaction?.signatures?.[0] || '').trim();
-		const outerInstructionIndex = Number(context?.outerInstructionIndex);
-		const slot = Number(txResult?.slot), blockTime = Number(txResult?.blockTime);
-		const fleetAccount = String(context?.fleet?.publicKey?.toString?.() || context?.fleetAccount || '').trim();
-		const profile = String(metadata?.profile || context?.profile || (typeof userProfileAcct !== 'undefined' ? userProfileAcct?.toString?.() : '') || '').trim();
-		const faction = String(metadata?.faction || getUpgradeAutomationInfluxFactionTag() || '').trim();
-		if (!metadata || !['scanning', 'mining', 'crafting', 'upgrading'].includes(evidenceType) || !signature || !fleetAccount || !profile || !faction || !Number.isInteger(outerInstructionIndex) || outerInstructionIndex < 0 || !Number.isInteger(slot) || slot < 0 || !Number.isInteger(blockTime) || blockTime <= 0) return null;
-		const inputs = normalizeSlyaAccountingEntries(metadata.inputs);
-		const outputs = normalizeSlyaAccountingEntries(metadata.outputs);
-		const directFees = normalizeSlyaAccountingMoney(metadata.directFees);
-		const transactionCosts = metadata.transactionCosts === null ? { solLamports: String(Math.max(0, Math.round(Number(txResult?.slyaTxFeeLamports ?? txResult?.meta?.fee ?? 0)))) } : normalizeSlyaAccountingMoney(metadata.transactionCosts);
-		if (!inputs || !outputs || directFees === null || transactionCosts === null) return null;
-		const programId = getCargoTelemetryProgramIdentity(txResult, (txResult?.transaction?.message?.compiledInstructions || txResult?.transaction?.message?.instructions || [])[outerInstructionIndex]);
-		if (!programId) return null;
-		const operationId = String(metadata.operationId || '').trim();
-		const sourceIdentity = context?.transactionLevel
-			? `${evidenceType}:${signature}:tx`
-			: operationId
-				? `${evidenceType}:${signature}:op:${operationId}`
-			: `${evidenceType}:${signature}:${outerInstructionIndex}`;
-		const eventId = `slya-accounting:v1:${sourceIdentity}`;
-		const payload = {
-			schemaVersion: 1, evidenceType, eventId, signature, outerInstructionIndex, programId,
-			slot, blockTime, faction, profile, fleetAccount, fleetLabel: String(context?.fleet?.label || ''),
-			inputs, outputs, directFees, transactionCosts, operationId,
-			lineage: metadata.lineage || {}, sourceProvenance: 'confirmed_transaction'
-		};
-		return { ...payload, payloadHash: await sha256CargoTelemetryText(canonicalizeCargoTelemetryEvidencePayload(payload)) };
-	}
-
-	function buildSlyaAccountingEvidenceLine(evidence) {
-		if (!evidence?.eventId || !evidence?.payloadHash || !Number.isInteger(Number(evidence.blockTime)) || Number(evidence.blockTime) <= 0) return '';
-		const tags = `eventId=${influxEscape(evidence.eventId)},evidenceType=${influxEscape(evidence.evidenceType)},schemaVersion=1`;
-		const fields = [
-			`payloadHash=${optimizationInfluxString(evidence.payloadHash)}`,
-			`signature=${optimizationInfluxString(evidence.signature)}`,
-			`operationId=${optimizationInfluxString(evidence.operationId)}`,
-			`programId=${optimizationInfluxString(evidence.programId)}`,
-			`outerInstructionIndex=${Number(evidence.outerInstructionIndex)}i`,
-			`slot=${Number(evidence.slot)}i`, `blockTime=${Number(evidence.blockTime)}i`,
-			`faction=${optimizationInfluxString(evidence.faction)}`, `profile=${optimizationInfluxString(evidence.profile)}`,
-			`fleetAccount=${optimizationInfluxString(evidence.fleetAccount)}`, `fleetLabel=${optimizationInfluxString(evidence.fleetLabel)}`,
-			`inputs=${optimizationInfluxString(JSON.stringify(evidence.inputs))}`, `outputs=${optimizationInfluxString(JSON.stringify(evidence.outputs))}`,
-			`directFees=${optimizationInfluxString(JSON.stringify(evidence.directFees))}`, `transactionCosts=${optimizationInfluxString(JSON.stringify(evidence.transactionCosts))}`,
-			`lineage=${optimizationInfluxString(JSON.stringify(evidence.lineage))}`, `sourceProvenance=${optimizationInfluxString(evidence.sourceProvenance)}`
-		];
-		return `slya_accounting_evidence_v1,${tags} ${fields.join(',')} ${formatSlyaInfluxTimestamp(Number(evidence.blockTime) * 1000)}`;
-	}
-
-	async function applyConfirmedSlyaAccountingEvidence(ix, fleet, txResult, opName = '') {
-		if (!txResult || txResult.meta?.err || !getSlyaAccountingEvidenceType(opName)) return 0;
-		const wrappers = (Array.isArray(ix) ? ix : [ix]).filter(Boolean);
-		const candidates = selectSlyaAccountingEvidenceCandidates(wrappers, getSlyaAccountingEvidenceType(opName));
-		const usedIndexes = new Set(); const submittedLines = new Map(); let queued = 0;
-		for (const candidate of candidates) {
-			const wrapper = candidate.wrapper;
-			const outerInstructionIndex = resolveConfirmedCargoOuterInstructionIndex(txResult, wrapper, usedIndexes);
-			if (outerInstructionIndex < 0) continue;
-			usedIndexes.add(outerInstructionIndex);
-			const evidence = await buildConfirmedSlyaAccountingEvidence({ wrapper, fleet, txResult, outerInstructionIndex, transactionLevel: candidate.transactionLevel });
-			const line = buildSlyaAccountingEvidenceLine(evidence);
-			if (!line) continue;
-			const submitted = submittedLines.get(evidence.eventId);
-			if (submitted) {
-				if (submitted !== line) countSlyaCostSourceMissing('accounting_evidence_conflict');
-				else slyaCostSourceCounters.deduplicated += 1;
-				continue;
-			}
-			submittedLines.set(evidence.eventId, line);
-			const outbox = await loadSlyaCostSourceOutbox();
-			const existing = outbox.get(evidence.eventId);
-			if (existing && existing.line !== line) { countSlyaCostSourceMissing('accounting_evidence_conflict'); continue; }
-			if (existing) { slyaCostSourceCounters.deduplicated += 1; continue; }
-			outbox.set(evidence.eventId, { line, queuedAtMs: Date.now(), retryAfterMs: 0, attemptCount: 0 });
-			slyaCostSourceCounters.eligible += 1; slyaCostSourceCounters.queued += 1; queued += 1;
-			await persistSlyaCostSourceOutbox();
-		}
-		return queued;
-	}
-
-	async function queueUpgradeClaimAttemptEvent(ledger) {
-		const normalized = normalizeUpgradeClaimAttemptLedger(ledger);
-		const line = buildUpgradeClaimAttemptEventLine(normalized);
-		if (!normalized || !line) return false;
-		const eventAtMs = normalized.finalResultAtMs || normalized.sendResultAtMs || normalized.sendStartedAtMs || normalized.queuedAtMs || normalized.detectedAtMs;
-		const identity = `upgrade_claim:${normalized.attemptIdentity}:${normalized.attemptNumber}:${normalized.authoritativeFinalState}:${eventAtMs}`;
-		const outbox = await loadSlyaCostSourceOutbox();
-		if (outbox.has(identity)) return true;
-		outbox.set(identity, { line, queuedAtMs: Date.now(), retryAfterMs: 0, attemptCount: 0 });
-		await persistSlyaCostSourceOutbox();
-		return true;
-	}
-
-	async function recordUpgradeClaimAttemptTransition(userCraft, transition) {
-		try {
-			const next = applyUpgradeClaimAttemptTransition(userCraft?.slyaUpgradeClaimAttemptLedger || null, transition);
-			if (!next || !userCraft) return null;
-			userCraft.slyaUpgradeClaimAttemptLedger = next;
-			await queueUpgradeClaimAttemptEvent(next);
-			return next;
-		} catch (error) {
-			cLog(1, `${FleetTimeStamp(userCraft?.label || 'unknown')} Upgrade claim attempt telemetry failed closed`, error);
-			return userCraft?.slyaUpgradeClaimAttemptLedger || null;
-		}
 	}
 
 	async function queueSlyaCostSourceEvent(event, missingReason = 'event_invalid') {
@@ -10181,7 +9652,6 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 			let confirmed = false;
 			while (!confirmed) {
-				if (fleet?.slyaUpgradeClaimAttemptLedger) await recordUpgradeClaimAttemptTransition(fleet, { type: 'send_started', atMs: Date.now() });
 				//let tx = new solanaWeb3.Transaction();
 
 				//the fee is applied to the default compute limit and it is in microLamports. The default compute limit is 200k and microLamports to Lamports is 1M, therefore: 1M / 200k = we need to multiply by 5
@@ -10267,15 +9737,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 				let microOpStart = Date.now();
 				cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> SEND ➡️ lastValidBlockHeight: `, latestBH.lastValidBlockHeight);
-				if (fleet?.slyaUpgradeClaimPrepared) {
-					const preparedSignature = tx.signatures?.[0] ? bs58.encode(tx.signatures[0]) : '';
-					await fleet.slyaUpgradeClaimPrepared(preparedSignature, latestBH.lastValidBlockHeight);
-				}
                 // Adding a 25 block buffer before considering a transaction expired
 				let response = await sendAndConfirmTx(txSerialized, latestBH.lastValidBlockHeight, null, fleet, opName);
 				let txHash = response.txHash;
 				let confirmation = response.confirmation;
-				if (fleet?.slyaUpgradeClaimAttemptLedger) await recordUpgradeClaimAttemptTransition(fleet, { type: 'send_result', atMs: Date.now(), transactionSignature: txHash || '' });
 				let txResult = txHash ? await solanaReadConnection.getTransaction(txHash, {commitment: 'confirmed', maxSupportedTransactionVersion: 1}) : undefined;
                 const instructionError = getTransactionInstructionError(confirmation, txResult);
                 if (instructionError) {
@@ -10312,12 +9777,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				const confirmationTimeStr = `${Date.now() - microOpStart}ms`;
 
 				if (confirmation && confirmation.name == 'TransactionExpiredBlockheightExceededError' && !txResult) {
-					if (fleet?.slyaUpgradeClaimAttemptLedger) await recordUpgradeClaimAttemptTransition(fleet, { type: 'retry_scheduled', atMs: Date.now(), errorClassification: 'blockheight_timeout', retryReason: confirmation.name, nextScheduledRetryAtMs: Date.now() });
 					cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> CONFIRM ❌ ${confirmationTimeStr}`);
-					if (fleet?.slyaUpgradeClaimRecoveryControlled) {
-						resolve({ slyaClaimAmbiguous: true, slyaTxHash: txHash || '', slyaLastValidBlockHeight: latestBH.lastValidBlockHeight, slyaConclusiveStatus: 'expired' });
-						return;
-					}
 					cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> RESEND 🔂`);
 					await alterStats('Txs Resent',opName,(Date.now() - macroOpStart)/1000,'Seconds',1); //statsadd
 					await alterFees(-1, opName); //autofee
@@ -10339,11 +9799,6 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						if(!txResult) await wait(1000);
 					}
 					if(tryCount >= 130) {
-						if (fleet?.slyaUpgradeClaimAttemptLedger) await recordUpgradeClaimAttemptTransition(fleet, { type: 'retry_scheduled', atMs: Date.now(), errorClassification: 'confirmation_timeout', retryReason: 'transaction_not_observed', nextScheduledRetryAtMs: Date.now() });
-						if (fleet?.slyaUpgradeClaimRecoveryControlled) {
-							resolve({ slyaClaimAmbiguous: true, slyaTxHash: txHash || '', slyaLastValidBlockHeight: latestBH.lastValidBlockHeight });
-							return;
-						}
 						continue;
 					}
 				}
@@ -10354,8 +9809,6 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					txResult.slyaTxHash = txHash || '';
 					txResult.slyaTxDurationMs = Date.now() - macroOpStart;
 					await queueSlyaTransactionFeeSourceEvents(txResult, fleet, fleet?.assignment || '');
-					try { await applyConfirmedSlyaAccountingEvidence(ix, fleet, txResult, opName); }
-					catch(error) { cLog(1, `${FleetTimeStamp(fleetName)} confirmed accounting evidence failed closed`, error); }
 				}
 				cLog(4, `${FleetTimeStamp(fleetName)} txResult`, txResult);
 				cLog(2,`${FleetTimeStamp(fleetName)} <${opName}> CONFIRM ✅ ${confirmationTimeStr}`);
@@ -10379,14 +9832,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					...getScanningOptimizationMovementFields(fleet, opName)
 				].join(','), `,operation=${influxEscape(opName || 'unknown')}`);
 
-				if (fleet?.slyaUpgradeClaimAttemptLedger) {
-					const claimError = instructionError || txResult?.meta?.err;
-					await recordUpgradeClaimAttemptTransition(fleet, claimError
-						? { type: 'failed', atMs: Date.now(), transactionSignature: txHash || '', errorClassification: 'instruction_error', error: JSON.stringify(claimError) }
-						: { type: 'confirmed', atMs: Date.now() });
-				}
 				if(!instructionError && !(txResult?.meta?.err)) {
-					try { await applyConfirmedCargoTelemetry(ix, fleet, txResult); }
+					try { await applyConfirmedCargoTelemetry(ix, fleet); }
 					catch(error) { cLog(1, `${FleetTimeStamp(fleetName)} <${opName}> confirmed cargo telemetry failed`, error); }
 				}
 				resolve(txResult);
@@ -11027,8 +10474,6 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 							mint: tokenMint,
 							rssName: cargoItems.find(r => r.token == tokenMint)?.name,
 							amount,
-							rawBalanceAmount: String(currentResource?.account?.data?.parsed?.info?.tokenAmount?.amount || ''),
-							mintDecimals: Number(currentResource?.account?.data?.parsed?.info?.tokenAmount?.decimals),
 							starbase: validTargets.find(target => (target.x + ',' + target.y) == (starbaseX + ',' + starbaseY))?.name,
 							sectorX: starbaseX,
 							sectorY: starbaseY
@@ -11057,10 +10502,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 								amount,
 								starbase: starbaseName,
 								sectorX: starbaseX,
-								sectorY: starbaseY,
-								rawBalanceAmount: String(currentResource?.account?.data?.parsed?.info?.tokenAmount?.amount || ''),
-								mintDecimals: Number(currentResource?.account?.data?.parsed?.info?.tokenAmount?.decimals),
-								txResult, wrapper: tx, outerInstructionIndex: resolveConfirmedCargoOuterInstructionIndex(txResult, tx, new Set())
+								sectorY: starbaseY
 							}) : null;
 							if(deliveryCycle) scheduleFleetTelemetryCostCycleFinalization(fleet, fleetParsedData, starbaseName);
 						}
@@ -12164,79 +11606,26 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
             }).instruction()};
             transactions.push(tx2);
 
-            const detectedAtMs = Date.now();
-            const completionTelemetryId = `${getSlyaCostSourceScope()}:${String(craftingProcess.craftingId)}`;
-            const claimAttemptBase = {
-                faction: getUpgradeAutomationInfluxFactionTag(),
-                instance: getSlyaInfluxInstanceTag(),
-                profile: String(userProfileAcct?.toString?.() || ''),
-                applicationVersion: AEPHIA_SLYA_VERSION,
-                craftingId: maybeBnToNumber(craftingProcess.craftingId, 0),
-                craftingProcess: String(craftingProcess.craftingProcess?.toString?.() || ''),
-                completionTelemetryId,
-                detectedAtMs,
-                queuedAtMs: Date.now(),
-                triggeringPath: 'craft_poll_completion',
-            };
-            await recordUpgradeClaimAttemptTransition(userCraft, {
-                ...claimAttemptBase,
-                type: 'queued',
-                attemptIdentity: buildUpgradeClaimAttemptIdentity(claimAttemptBase),
-            });
-            let completedTxResult = null;
-            await runIdempotentUpgradeClaimRecovery(claimAttemptBase, {
-                loadState: loadUpgradeClaimRecoveryState,
-                saveState: saveUpgradeClaimRecoveryState,
-                readAuthoritativeState: async () => {
-                    const account = await solanaReadConnection.getAccountInfo(craftingProcess.craftingProcess, 'confirmed');
-                    return account ? 'pending' : 'completed';
-                },
-                verifySignature: async (signature, recoveryState) => {
-                    const response = await solanaReadConnection.getSignatureStatuses([signature], { searchTransactionHistory: true });
-                    const status = response?.value?.[0];
-                    if (status?.err) return 'failed_permanent';
-                    if (status && ['confirmed', 'finalized'].includes(String(status.confirmationStatus || ''))) return 'confirmed';
-                    const lastValidBlockHeight = Number(recoveryState?.lastValidBlockHeight || 0);
-                    if (lastValidBlockHeight > 0) {
-                        const currentBlockHeight = await solanaReadConnection.getBlockHeight('confirmed');
-                        if (currentBlockHeight > lastValidBlockHeight) return 'expired';
-                    }
-                    return 'pending';
-                },
-                send: async recoveryState => {
-                    userCraft.slyaUpgradeClaimRecoveryControlled = true;
-                    userCraft.slyaUpgradeClaimPrepared = async (signature, lastValidBlockHeight) => saveUpgradeClaimRecoveryState({
-                        ...recoveryState,
-                        state: 'sent',
-                        transactionSignature: String(signature || ''),
-                        lastValidBlockHeight: Number(lastValidBlockHeight || 0),
-                    });
-                    try { completedTxResult = await txSignAndSend(transactions, userCraft, 'COMPLETING UPGRADE', Math.min(globalSettings.craftingTxMultiplier, 500), userRedemptionAcct); }
-                    finally {
-                        userCraft.slyaUpgradeClaimRecoveryControlled = false;
-                        userCraft.slyaUpgradeClaimPrepared = null;
-                    }
-                    const signature = String(completedTxResult?.slyaTxHash || '');
-                    if (completedTxResult?.slyaClaimAmbiguous) return { status: 'sent', signature, lastValidBlockHeight: completedTxResult.slyaLastValidBlockHeight };
-                    if (completedTxResult?.meta?.err) return { status: 'failed_permanent', signature, errorClassification: 'instruction_error' };
-                    return { status: 'confirmed', signature };
-                },
-                finalizeCompletion: async () => {
-                    if (completedTxResult) userCraft.slyaUpgradeCompleteTxResult = completedTxResult;
-                },
-                finalizeTelemetry: async () => {
-                    if (upgradeTelemetryJob) {
-                        if (!upgradeTelemetryJob.feeAtlas && userCraft.feeAtlas) upgradeTelemetryJob.feeAtlas = Number(userCraft.feeAtlas || 0);
+            let txResult = await txSignAndSend(transactions, userCraft, 'COMPLETING UPGRADE', Math.min(globalSettings.craftingTxMultiplier, 500), userRedemptionAcct);
+
+            if (!userCraft.state.includes('ERROR') && txResult) {
+                userCraft.slyaUpgradeCompleteTxResult = txResult;
+                if (upgradeTelemetryJob) {
+                    try {
+                        if (!upgradeTelemetryJob.feeAtlas && userCraft.feeAtlas) {
+                            upgradeTelemetryJob.feeAtlas = Number(userCraft.feeAtlas || 0);
+                        }
                         await emitUpgradeCompletionTelemetry(upgradeTelemetryJob, userCraft);
                         await deleteUpgradeTelemetryJob(upgradeTelemetryJob.craftingId);
-                    } else {
-                        cLog(1, `${FleetTimeStamp(userCraft.label)} Upgrade completed but telemetry cache entry is missing for craftingId=${craftingProcess.craftingId}`);
+                    } catch (error) {
+                        cLog(1, `${FleetTimeStamp(userCraft.label)} Failed to emit upgrade completion telemetry for craftingId=${upgradeTelemetryJob.craftingId}`, error);
                     }
-                    await recordUpgradeClaimAttemptTransition(userCraft, { type: 'confirmed', atMs: Date.now() });
-                },
-            });
+                } else {
+                    cLog(1, `${FleetTimeStamp(userCraft.label)} Upgrade completed but telemetry cache entry is missing for craftingId=${craftingProcess.craftingId}`);
+                }
+            }
 
-            resolve(completedTxResult);
+            resolve(txResult);
         });
     }
 
@@ -15640,7 +15029,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-267', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-269', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
