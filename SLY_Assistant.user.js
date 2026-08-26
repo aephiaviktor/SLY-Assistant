@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-267
+// @aephia-version 0.7.35-268
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -2728,19 +2728,54 @@
 		return `slyaUpgradeLpPerProfileHistory_v3_${String(faction || '')}_${String(getSlyaInfluxInstanceTag() || '')}`;
 	}
 
+	function getUpgradeAutomationLpPerProfileHistoryMetaKey(faction) {
+		return `slyaUpgradeLpPerProfileHistory_v4_meta_${String(faction || '')}_${String(getSlyaInfluxInstanceTag() || '')}`;
+	}
+
+	function getUpgradeAutomationLpPerProfileHistoryProfileKey(faction, profile) {
+		return `slyaUpgradeLpPerProfileHistory_v4_profile_${String(faction || '')}_${String(getSlyaInfluxInstanceTag() || '')}_${String(profile || '')}`;
+	}
+
+	function shouldDiscoverUpgradeAutomationLpPerProfileSignatures(entry, threshold = 500) {
+		return (Array.isArray(entry?.pending) ? entry.pending.length : 0) < Math.max(1, Number(threshold || 500));
+	}
+
 	async function loadUpgradeAutomationLpPerProfileHistory(faction) {
 		const fallback = { profiles: {} };
 		try {
+			const metaRaw = await GM.getValue(getUpgradeAutomationLpPerProfileHistoryMetaKey(faction), '');
+			if (metaRaw) {
+				const meta = JSON.parse(String(metaRaw));
+				const profiles = {};
+				for (const profile of (Array.isArray(meta?.profiles) ? meta.profiles : [])) {
+					const raw = await GM.getValue(getUpgradeAutomationLpPerProfileHistoryProfileKey(faction, profile), '');
+					if (!raw) throw new Error(`missing profile shard ${profile}`);
+					profiles[profile] = JSON.parse(String(raw));
+				}
+				return { profiles };
+			}
 			const parsed = JSON.parse(String(await GM.getValue(getUpgradeAutomationLpPerProfileHistoryCacheKey(faction), JSON.stringify(fallback))));
 			return parsed && parsed.profiles && typeof parsed.profiles === 'object' ? parsed : fallback;
 		} catch (e) {
 			await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE] history cache invalid faction=${faction} err=${String(e?.message || e)}`);
-			return fallback;
+			return { profiles: {}, historyLoadFailed: true };
 		}
 	}
 
 	async function saveUpgradeAutomationLpPerProfileHistory(faction, state) {
-		await GM.setValue(getUpgradeAutomationLpPerProfileHistoryCacheKey(faction), JSON.stringify(state || { profiles: {} }));
+		const profiles = state?.profiles && typeof state.profiles === 'object' ? state.profiles : {};
+		const metaKey = getUpgradeAutomationLpPerProfileHistoryMetaKey(faction);
+		let priorProfiles = [];
+		try {
+			const priorMeta = JSON.parse(String(await GM.getValue(metaKey, '{"profiles":[]}')));
+			priorProfiles = Array.isArray(priorMeta?.profiles) ? priorMeta.profiles : [];
+		} catch (_) {}
+		const profileNames = Object.keys(profiles).sort();
+		for (const profile of profileNames) await GM.setValue(getUpgradeAutomationLpPerProfileHistoryProfileKey(faction, profile), JSON.stringify(profiles[profile]));
+		await GM.setValue(metaKey, JSON.stringify({ profiles: profileNames }));
+		for (const profile of priorProfiles) if (!profiles[profile]) await GM.deleteValue(getUpgradeAutomationLpPerProfileHistoryProfileKey(faction, profile));
+		const legacyKey = getUpgradeAutomationLpPerProfileHistoryCacheKey(faction);
+		await GM.deleteValue(legacyKey);
 	}
 
 	function formatUpgradeAutomationLpPerProfileCompletedInfluxLine(rows, faction) {
@@ -2784,9 +2819,13 @@
 
 	async function runUpgradeAutomationLpPerProfileRedemptionHistory(faction, processes, now) {
 		const nowSeconds = Math.floor(now.getTime() / 1000);
-		let state = updateUpgradeAutomationLpPerProfileWatchCohort(await loadUpgradeAutomationLpPerProfileHistory(faction), processes, nowSeconds);
+		const loadedState = await loadUpgradeAutomationLpPerProfileHistory(faction);
+		if (loadedState?.historyLoadFailed) return { discovered: 0, processed: 0, rows: 0, backlog: 0, profiles: 0, historyLoadFailed: true };
+		let state = updateUpgradeAutomationLpPerProfileWatchCohort(loadedState, processes, nowSeconds);
 		let discoveredCount = 0;
+		let discoveryBackpressure = 0;
 		for (const [profile, entry] of Object.entries(state.profiles)) {
+			if (!shouldDiscoverUpgradeAutomationLpPerProfileSignatures(entry)) { discoveryBackpressure++; continue; }
 			const signatures = [];
 			const options = { limit: 100 };
 			if (entry.cursor) options.until = entry.cursor;
@@ -2850,7 +2889,7 @@
 		}
 		const backlog = Object.values(state.profiles).reduce((sum, entry) => sum + entry.pending.length, 0);
 		const processed = Array.from(processedByProfile.values()).reduce((sum, set) => sum + set.size, 0);
-		await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE][HISTORY-DIAG] faction=${faction} ${Object.entries(diagnostics).map(([key, value]) => `${key}=${value}`).join(' ')}`);
+		await appendUpgradeAutomationLog(`[UPGRADE-AUTO][LP-PER-PROFILE][HISTORY-DIAG] faction=${faction} discoveryBackpressure=${discoveryBackpressure} ${Object.entries(diagnostics).map(([key, value]) => `${key}=${value}`).join(' ')}`);
 		return { discovered: discoveredCount, processed, rows: result.rows, backlog, profiles: Object.keys(state.profiles).length };
 	}
 
@@ -15840,7 +15879,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-267', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-268', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
