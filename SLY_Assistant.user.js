@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-272
+// @aephia-version 0.7.35-273
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -104,6 +104,8 @@
 	let upgradeAutomationGmPriceCache = { fetchedAt: 0, prices: {} };
 	const recoveredCraftingProcessSlots = new Map();
 	let recoverAllCraftingProcessesInFlight = null;
+	const upgradeStartSingleFlights = new Map();
+	let duplicateUpgradeRecoveryInFlight = null;
 	const CRAFT_WATCHDOG_INTERVAL_MS = 2 * 60 * 1000;
 	const CRAFT_WATCHDOG_RELOAD_COOLDOWN_MS = 15 * 60 * 1000;
 	const CRAFT_WATCHDOG_LAST_RELOAD_KEY = 'craftWatchdogLastReloadAt';
@@ -2229,6 +2231,71 @@
 		return name.slice(0, -8);
 	}
 
+	function getUpgradeDuplicateProcessStartTime(process = {}) {
+		const startTime = Number(process?.startTime);
+		if (Number.isFinite(startTime) && startTime > 0) return startTime;
+		const endTime = Number(process?.endTime);
+		return Number.isFinite(endTime) && endTime > 0 ? endTime : 0;
+	}
+
+	function decideUpgradeDuplicateRecovery(processes = [], plannedComponentCounts = new Map()) {
+		const active = (Array.isArray(processes) ? processes : []).filter(process =>
+			process && [0, 1, 2, 3].includes(Number(process.status)) && !process.completed
+		);
+		if (active.length < 2) return { action: 'none', reason: 'no_duplicate' };
+
+		const recipeName = String(active[0]?.recipeName || '');
+		if (!recipeName || active.some(process => String(process?.recipeName || '') !== recipeName)) {
+			return { action: 'ambiguous', reason: 'mixed_recipe_group' };
+		}
+
+		const component = String(active[0]?.component || '');
+		const expectedCount = Math.max(0, Number(plannedComponentCounts?.get?.(component) || 0));
+		if (expectedCount > 1) return { action: 'ambiguous', reason: 'multiple_jobs_planned' };
+
+		const sorted = active.slice().sort((a, b) => {
+			const timeDiff = getUpgradeDuplicateProcessStartTime(a) - getUpgradeDuplicateProcessStartTime(b);
+			return timeDiff || Number(a?.craftingId || 0) - Number(b?.craftingId || 0);
+		});
+		const tracked = sorted.filter(process => process.assignedLabel || process.trackedLabel || process.telemetryTracked);
+		if (tracked.length > 1) return { action: 'ambiguous', reason: 'multiple_tracked_processes' };
+		if (!tracked.length && expectedCount !== 1) return { action: 'ambiguous', reason: 'ownership_unconfirmed' };
+
+		const canonical = tracked[0] || sorted[0];
+		const canonicalStart = getUpgradeDuplicateProcessStartTime(canonical);
+		const newerUntracked = sorted.filter(process =>
+			process !== canonical && !process.assignedLabel && !process.trackedLabel && !process.telemetryTracked &&
+			getUpgradeDuplicateProcessStartTime(process) > canonicalStart
+		);
+		if (!newerUntracked.length) return { action: 'ambiguous', reason: 'no_newer_untracked_duplicate', canonical };
+
+		return {
+			action: 'abandon',
+			reason: 'newer_untracked_duplicate',
+			canonical,
+			duplicate: newerUntracked[newerUntracked.length - 1]
+		};
+	}
+
+	function findBlockingActiveUpgradeProcess(processes = [], recipeName = '') {
+		const targetRecipe = String(recipeName || '');
+		if (!targetRecipe) return null;
+		return (Array.isArray(processes) ? processes : []).find(process =>
+			process && String(process.recipeName || '') === targetRecipe && [0, 1, 2, 3].includes(Number(process.status))
+		) || null;
+	}
+
+	function buildUpgradePlannedComponentCounts(rows = []) {
+		const counts = new Map();
+		for (const row of (Array.isArray(rows) ? rows : [])) {
+			const recipeName = String(row?.craftItem || row?.item || '');
+			const component = getUpgradeAutomationUpgradeRecipeComponentName(recipeName);
+			if (!component || Math.max(0, Number(row?.nextCrew || row?.crew || 0)) <= 0) continue;
+			counts.set(component, Number(counts.get(component) || 0) + 1);
+		}
+		return counts;
+	}
+
 	async function getUpgradeAutomationLpStarbaseContext(settings = {}) {
 		const lpInstanceKey = normalizeUpgradeAutomationLpInstance(settings?.upgradeAutomationLpInstance || 'MUD');
 		const factionCfg = UPGRADE_AUTOMATION_FACTION_CONFIG[lpInstanceKey] || UPGRADE_AUTOMATION_FACTION_CONFIG.MUD;
@@ -2251,7 +2318,11 @@
 		const managedCraftLabels = getUpgradeAutomationManagedCraftLabels(settings);
 		const managedCraftLabelSet = new Set(managedCraftLabels);
 		const assignedByCraftingId = new Map();
-		for (const craftLabel of managedCraftLabels) {
+		const allCraftLabels = Array.from(new Set([
+			...managedCraftLabels,
+			...Array.from({ length: Math.max(0, Number(settings?.craftingJobs || 0)) }, (_, index) => 'craft' + (index + 1))
+		]));
+		for (const craftLabel of allCraftLabels) {
 			const slot = await getUpgradeAutomationCraftSlotState(craftLabel);
 			const craftingId = Math.max(0, Math.floor(Number(slot?.craftingId || 0)));
 			if (craftingId) assignedByCraftingId.set(String(craftingId), craftLabel);
@@ -2286,7 +2357,8 @@
 				if (![0, 1, 2, 3].includes(status)) continue;
 				const remainingSeconds = Math.max(craftingProcess.account.endTime.toNumber() - context.upgradeTime.starbaseTime, 0);
 				const completed = remainingSeconds <= 0 && [2, 3].includes(status);
-				const assignedLabel = assignedByCraftingId.get(String(craftingId)) || '';
+				const trackedLabel = assignedByCraftingId.get(String(craftingId)) || '';
+				const telemetryTracked = !!(await loadUpgradeTelemetryJob(craftingId));
 				processes.push({
 					craftingProcess: craftingProcess.publicKey,
 					craftingInstance: craftingInstance.publicKey,
@@ -2295,10 +2367,13 @@
 					component: getUpgradeAutomationUpgradeRecipeComponentName(recipe.name),
 					status,
 					craftingId,
+					startTime: maybeBnToNumber(craftingProcess.account.startTime, 0),
 					endTime: craftingProcess.account.endTime.toNumber(),
 					remainingSeconds,
 					completed,
-					assignedLabel: managedCraftLabelSet.has(assignedLabel) ? assignedLabel : ''
+					trackedLabel,
+					telemetryTracked,
+					assignedLabel: managedCraftLabelSet.has(trackedLabel) ? trackedLabel : ''
 				});
 			}
 		}
@@ -2306,6 +2381,118 @@
 		return processes.sort((a, b) => {
 			if (a.completed !== b.completed) return a.completed ? -1 : 1;
 			return a.endTime - b.endTime;
+		});
+	}
+
+	async function execAbandonDuplicateUpgradeProcess(context, duplicate, userCraft) {
+		const beforePlayer = await sageProgram.account.starbasePlayer.fetch(context.starbasePlayer);
+		const crewBefore = Math.max(0, Number(beforePlayer.totalCrew || 0) - maybeBnToNumber(beforePlayer.busyCrew, 0));
+		const tx = { instruction: await sageProgram.methods.cancelCraftingProcess({
+			keyIndex: new BrowserAnchor.anchor.BN(userProfileKeyIdx)
+		}).accountsStrict({
+			fundsTo: userPublicKey,
+			starbaseAndStarbasePlayer: {
+				starbase: context.starbase.publicKey,
+				starbasePlayer: context.starbasePlayer
+			},
+			craftingInstance: duplicate.craftingInstance,
+			craftingProcess: duplicate.craftingProcess,
+			craftingFacility: context.starbase.account.upgradeFacility,
+			gameAccountsAndProfile: {
+				gameAndProfileAndFaction: {
+					gameId: sageGameAcct.publicKey,
+					key: userPublicKey,
+					profile: userProfileAcct,
+					profileFaction: userProfileFactionAcct.publicKey
+				},
+				gameState: sageGameAcct.account.gameState
+			},
+			craftingProgram: craftingProgramPK
+		}).instruction() };
+		await txSignAndSend(tx, userCraft, 'ABANDON DUPLICATE UPGRADE', Math.min(globalSettings.craftingTxMultiplier, 500));
+		if (String(userCraft?.state || '').includes('ERROR')) return { cleaned: false, reason: 'transaction_error', crewBefore };
+		await wait(2000);
+		const remainingAccount = await solanaReadConnection.getAccountInfo(duplicate.craftingProcess, 'confirmed');
+		const afterPlayer = await sageProgram.account.starbasePlayer.fetch(context.starbasePlayer);
+		const crewAfter = Math.max(0, Number(afterPlayer.totalCrew || 0) - maybeBnToNumber(afterPlayer.busyCrew, 0));
+		const processAbsent = !remainingAccount;
+		const crewReleased = crewAfter > crewBefore;
+		return {
+			cleaned: processAbsent && crewReleased,
+			processAbsent,
+			crewReleased,
+			reason: !processAbsent ? 'process_still_present' : (crewReleased ? 'confirmed_absent_and_crew_released' : 'crew_release_not_observed'),
+			crewBefore,
+			crewAfter
+		};
+	}
+
+	async function recoverDuplicateUpgradeProcessForCrewWait(context, userCraft, settings = {}) {
+		if (duplicateUpgradeRecoveryInFlight) return duplicateUpgradeRecoveryInFlight;
+		duplicateUpgradeRecoveryInFlight = (async () => {
+			const processes = await getUpgradeAutomationLpUpgradeProcesses(context, settings);
+			const pendingPlan = upgradeAutomationPendingPlanRows?.length
+				? { rows: upgradeAutomationPendingPlanRows }
+				: await loadUpgradeAutomationSchedulerPlan(settings, new Date());
+			const plannedCounts = buildUpgradePlannedComponentCounts(pendingPlan?.rows || []);
+			const groups = new Map();
+			for (const process of processes.filter(item => !item.completed)) {
+				const key = String(process.recipeName || '');
+				if (!groups.has(key)) groups.set(key, []);
+				groups.get(key).push(process);
+			}
+
+			for (const group of groups.values()) {
+				if (group.length < 2) continue;
+				const decision = decideUpgradeDuplicateRecovery(group, plannedCounts);
+				if (decision.action !== 'abandon') {
+					const warning = `[UPGRADE-DUPLICATE][LOUD WARNING] no automatic abandonment recipe=${group[0]?.recipeName || 'unknown'} ids=${group.map(item => item.craftingId).join(',')} reason=${decision.reason}`;
+					cLog(1, warning);
+					await appendUpgradeAutomationLog(warning);
+					continue;
+				}
+
+				const duplicate = decision.duplicate;
+				const startGap = getUpgradeDuplicateProcessStartTime(duplicate) - getUpgradeDuplicateProcessStartTime(decision.canonical);
+				await appendUpgradeAutomationLog(`[UPGRADE-DUPLICATE] abandoning newer untracked craftingId=${duplicate.craftingId} canonical=${decision.canonical.craftingId} recipe=${duplicate.recipeName} startGapSeconds=${startGap}`);
+				const result = await execAbandonDuplicateUpgradeProcess(context, duplicate, userCraft);
+				await appendUpgradeAutomationLog(`[UPGRADE-DUPLICATE] confirmation craftingId=${duplicate.craftingId} cleaned=${result.cleaned} processAbsent=${result.processAbsent} crewReleased=${result.crewReleased} reason=${result.reason} availableCrewBefore=${result.crewBefore} availableCrewAfter=${result.crewAfter}`);
+				if (!result.cleaned) cLog(1, `[UPGRADE-DUPLICATE][LOUD WARNING] craftingId=${duplicate.craftingId} did not disappear; no further cleanup this cycle`);
+				return result;
+			}
+			return { cleaned: false, reason: 'no_safe_duplicate' };
+		})().finally(() => { duplicateUpgradeRecoveryInFlight = null; });
+		return duplicateUpgradeRecoveryInFlight;
+	}
+
+	async function runUpgradeStartSingleFlight(key, operation) {
+		const flightKey = String(key || '');
+		if (upgradeStartSingleFlights.has(flightKey)) {
+			return upgradeStartSingleFlights.get(flightKey).then(result => ({
+				blockedByExistingUpgrade: true,
+				craftingId: Number(result?.craftingId || 0),
+				coalesced: true
+			}));
+		}
+		const flight = Promise.resolve().then(operation).finally(() => upgradeStartSingleFlights.delete(flightKey));
+		upgradeStartSingleFlights.set(flightKey, flight);
+		return flight;
+	}
+
+	async function startUpgradeWithSingleFlight(starbase, starbasePlayer, starbasePlayerCargoHoldsAndTokens, craftingRecipe, craftAmount, userCraft, upgradeTime, activityType) {
+		if (activityType !== 'Upgrading') return execStartCrafting(starbase, starbasePlayer, starbasePlayerCargoHoldsAndTokens, craftingRecipe, craftAmount, userCraft);
+		const key = `${String(userProfileAcct || '')}:${starbasePlayer.toString()}:${craftingRecipe.publicKey.toString()}`;
+		return runUpgradeStartSingleFlight(key, async () => {
+			const context = { starbase, starbasePlayer, upgradeTime };
+			const processes = await getUpgradeAutomationLpUpgradeProcesses(context, globalSettings);
+			const blocker = findBlockingActiveUpgradeProcess(processes, craftingRecipe.name);
+			if (blocker) {
+				const warning = `[UPGRADE-SINGLE-FLIGHT] blocked duplicate start recipe=${craftingRecipe.name} existingCraftingId=${blocker.craftingId}`;
+				cLog(1, warning);
+				await appendUpgradeAutomationLog(warning);
+				return { blockedByExistingUpgrade: true, craftingId: blocker.craftingId };
+			}
+			return execStartCrafting(starbase, starbasePlayer, starbasePlayerCargoHoldsAndTokens, craftingRecipe, craftAmount, userCraft);
 		});
 	}
 
@@ -15277,7 +15464,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-272', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-273', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -18712,8 +18899,13 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                         updateFleetState(userCraft, activityInfo);
                         if (!isCurrentCraftPoll(craftLabel, generation)) return;
                         runtime.stage = 'starting-transaction';
-                        let result = await runCraftTransaction(() => execStartCrafting(starbase, starbasePlayer, starbasePlayerCargoHoldsAndTokens, targetRecipe.craftRecipe, craftAmount, userCraft));
-                        if (!userCraft.state.includes('ERROR')) {
+                        let result = await runCraftTransaction(() => startUpgradeWithSingleFlight(starbase, starbasePlayer, starbasePlayerCargoHoldsAndTokens, targetRecipe.craftRecipe, craftAmount, userCraft, upgradeTime, activityType));
+                        if (result?.blockedByExistingUpgrade) {
+                            updateFleetState(userCraft, 'Waiting for existing upgrade: ' + targetRecipe.craftRecipe.name);
+                            localTimeout = 10000;
+                            await updateCraft(userCraft);
+                        }
+                        else if (!userCraft.state.includes('ERROR')) {
                             activityInfo = activityType == 'Crafting' ? "&#9874; " + targetRecipe.craftRecipe.name + (userCraft.item!=targetRecipe.craftRecipe.name?' ('+userCraft.item+')':'') : 'Upgrading';
                             let craftDuration = (targetRecipe.craftRecipe.duration * craftAmount) / userCraft.crew;
                             let calcEndTime = TimeToStr(new Date(Date.now() + craftDuration * 1000));
@@ -18775,14 +18967,25 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                         materialStr = ': ' + targetRecipe.craftRecipe.name + (userCraft.item != targetRecipe.craftRecipe.name ? ' (' + userCraft.item + ')' : '' );
                     }
                     let recoveredAnySlotCount = 0;
+                    let duplicateRecovery = null;
                     if (availableCrew < userCraft.crew) {
                         recoveredAnySlotCount = await recoverCraftingProcessesForAllSlots(userCraft.label);
                         if (recoveredAnySlotCount) {
                             const refreshedCraftData = await GM.getValue(userCraft.label, '{}');
                             userCraft = JSON.parse(refreshedCraftData);
                         }
+                        if (!userCraft.craftingId) {
+                            duplicateRecovery = await recoverDuplicateUpgradeProcessForCrewWait({ starbase, starbasePlayer, upgradeTime }, userCraft, globalSettings);
+                            if (duplicateRecovery.cleaned) {
+                                starbasePlayerInfo = await sageProgram.account.starbasePlayer.fetch(starbasePlayer);
+                                availableCrew = starbasePlayerInfo.totalCrew - starbasePlayerInfo.busyCrew.toNumber();
+                                updateFleetState(userCraft, 'Idle');
+                            }
+                        }
                     }
-                    const recoveredProcess = userCraft.craftingId ? { timeoutMs: 10000 } : await recoverCraftingProcessForSlot(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime);
+                    const recoveredProcess = duplicateRecovery?.cleaned
+                        ? { timeoutMs: 10000 }
+                        : (userCraft.craftingId ? { timeoutMs: 10000 } : await recoverCraftingProcessForSlot(starbase, starbasePlayer, targetRecipe, userCraft, craftTime, upgradeTime));
                     if (recoveredProcess) {
                         localTimeout = recoveredProcess.timeoutMs;
                     }
