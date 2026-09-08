@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-273
+// @aephia-version 0.7.35-274
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -7965,6 +7965,150 @@ function renderAssistStats() {
         }
     }
 
+// BEGIN TOOLKIT COLLECTOR
+/* Toolkit clock producer. Embedded in both userscript distributions by
+ * scripts/embed-toolkit-collector.py; no Electron-only dependency. */
+function createSlyaToolkitCollector({ connection, coder, PublicKey, Buffer, game, program, getDestination, load, save, publish, hash, report = () => {}, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+  const factions = {MUD:[0,-24,'MUD-PHANTOM'],ONI:[-28,21,'ONI-PHANTOM'],USTUR:[28,21,'UST-PHANTOM']};
+  const fields = ['faction','starbase','starbasePublicKey','slot','observedAt','globalTime','localTime','balance','depletionRate','reserve','level'];
+  let stopped=false, running=false, timer, lastTick=null, lastHour=null, lastRetry=null;
+  const seed = n => { const b=Buffer.alloc(8); let v=BigInt.asUintN(64,BigInt(n)); for(let i=0;i<8;i++){b[i]=Number(v&255n);v>>=8n;} return b; };
+  const u64 = (data,offset) => { let v=0n; for(let i=7;i>=0;i--) v=(v<<8n)+BigInt(data[offset+i]); return v; };
+  const addresses = Object.fromEntries(Object.entries(factions).map(([f,[x,y]])=>[f,PublicKey.findProgramAddressSync([Buffer.from('Starbase'),game.toBuffer(),seed(x),seed(y)],program)[0]]));
+  function canonical(raw, faction) {
+    if (!raw || raw.faction!==faction || raw.starbase!==factions[faction][2] || raw.starbasePublicKey!==addresses[faction].toBase58()) return null;
+    const s=Object.fromEntries(fields.map(k=>[k,raw[k]]));
+    for (const k of fields.slice(3)) { if(s[k]==null || s[k]==='') return null; s[k]=Number(s[k]?.toString()); if (!Number.isSafeInteger(s[k]) || s[k]<0) return null; }
+    if(s.globalTime>s.observedAt || s.localTime>s.globalTime || s.level>6 || (s.reserve>0 && (!(s.depletionRate>0) || s.depletionRate%100))) return null;
+    return s;
+  }
+  async function capture(faction) {
+    const info=await connection.getAccountInfo(game,'finalized');
+    if(!info?.owner.equals(program)) throw Error('capture');
+    const stateKey=new PublicKey(coder.decode('game',info.data).gameState);
+    const result=await connection.getMultipleAccountsInfoAndContext([addresses[faction],stateKey,game,new PublicKey('SysvarC1ock11111111111111111111111111111111')],'finalized');
+    const [sb,gs,g,clock]=result.value || [];
+    if(![sb,gs,g].every(a=>a?.owner.equals(program)) || !clock || clock.data.length<40 || Number(u64(clock.data,0))!==result.context.slot || !new PublicKey(coder.decode('game',g.data).gameState).equals(stateKey)) throw Error('capture');
+    const star=coder.decode('starbase',sb.data), state=coder.decode('gameState',gs.data);
+    const upkeep=state.fleet.upkeep['level'+Number(star.level)];
+    const observed=canonical({faction,starbase:factions[faction][2],starbasePublicKey:addresses[faction].toBase58(),slot:result.context.slot,observedAt:Number(BigInt.asIntN(64,u64(clock.data,32))),globalTime:star.upkeepToolkitGlobalLastUpdate,localTime:star.upkeepToolkitLastUpdate,balance:star.upkeepToolkitBalance,depletionRate:upkeep?.toolkitDepletionRate,reserve:upkeep?.toolkitReserve,level:star.level},faction);
+    if(!observed) throw Error('capture');
+    return observed;
+  }
+  function line(row,id) {
+    const tag=v=>String(v).replace(/([ ,=])/g,'\\$1');
+    const record=JSON.stringify(row).replace(/\\/g,'\\\\').replace(/"/g,'\\"');
+    return `starbase_toolkit_clock_v1,faction=${tag(row.faction)},starbase=${tag(row.starbase)},address=${tag(row.starbasePublicKey)},observation=${id} record="${record}" ${BigInt(row.observedAt)*1000000000n}`;
+  }
+  async function collect(doCapture) {
+    // Snapshot destination once per pass; tokens are never journalled/hashed/logged.
+    const destination=getDestination();
+    if (!destination) { report({status:'not_configured'}); return; }
+    const destinationId=await hash(destination.identity);
+    for(const faction of Object.keys(factions)) {
+      try {
+        const key='slya-toolkit-clock-v1:'+destinationId+':'+faction;
+        const stored=await load(key);
+        if(stored && (stored.version!==1 || !Array.isArray(stored.rows))) throw Error('cache');
+        const rows=new Map();
+        const minimum=Math.floor(now()/1000)-35*86400;
+        for(const item of stored?.rows || []) {
+          const row=canonical(item.row,faction);
+          if(row && row.observedAt>=minimum && row.observedAt<=Math.floor(now()/1000)) rows.set(await hash(JSON.stringify(row)),{row,published:item.published===true});
+        }
+        let captureFailed=false;
+        if(doCapture) {
+          try { const row=await capture(faction),id=await hash(JSON.stringify(row)); if(!rows.has(id)) rows.set(id,{row,published:false}); }
+          catch(_) { captureFailed=true; }
+        }
+        const journal={version:1,rows:[...rows.values()]};
+        // Persist before HTTP. A failed write cannot lose or acknowledge an observation.
+        await save(key,journal);
+        const pending=[...rows].filter(([,item])=>!item.published);
+        for(let offset=0;offset<Math.min(512,pending.length);offset+=128) {
+          const batch=pending.slice(offset,offset+128);
+          await publish(destination,batch.map(([id,item])=>line(item.row,id)).join('\n'));
+          for(const [,item] of batch) item.published=true;
+          await save(key,journal);
+        }
+        report({faction,status:captureFailed?'capture_failed':'ok',pending:journal.rows.filter(x=>!x.published).length});
+      } catch(_) { report({faction,status:'retry_pending'}); }
+    }
+  }
+  async function tick() {
+    if(stopped || running) return;
+    running=true;
+    const at=now(),phase=((at%86400000)+86400000)%86400000,hour=Math.floor(at/3600000);
+    const due=lastTick===null || hour!==lastHour || at-lastTick>90000 || at<lastTick || phase>=86100000 || phase<600000;
+    lastTick=at;
+    try { if(due) {lastHour=hour;lastRetry=at;await collect(true);} else if(lastRetry===null || at-lastRetry>=300000) {lastRetry=at;await collect(false);} }
+    catch(_) {report({status:'retry_pending'});}
+    finally {running=false;if(!stopped) timer=setTimer(tick,30000);}
+  }
+  return {start:tick,stop(){stopped=true;clearTimer(timer);},collect};
+}
+// Reuse SLYA's configured read providers, but not its indefinitely retrying
+// automation proxy: offline capture must settle so queued uploads can retry.
+function createSlyaToolkitRpc({ Connection, endpoints, fetch: transport, count = () => {}, setTimer = setTimeout, clearTimer = clearTimeout }) {
+  const call = async (method,args) => {
+    for(const endpoint of [...new Set(endpoints())].filter(Boolean).slice(0,2)) {
+      try {
+        const connection=new Connection(endpoint,{commitment:'finalized',disableRetryOnRateLimit:true,
+          fetch:async (url,options) => {
+            const controller=new AbortController(),timer=setTimer(()=>controller.abort(),15000);
+            try {
+              count();
+              const response=await transport(url,{...options,signal:controller.signal});
+              // Include body download in the deadline, not just HTTP headers.
+              const body=await response.arrayBuffer();
+              return new Response([204,205,304].includes(response.status)?null:body,{status:response.status,statusText:response.statusText,headers:response.headers});
+            }
+            finally {clearTimer(timer);}
+          }});
+        return await connection[method](...args);
+      } catch(_) { /* Bounded fallback. Do not log provider URLs or responses. */ }
+    }
+    throw new Error('toolkit_rpc_unavailable');
+  };
+  return Object.fromEntries(['getAccountInfo','getMultipleAccountsInfoAndContext'].map(method=>[method,(...args)=>call(method,args)]));
+}
+
+const toolkitUpkeepIdl = {"version":"0.1.3","name":"sage2-upkeep","instructions":[{"name":"depositStarbaseUpkeepResource","accounts":[{"name":"fundsTo","isMut":true,"isSigner":false,"docs":["The funds_to - receives rent refund"]},{"name":"starbaseAndStarbasePlayer","accounts":[{"name":"starbase","isMut":true,"isSigner":false,"docs":["The [`Starbase`] account"]},{"name":"starbasePlayer","isMut":false,"isSigner":false,"docs":["The [`StarbasePlayer`] Account"]}]},{"name":"cargoPodFrom","isMut":true,"isSigner":false,"docs":["The source cargo pod account"]},{"name":"cargoType","isMut":false,"isSigner":false,"docs":["The Cargo Type Account"]},{"name":"cargoStatsDefinition","isMut":false,"isSigner":false,"docs":["The cargo stats definition account"]},{"name":"tokenFrom","isMut":true,"isSigner":false,"docs":["The source account of the tokens - owner should be `cargo_pod_from`"]},{"name":"tokenMint","isMut":true,"isSigner":false,"docs":["The token mint"]},{"name":"gameAccountsAndProfile","accounts":[{"name":"gameAndProfileAndFaction","accounts":[{"name":"key","isMut":false,"isSigner":true,"docs":["The key authorized for this instruction"]},{"name":"profile","isMut":false,"isSigner":false,"docs":["The [`Profile`] account"]},{"name":"profileFaction","isMut":false,"isSigner":false,"docs":["The faction that the profile belongs to."]},{"name":"gameId","isMut":false,"isSigner":false,"docs":["The [`Game`] account"]}]},{"name":"gameState","isMut":false,"isSigner":false,"docs":["The [`GameState`] account"]}]},{"name":"resourceRecipe","isMut":false,"isSigner":false,"docs":["The crafting recipe for the upkeep resource"]},{"name":"loyaltyPointsAccounts","accounts":[{"name":"userPointsAccount","isMut":true,"isSigner":false,"docs":["The User Points Account"]},{"name":"pointsCategory","isMut":false,"isSigner":false,"docs":["The Points Category Account"]},{"name":"pointsModifierAccount","isMut":false,"isSigner":false,"docs":["The Points Modifier Account"]}]},{"name":"progressionConfig","isMut":false,"isSigner":false,"docs":["The [`ProgressionConfig`] account"]},{"name":"pointsProgram","isMut":false,"isSigner":false,"docs":["The points program"]},{"name":"cargoProgram","isMut":false,"isSigner":false,"docs":["The Cargo Program"]},{"name":"tokenProgram","isMut":false,"isSigner":false,"docs":["The [Token] program"]}],"args":[{"name":"input","type":{"defined":"DepositStarbaseUpkeepResourceInput"}}]}],"accounts":[{"name":"game","docs":["Global Game Configuration variables"],"type":{"kind":"struct","fields":[{"name":"version","docs":["The data version of this account."],"type":"u8"},{"name":"updateId","docs":["The sequence id for updates."],"type":"u64"},{"name":"profile","docs":["The [`Profile`](player_profile::state::Profile) that handles the sector program permissions"],"type":"publicKey"},{"name":"gameState","docs":["The associated `GameState` account."],"type":"publicKey"},{"name":"points","docs":["Points setting"],"type":{"defined":"Points"}},{"name":"cargo","docs":["Cargo settings"],"type":{"defined":"Cargo"}},{"name":"crafting","docs":["Crafting settings"],"type":{"defined":"Crafting"}},{"name":"mints","docs":["mint related settings"],"type":{"defined":"Mints"}},{"name":"vaults","docs":["vault related settings"],"type":{"defined":"Vaults"}},{"name":"riskZones","docs":["Data for risk zones"],"type":{"defined":"RiskZonesData"}}]}},{"name":"gameState","docs":["Keeps track of variables that may change frequently during a `Game` session"],"type":{"kind":"struct","fields":[{"name":"version","docs":["The data version of this account"],"type":"u8"},{"name":"updateId","docs":["The sequence id for updates"],"type":"u64"},{"name":"gameId","docs":["The `Game` that this belongs to"],"type":"publicKey"},{"name":"fleet","docs":["Fleet settings"],"type":{"defined":"FleetInfo"}},{"name":"misc","docs":["Miscellaneous settings"],"type":{"defined":"MiscVariables"}},{"name":"bump","docs":["PDA bump"],"type":"u8"}]}},{"name":"starbase","docs":["Starbase"],"type":{"kind":"struct","fields":[{"name":"version","docs":["The data version of this `Starbase` account."],"type":"u8"},{"name":"gameId","docs":["the game_id that this `Starbase` belongs to"],"type":"publicKey"},{"name":"sector","docs":["the sector that this `Starbase` belongs to"],"type":{"array":["i64",2]}},{"name":"craftingFacility","docs":["the [`CraftingFacility`] to use for crafting at this `Starbase`"],"type":"publicKey"},{"name":"upgradeFacility","docs":["the [`CraftingFacility`] to use for upgrade jobs at this `Starbase`"],"type":"publicKey"},{"name":"name","docs":["The name of this `Starbase`"],"type":{"array":["u8",64]}},{"name":"subCoordinates","docs":["coordinates as [x, y]"],"type":{"array":["i64",2]}},{"name":"faction","docs":["The faction of the `Starbase`."],"type":"u8"},{"name":"bump","docs":["bump for PDA"],"type":"u8"},{"name":"seqId","docs":["The sequence id for the `Starbase`"],"type":"u16"},{"name":"state","docs":["The state of the `Starbase`. Is a [`StarbaseState`]."],"type":"u8"},{"name":"level","docs":["The level of the `Starbase`."],"type":"u8"},{"name":"hp","docs":["The `Starbase` health points."],"type":"u64"},{"name":"sp","docs":["The `Starbase` shield points."],"type":"u64"},{"name":"sectorRingAvailable","docs":["The planet position (`sector::state::Ring`) available for this `Starbase`"],"type":"u8"},{"name":"upgradeState","docs":["The `Starbase` upgrade state"],"type":"u8"},{"name":"upgradeIngredientsChecksum","docs":["used to check if expected upgrade ingredients have been supplied"],"type":{"array":["u8",16]}},{"name":"numUpgradeIngredients","docs":["number of ingredients needed for starbase upgrade"],"type":"u8"},{"name":"upkeepAmmoBalance","docs":["The balance of ammo for upkeep"],"type":"u64"},{"name":"upkeepAmmoLastUpdate","docs":["The last time ammo for upkeep was updated (Local time)"],"type":"i64"},{"name":"upkeepAmmoGlobalLastUpdate","docs":["The last time ammo for upkeep was updated (Global time)"],"type":"i64"},{"name":"upkeepFoodBalance","docs":["The balance of food for upkeep"],"type":"u64"},{"name":"upkeepFoodLastUpdate","docs":["The last time food for upkeep was updated (Local time)"],"type":"i64"},{"name":"upkeepFoodGlobalLastUpdate","docs":["The last time food for upkeep was updated (Global time)"],"type":"i64"},{"name":"upkeepToolkitBalance","docs":["The balance of toolkits for upkeep"],"type":"u64"},{"name":"upkeepToolkitLastUpdate","docs":["The last time toolkits for upkeep was updated (Local time)"],"type":"i64"},{"name":"upkeepToolkitGlobalLastUpdate","docs":["The last time toolkits for upkeep was updated (Global time)"],"type":"i64"},{"name":"builtDestroyedTimestamp","docs":["The last time the starbase was built or destroyed"],"type":"i64"}]}}],"types":[{"name":"Cargo","docs":["Variables for the Cargo program"],"type":{"kind":"struct","fields":[{"name":"statsDefinition","docs":["The cargo stats definition account"],"type":"publicKey"}]}},{"name":"Crafting","docs":["Variables for the Crafting program"],"type":{"kind":"struct","fields":[{"name":"domain","docs":["The crafting domain account"],"type":"publicKey"}]}},{"name":"DepositStarbaseUpkeepResourceInput","docs":["Submit starbase upkeep resource inputs"],"type":{"kind":"struct","fields":[{"name":"pointsProgramPermissionsKeyIndex","docs":["the index of the points program permissions in the player profile"],"type":"u16"},{"name":"sagePermissionsKeyIndex","docs":["the index of the key in sage permissions in the player profile"],"type":"u16"},{"name":"resourceType","docs":["the resource type"],"type":"u8"},{"name":"resourceIndex","docs":["the index of the resource represented by `token_mint` in the `resource_recipe` ingredients list"],"type":"u16"},{"name":"amount","docs":["the amount"],"type":"u64"},{"name":"epochIndex","docs":["the index of the epoch in the `RedemptionConfig` account"],"type":"u16"}]}},{"name":"FactionsStarbaseLevelInfo","docs":["`Starbase` levels discriminated by faction"],"type":{"kind":"struct","fields":[{"name":"mud","docs":["Mud Starbase Levels Info"],"type":{"array":[{"defined":"StarbaseLevelInfo"},7]}},{"name":"oni","docs":["Oni Starbase Levels Info"],"type":{"array":[{"defined":"StarbaseLevelInfo"},7]}},{"name":"ustur","docs":["Ustur Starbase Levels Info"],"type":{"array":[{"defined":"StarbaseLevelInfo"},7]}}]}},{"name":"FleetInfo","docs":["Variables for the Fleet program"],"type":{"kind":"struct","fields":[{"name":"starbaseLevels","docs":["`Starbase` levels discriminated by faction"],"type":{"defined":"FactionsStarbaseLevelInfo"}},{"name":"upkeep","docs":["`Starbase` upkeep discriminated by level"],"type":{"defined":"StarbaseUpkeepLevels"}},{"name":"maxFleetSize","docs":["Maximum `Fleet` size allowed"],"type":"u32"}]}},{"name":"Mints","docs":["Token mints"],"type":{"kind":"struct","fields":[{"name":"atlas","docs":["ATLAS token mint"],"type":"publicKey"},{"name":"polis","docs":["POLIS token mint"],"type":"publicKey"},{"name":"ammo","docs":["ammunition"],"type":"publicKey"},{"name":"food","docs":["food"],"type":"publicKey"},{"name":"fuel","docs":["fuel"],"type":"publicKey"},{"name":"repairKit","docs":["repair kit"],"type":"publicKey"}]}},{"name":"MiscVariables","docs":["Miscellaneous game state variables"],"type":{"kind":"struct","fields":[{"name":"warpLaneFuelCostReduction","docs":["Percentage by which the \"warp lane\" movement type reduces warp fuel cost"],"type":"i16"},{"name":"respawnFee","docs":["Respawn fee; You cannot enter into the respawning state without paying this fee","Since ATLAS has 8 decimal places, units are in the smallest value of ATLAS possible."],"type":"u64"},{"name":"upkeepMiningEmissionsPenalty","docs":["Percentage by which to reduce the asteroid mining rate if a starbase ammo upkeep coffer is empty"],"type":"i16"}]}},{"name":"Points","docs":["Variables for the Points program"],"type":{"kind":"struct","fields":[{"name":"lpCategory","docs":["Represents the points category & modifier to use for Loyalty Points (LP)"],"type":{"defined":"SagePointsCategory"}},{"name":"councilRankXpCategory","docs":["Represents the points category & modifier to use for Council Rank Experience Points (CRXP)"],"type":{"defined":"SagePointsCategory"}},{"name":"pilotXpCategory","docs":["Represents the points category & modifier to use for Pilot License Experience Points (PXP)"],"type":{"defined":"SagePointsCategory"}},{"name":"dataRunningXpCategory","docs":["Represents the points category & modifier to use for Data Running Experience Points (DRXP)"],"type":{"defined":"SagePointsCategory"}},{"name":"miningXpCategory","docs":["Represents the points category & modifier to use for Mining Experience Points (MXP)"],"type":{"defined":"SagePointsCategory"}},{"name":"craftingXpCategory","docs":["Represents the points category & modifier to use for Crafting Experience Points (CXP)"],"type":{"defined":"SagePointsCategory"}}]}},{"name":"RiskZoneData","docs":["`RiskZone` center and radius"],"type":{"kind":"struct","fields":[{"name":"center","docs":["Risk zone center"],"type":{"array":["i64",2]}},{"name":"radius","docs":["Risk zone radius"],"type":"u64"}]}},{"name":"RiskZonesData","docs":["[`RiskZoneData`] for [`RiskZones`]"],"type":{"kind":"struct","fields":[{"name":"mudSecurityZone","docs":["Mud security zone"],"type":{"defined":"RiskZoneData"}},{"name":"oniSecurityZone","docs":["Oni security zone"],"type":{"defined":"RiskZoneData"}},{"name":"usturSecurityZone","docs":["Ustur security zone"],"type":{"defined":"RiskZoneData"}},{"name":"highRiskZone","docs":["High risk zone"],"type":{"defined":"RiskZoneData"}},{"name":"mediumRiskZone","docs":["Medium risk zone"],"type":{"defined":"RiskZoneData"}}]}},{"name":"SagePointsCategory","docs":["Represents a points category & modifier as defined in the Points program"],"type":{"kind":"struct","fields":[{"name":"category","docs":["The points category"],"type":"publicKey"},{"name":"modifier","docs":["The points category modifier"],"type":"publicKey"},{"name":"modifierBump","docs":["The points category modifier bump"],"type":"u8"}]}},{"name":"StarbaseLevelInfo","docs":["Information associated with `Starbase` levels"],"type":{"kind":"struct","fields":[{"name":"recipeForUpgrade","docs":["The crafting recipe required to upgrade a `Starbase` to this level"],"type":"publicKey"},{"name":"recipeCategoryForLevel","docs":["The crafting recipe category enabled for crafting at a `Starbase` of this level."],"type":"publicKey"},{"name":"hp","docs":["The `Starbase` health points for this level."],"type":"u64"},{"name":"sp","docs":["The `Starbase` shield points for this level."],"type":"u64"},{"name":"sectorRingAvailable","docs":["The planet position `Ring` available for this level"],"type":"u8"},{"name":"warpLaneMovementFee","docs":["Fee charged for the \"warp lane\" movement type which is meant to be charged in ATLAS","Since ATLAS has 8 decimal places, units are in the smallest value of ATLAS possible."],"type":"u64"}]}},{"name":"StarbaseUpkeepInfo","docs":["Information associated with `Starbase` upkeep"],"type":{"kind":"struct","fields":[{"name":"ammoReserve","docs":["The maximum amount of ammo that can be committed upkeep by players","If 0 (zero) then ammo upkeep is disabled"],"type":"u64"},{"name":"ammoDepletionRate","docs":["The per second rate at which the ammo reserve is emptied"],"type":"u32"},{"name":"foodReserve","docs":["The maximum amount of food that can be committed upkeep by players","If 0 (zero) then food upkeep is disabled"],"type":"u64"},{"name":"foodDepletionRate","docs":["The per second rate at which the food reserve is emptied"],"type":"u32"},{"name":"toolkitReserve","docs":["The maximum amount of toolkits that can be committed upkeep by players","If 0 (zero) then toolkit upkeep is disabled"],"type":"u64"},{"name":"toolkitDepletionRate","docs":["The per second rate at which the toolkit reserve is emptied"],"type":"u32"}]}},{"name":"StarbaseUpkeepLevels","docs":["Information on `Starbase` upkeep by level"],"type":{"kind":"struct","fields":[{"name":"level0","docs":["Upkeep info. for a level 0 `Starbase`"],"type":{"defined":"StarbaseUpkeepInfo"}},{"name":"level1","docs":["Upkeep info. for a level 1 `Starbase`"],"type":{"defined":"StarbaseUpkeepInfo"}},{"name":"level2","docs":["Upkeep info. for a level 2 `Starbase`"],"type":{"defined":"StarbaseUpkeepInfo"}},{"name":"level3","docs":["Upkeep info. for a level 3 `Starbase`"],"type":{"defined":"StarbaseUpkeepInfo"}},{"name":"level4","docs":["Upkeep info. for a level 4 `Starbase`"],"type":{"defined":"StarbaseUpkeepInfo"}},{"name":"level5","docs":["Upkeep info. for a level 5 `Starbase`"],"type":{"defined":"StarbaseUpkeepInfo"}},{"name":"level6","docs":["Upkeep info. for a level 6 `Starbase`"],"type":{"defined":"StarbaseUpkeepInfo"}}]}},{"name":"Vaults","docs":["Token vaults"],"type":{"kind":"struct","fields":[{"name":"atlas","docs":["ATLAS token mint"],"type":"publicKey"},{"name":"polis","docs":["POLIS token mint"],"type":"publicKey"}]}}],"errors":[]};
+// END TOOLKIT COLLECTOR
+
+// Own collection in SLYA, independently of fleet/upgrade automation toggles.
+const toolkitCollector = createSlyaToolkitCollector({
+  connection: createSlyaToolkitRpc({Connection:solanaWeb3.Connection,endpoints:()=>readRPCs,fetch:(url,options)=>fetch(url,options),count:()=>{solanaReadCount++;}}),
+  coder: new BrowserAnchor.anchor.BorshAccountsCoder(toolkitUpkeepIdl),
+  PublicKey: solanaWeb3.PublicKey, Buffer: BrowserBuffer.Buffer.Buffer,
+  game: new solanaWeb3.PublicKey('GAMEzqJehF8yAnKiTARUuhZMvLvkZVAsCVri5vSfemLr'),
+  program: new solanaWeb3.PublicKey('SAGE2HAwep459SNq61LHvjxPk4pLPEJLoMETef7f7EE'),
+  getDestination: () => {
+    if (!globalSettings.influxURL || !globalSettings.influxDB || !globalSettings.influxAuth) return null;
+    const url = new URL(buildInfluxWriteUrl());
+    if (!['http:', 'https:'].includes(url.protocol) || !/\/api\/v[23]\/write$/.test(url.pathname)) return null;
+    url.searchParams.set('precision', 'ns');
+    return { url: url.toString(), auth: String(globalSettings.influxAuth).replace(/^(?:Token|Bearer)\s+/i, ''),
+      identity: JSON.stringify([url.origin, url.pathname, url.searchParams.get('org') || url.searchParams.get('orgID') || '', String(globalSettings.influxDB)]) };
+  },
+  hash: async text => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))).map(b=>b.toString(16).padStart(2,'0')).join(''),
+  load: async key => { const text=await GM.getValue(key, null); return text ? JSON.parse(text) : null; },
+  save: (key,value) => GM.setValue(key,JSON.stringify(value)),
+  publish: async (destination,body) => {
+    const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),15000);
+    try {
+      const response=await fetch(destination.url,{method:'POST',body,signal:controller.signal,
+        headers:{Authorization:(destination.url.includes('/api/v2/')?'Token ':'Bearer ')+destination.auth,'Content-Type':'text/plain; charset=utf-8'}});
+      if(!response.ok) throw new Error('toolkit_publish_failed');
+    } finally { clearTimeout(timer); }
+  },
+  report: status => {
+    const previous=window.slyaToolkitClockStatus || {};
+    window.slyaToolkitClockStatus={...previous,[status.faction || 'collector']:{...status,checkedAt:new Date().toISOString()}};
+  },
+});
+void toolkitCollector.start();
+window.addEventListener('beforeunload', () => toolkitCollector.stop(), {once:true});
 	let cargoStatsDefinitionAcctPK = sageGameAcct.account.cargo.statsDefinition;
 	let [sageSDUTrackerAcct] = await sageProgram.account.surveyDataUnitTracker.all();
 	let profileProgram = new BrowserAnchor.anchor.Program(profileIDL, profileProgramPK, anchorProvider);
@@ -15464,7 +15608,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-273', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-274', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
