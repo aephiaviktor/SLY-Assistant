@@ -74,6 +74,8 @@ test('MUD Optimizer 2 retains its declared pool when pricing history is unavaila
 test('current ONI epoch inputs create colored pools and reallocate target crew', () => {
 	const context = {
 		UPGRADE_AUTOMATION_MIN_JOB_CREW: 10,
+		UPGRADE_AUTOMATION_OPTIMIZER2_TARGET_REENTRY_MAX_CREW_RATIO: 0.15,
+		UPGRADE_AUTOMATION_OPTIMIZER2_TARGET_REENTRY_MIN_PROFIT_GAIN_RATIO: 0.10,
 		globalSettings: { upgradeAutomationAggressivenessStartHour: 6 },
 		getUpgradeAutomationPlanningHorizon: () => ({ planningHours: 6 }),
 		getUpgradeAutomationPerformanceComponentName: component => component === 'SDU' ? 'Survey Data Unit' : component,
@@ -84,7 +86,7 @@ test('current ONI epoch inputs create colored pools and reallocate target crew',
 		})
 	};
 	vm.createContext(context);
-	vm.runInContext(`${extractFunction('computeUpgradeAutomationNetAtlasPlan')}; this.computePlan = computeUpgradeAutomationNetAtlasPlan;`, context);
+	vm.runInContext(`${extractFunction('applyUpgradeAutomationOptimizer2TargetReentry')}; ${extractFunction('computeUpgradeAutomationNetAtlasPlan')}; this.computePlan = computeUpgradeAutomationNetAtlasPlan;`, context);
 	const rows = [
 		{ name: 'Framework', displayName: 'Framework', crew: 101, secondsPerUnit: 12, lpPerUnit: 68, inventoryPhantom: 8_791_663, inventoryGlobal: 100000, phantomUpgradeEligible: true },
 		{ name: 'Electronics', displayName: 'Electronics', crew: 20, secondsPerUnit: 14, lpPerUnit: 92, inventoryPhantom: 4_797_958, inventoryGlobal: 100000, phantomUpgradeEligible: true },

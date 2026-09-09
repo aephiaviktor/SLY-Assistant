@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-274
+// @aephia-version 0.7.35-275
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -429,6 +429,8 @@
 	const UPGRADE_AUTOMATION_TARGET_BUFFER_DAYS = 10;
 	const UPGRADE_AUTOMATION_LANDING_BUFFER_SECONDS = 30;
 	const UPGRADE_AUTOMATION_MIN_JOB_CREW = 10;
+	const UPGRADE_AUTOMATION_OPTIMIZER2_TARGET_REENTRY_MAX_CREW_RATIO = 0.15;
+	const UPGRADE_AUTOMATION_OPTIMIZER2_TARGET_REENTRY_MIN_PROFIT_GAIN_RATIO = 0.10;
 
 	async function loadUpgradeAutomationEvents() {
 		const raw = await GM.getValue(UPGRADE_AUTOMATION_EVENTS_KEY, '[]');
@@ -3720,6 +3722,58 @@
 		}, 0);
 	}
 
+	function applyUpgradeAutomationOptimizer2TargetReentry(rows = [], simulate, options) {
+		options = options || {};
+		const simulateCrew = typeof simulate === 'function' ? simulate : (() => ({ legal: false }));
+		const minCrew = Math.max(1, Math.floor(Number(options.minCrew || UPGRADE_AUTOMATION_MIN_JOB_CREW)));
+		const maxCrewRatio = Math.max(0, Math.min(1, Number(options.maxCrewRatio ?? UPGRADE_AUTOMATION_OPTIMIZER2_TARGET_REENTRY_MAX_CREW_RATIO)));
+		const minProfitGainRatio = Math.max(0, Number(options.minProfitGainRatio ?? UPGRADE_AUTOMATION_OPTIMIZER2_TARGET_REENTRY_MIN_PROFIT_GAIN_RATIO));
+		const totalCrew = (Array.isArray(rows) ? rows : []).reduce((sum, row) => sum + Math.max(0, Math.floor(Number(row?.optimizer2Crew || 0))), 0);
+		const maxCrew = Math.floor(totalCrew * maxCrewRatio);
+		const result = { totalCrew, maxCrew, transferredCrew: 0, transfers: [] };
+		if (maxCrew < minCrew) return result;
+
+		const nameOf = row => String(row?.displayName || row?.name || 'unknown');
+		const netOf = row => Number(row?.optimizer2NetAtlasPerSecond);
+		const candidates = rows
+			.filter(row => row?.neutralPhaseBlocked && !row?.targetPhaseBlocked && row?.phantomUpgradeEligible && Number(row?.inventoryPhantom || 0) > 0 && Number(row?.optimizer2Crew || 0) === 0 && Number.isFinite(netOf(row)) && netOf(row) > 0)
+			.sort((a, b) => netOf(b) - netOf(a) || nameOf(a).localeCompare(nameOf(b)));
+
+		for (const destination of candidates) {
+			if (result.transferredCrew + minCrew > maxCrew) break;
+			if (destination.specialRiskControlled && Number.isFinite(Number(destination.specialRiskMaxCrew))) {
+				const currentSpecialCrew = rows.reduce((sum, row) => sum + (row?.specialRiskControlled ? Math.max(0, Math.floor(Number(row.optimizer2Crew || 0))) : 0), 0);
+				if (currentSpecialCrew + minCrew > Number(destination.specialRiskMaxCrew)) continue;
+			}
+			const destinationNet = netOf(destination);
+			const donor = rows
+				.filter(row => {
+					if (!row || row === destination || row.neutralPhaseBlocked || row.targetPhaseBlocked || !row.phantomUpgradeEligible) return false;
+					const donorCrew = Math.max(0, Math.floor(Number(row.optimizer2Crew || 0)));
+					const donorNet = netOf(row);
+					if (donorCrew < minCrew || !Number.isFinite(donorNet) || donorNet <= 0) return false;
+					if ((destinationNet - donorNet) / donorNet < minProfitGainRatio) return false;
+					return simulateCrew(row, donorCrew - minCrew).legal && simulateCrew(destination, minCrew).legal;
+				})
+				.sort((a, b) => netOf(a) - netOf(b) || Number(b.optimizer2Crew || 0) - Number(a.optimizer2Crew || 0) || nameOf(a).localeCompare(nameOf(b)))[0];
+			if (!donor) continue;
+
+			const donorNet = netOf(donor);
+			const profitGainRatio = (destinationNet - donorNet) / donorNet;
+			donor.optimizer2Crew = Math.max(0, Math.floor(Number(donor.optimizer2Crew || 0)) - minCrew);
+			destination.optimizer2Crew = minCrew;
+			destination.optimizer2TargetReentryCrew = minCrew;
+			destination.optimizer2TargetReentryFrom = nameOf(donor);
+			destination.optimizer2TargetReentryGainRatio = profitGainRatio;
+			destination.optimizer2TargetReentryReason = `Target re-entry: +${(profitGainRatio * 100).toFixed(1)}% vs ${nameOf(donor)}`;
+			donor.optimizer2TargetReentryDonatedCrew = Math.max(0, Number(donor.optimizer2TargetReentryDonatedCrew || 0)) + minCrew;
+			result.transferredCrew += minCrew;
+			result.transfers.push({ from: nameOf(donor), to: nameOf(destination), crew: minCrew, profitGainRatio });
+		}
+
+		return result;
+	}
+
 	function computeUpgradeAutomationNetAtlasPlan(neutralRows = [], componentMetrics = [], expectedTotalLpByEod = null, atlasPool = 0, now = new Date()) {
 		const rows = neutralRows.map(row => ({ ...row }));
 		const planning = getUpgradeAutomationPlanningHorizon(now);
@@ -3764,6 +3818,15 @@
 			const inventoryFeasible = Number(projected.finalUpgradingHour || 0) <= Number(row.inventoryGlobal || 0);
 			return { ...projected, legal: inventoryFeasible };
 		};
+		const targetReentry = targetMultiplier > 0
+			? applyUpgradeAutomationOptimizer2TargetReentry(rows, simulate)
+			: { totalCrew: rows.reduce((sum, row) => sum + Number(row.optimizer2Crew || 0), 0), maxCrew: 0, transferredCrew: 0, transfers: [] };
+		for (const transfer of targetReentry.transfers) {
+			const source = rows.find(row => String(row.displayName || row.name || '') === transfer.from);
+			const destination = rows.find(row => String(row.displayName || row.name || '') === transfer.to);
+			if (source) syncRow(source);
+			if (destination) syncRow(destination);
+		}
 		const orderedRows = [...eligibleRows].sort((a, b) => {
 			const netDiff = Number(a.optimizer2NetAtlasPerSecond) - Number(b.optimizer2NetAtlasPerSecond);
 			if (netDiff !== 0) return netDiff;
@@ -3893,7 +3956,7 @@
 			syncRow(best.dst);
 			transfers += best.transferAmount;
 		}
-		return { rows, lpValue, expectedTotalLpByEod: redemption, atlasPool: pool, neutralMultiplier, targetMultiplier, fullTransferableSourceCrew, moveBudget, sourcePoolCount: sourcePool.length, destPoolCount: destPool.length, sourcePoolMass: Number(bestPartition?.sourceMass || 0), destPoolMass: Number(bestPartition?.destMass || 0), sourceReferenceNetAtlas, transfers };
+		return { rows, lpValue, expectedTotalLpByEod: redemption, atlasPool: pool, neutralMultiplier, targetMultiplier, targetReentryTransferredCrew: targetReentry.transferredCrew, targetReentryMaxCrew: targetReentry.maxCrew, targetReentryTransfers: targetReentry.transfers, fullTransferableSourceCrew, moveBudget, sourcePoolCount: sourcePool.length, destPoolCount: destPool.length, sourcePoolMass: Number(bestPartition?.sourceMass || 0), destPoolMass: Number(bestPartition?.destMass || 0), sourceReferenceNetAtlas, transfers };
 	}
 
 	function resolveUpgradeAutomationOptimizer2AtlasPool(lpInstance, pricingHistoryLatest = null) {
@@ -7223,10 +7286,10 @@
 				content += '<tr style="opacity:0.66"><td rowspan="2" style="min-width:180px"><b>Optimizer 2<br>Component</b><br><small>Net profit target</small></td><td rowspan="2" align="right" style="min-width:96px"><b>GM Price</b></td><td rowspan="2" align="right" style="min-width:110px"><b>Net Profit (ATLAS)<br>/ Crew / Day</b></td><td rowspan="2" align="right" style="min-width:120px"><b>Installed Today</b></td><td colspan="2" align="center" style="min-width:170px"' + neutralHighlightStyle + '><b>Neutral</b><br><small>Neutral multiplier ×' + optimizer2NeutralMultiplier + '</small></td><td colspan="2" align="center" style="min-width:170px"' + targetHighlightStyle + '><b>Target</b><br><small>Target multiplier ×' + optimizer2TargetMultiplier + '</small></td></tr>';
 				content += '<tr style="opacity:0.66"><td align="right" style="min-width:72px"' + neutralHighlightStyle + '><b>Crew</b></td><td align="right" style="min-width:78px"' + neutralHighlightStyle + '><b>Buffer Days</b></td><td align="right" style="min-width:72px"' + targetHighlightStyle + '><b>Crew</b></td><td align="right" style="min-width:78px"' + targetHighlightStyle + '><b>Buffer Days</b></td></tr>';
 				for (const row of optimizer2.rows) {
-					const sideStyle = row.optimizer2Source ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.optimizer2Destination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
+					const sideStyle = Number(row.optimizer2TargetReentryCrew || 0) > 0 ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : (row.optimizer2Source ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.optimizer2Destination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : ''));
 					const netAtlas = row.optimizer2NetAtlasPerSecond !== null && Number.isFinite(Number(row.optimizer2NetAtlasPerSecond)) ? (Number(row.optimizer2NetAtlasPerSecond) * 86400).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : '-';
 					const gmPrice = row.optimizer2GmPrice !== null && Number.isFinite(Number(row.optimizer2GmPrice)) ? Number(row.optimizer2GmPrice).toLocaleString(undefined, { minimumFractionDigits: 6, maximumFractionDigits: 6 }) : '-';
-					const netTitle = 'Net Profit (ATLAS) / Crew / Day: ' + netAtlas + '; GM input: pricingATL.priceATL; Faction redemption: Expected Total LP by EOD';
+					const netTitle = 'Net Profit (ATLAS) / Crew / Day: ' + netAtlas + '; GM input: pricingATL.priceATL; Faction redemption: Expected Total LP by EOD' + (row.optimizer2TargetReentryReason ? '; ' + row.optimizer2TargetReentryReason : '');
 					const neutralBuffer = row.neutralBufferDays == null ? '' : (Number.isFinite(Number(row.neutralBufferDays)) ? Number(row.neutralBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
 					const targetBuffer = row.optimizer2BufferDays == null ? '' : (Number.isFinite(Number(row.optimizer2BufferDays)) ? Number(row.optimizer2BufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
 					const neutralBufferWarning = row.neutralBufferDays != null && Number.isFinite(Number(row.neutralBufferDays)) && Number(row.neutralBufferDays) < 5;
@@ -15608,7 +15671,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-274', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-275', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
