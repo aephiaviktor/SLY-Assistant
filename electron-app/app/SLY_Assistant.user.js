@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-275
+// @aephia-version 0.7.35-276
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -9736,6 +9736,60 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return `,${prefix}CostSol=${Number.isFinite(sol) ? sol : 0},${prefix}FeeLamports=${Math.round(lamports)}i`;
 	}
 
+	function getSlyaSuccessfulTxCount(txResult) {
+		if (!txResult || txResult?.meta?.err) return 0;
+		const sliceCount = Number(txResult.slyaTxSliceCount);
+		if (Number.isSafeInteger(sliceCount) && sliceCount > 0) return sliceCount;
+		return txResult.meta ? 1 : 0;
+	}
+
+	function getPendingMiningTransactionKey(fleet) {
+		const fleetAccount = getPubkeyString(fleet?.publicKey) || String(fleet?.label || 'unknown');
+		return `slya:mining-pending-transaction:${fleetAccount}`;
+	}
+
+	async function savePendingMiningTransaction(fleet, txResult, resource) {
+		const transactionCount = getSlyaSuccessfulTxCount(txResult);
+		if (transactionCount < 1) return null;
+		const pending = {
+			resource: getPubkeyString(resource),
+			txFeeLamports: Math.round(getSlyaTxFeeLamports(txResult)),
+			transactionCount,
+			startedAt: Date.now(),
+		};
+		await GM.setValue(getPendingMiningTransactionKey(fleet), JSON.stringify(pending));
+		return pending;
+	}
+
+	async function loadPendingMiningTransaction(fleet, resource) {
+		try {
+			const raw = await GM.getValue(getPendingMiningTransactionKey(fleet), '');
+			const pending = raw ? JSON.parse(raw) : null;
+			if (!pending || getPubkeyString(pending.resource) !== getPubkeyString(resource)) return null;
+			const txFeeLamports = Number(pending.txFeeLamports);
+			const transactionCount = Number(pending.transactionCount);
+			const startedAt = Number(pending.startedAt);
+			if (!Number.isFinite(txFeeLamports) || txFeeLamports < 0 || !Number.isSafeInteger(transactionCount) || transactionCount < 1 || !Number.isFinite(startedAt) || startedAt <= 0) return null;
+			return { resource: getPubkeyString(resource), txFeeLamports, transactionCount, startedAt };
+		} catch (_) {
+			return null;
+		}
+	}
+
+	async function clearPendingMiningTransaction(fleet) {
+		await GM.deleteValue(getPendingMiningTransactionKey(fleet));
+	}
+
+	function buildMiningTxCostInfluxFields(pendingStart, stopTxResult) {
+		const startLamports = Number(pendingStart?.txFeeLamports || 0);
+		const startCount = Number(pendingStart?.transactionCount || 0);
+		const stopLamports = getSlyaTxFeeLamports(stopTxResult);
+		const stopCount = getSlyaSuccessfulTxCount(stopTxResult);
+		const totalLamports = Math.max(0, startLamports) + stopLamports;
+		const transactionCount = Math.max(0, startCount) + stopCount;
+		return `,txCostSol=${totalLamports / 1000000000},txFeeLamports=${Math.round(totalLamports)}i,txCount=${Math.round(transactionCount)}i`;
+	}
+
 	function appendInfluxFieldsToLines(lines, fields) {
 		return String(lines || '').split('\n').map(line => line ? line + fields : line).join('\n');
 	}
@@ -11340,6 +11394,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
             updateFleetState(fleet, 'Mine Starting')
 
             let txResult = await txSignAndSend(tx, fleet, 'START MINING', 10);
+            await savePendingMiningTransaction(fleet, txResult, sageResource.publicKey || sageResource);
             resolve(txResult);
         });
     }
@@ -11572,7 +11627,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		let minedRssName = cargoItems.find(r => r.token == resourceToken.toString())?.name;
 		let miningStarbaseContext = await getTelemetryStarbaseContextFromCoords(targetX, targetY);
 		let miningFactionTag = miningStarbaseContext.faction ? `,faction=${influxEscape(miningStarbaseContext.faction)}` : '';
-		await sendToInflux(`mining,fleet=${influxEscape(fleet.label)},starbase=${influxEscape(miningStarbaseContext.starbaseName || 'unknown')},sectorX=${targetX},sectorY=${targetY}${miningFactionTag},rss=${influxEscape(minedRssName)} burnedFuel=${fleet.planetExitFuelAmount},burnedFood=${burnedFood},burnedAmmo=${burnedAmmo},amount=${minedAmount}${buildSlyaTxCostInfluxFields(txResult)}`);
+		const pendingStart = await loadPendingMiningTransaction(fleet, sageResource);
+		await sendToInflux(`mining,fleet=${influxEscape(fleet.label)},starbase=${influxEscape(miningStarbaseContext.starbaseName || 'unknown')},sectorX=${targetX},sectorY=${targetY}${miningFactionTag},rss=${influxEscape(minedRssName)} burnedFuel=${fleet.planetExitFuelAmount},burnedFood=${burnedFood},burnedAmmo=${burnedAmmo},amount=${minedAmount}${buildMiningTxCostInfluxFields(pendingStart, txResult)}`);
+		await clearPendingMiningTransaction(fleet);
             }
 
         });
@@ -15671,7 +15728,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-275', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-276', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
