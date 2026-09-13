@@ -25,11 +25,18 @@ test('successful mining start fee is persisted for the eventual completed mining
   assert.match(source, /GM\.setValue\(getPendingMiningTransactionKey\(fleet\)/);
 });
 
+test('confirmed Mine support transactions are staged once per signature before the next mining start', () => {
+  const confirmedTx = between('function txSignAndSend', 'async function execScan');
+  assert.match(confirmedTx, /recordConfirmedMiningSupportTransaction\(fleet, opName, txResult\)/);
+  assert.match(source, /\['LOAD', 'UNLOAD', 'RESUPPLY', 'DOCK', 'UNDOCK'\]/);
+  assert.match(source, /fleetParsedData\?\.assignment !== 'Mine'/);
+});
+
 test('completed mining telemetry includes start and stop fees and explicit transaction count', () => {
   const stopMining = between('async function execStopMining', 'async function execStartCrafting');
   assert.match(stopMining, /loadPendingMiningTransaction/);
   assert.match(stopMining, /buildMiningTxCostInfluxFields/);
-  assert.match(stopMining, /clearPendingMiningTransaction/);
+  assert.match(stopMining, /if\(sent\) await clearPendingMiningTransaction/);
   assert.match(source, /txCount=\$\{Math\.round\(transactionCount\)\}i/);
 });
 
@@ -41,10 +48,11 @@ test('pending start telemetry is only counted for a successful transaction and i
   assert.match(helperRegion, /GM\.deleteValue/);
 });
 
-test('mining transaction helper adds successful start and stop fees without counting failed sends', async () => {
+test('mining transaction helper combines staged resupply, start, and stop without counting failed sends', async () => {
   const helperRegion = between('function getSlyaSuccessfulTxCount', 'function appendInfluxFieldsToLines');
   const values = new Map();
   const context = {
+    globalSettings: { influxURL: 'https://influx.invalid/write' },
     getPubkeyString: (value) => String(value?.toString?.() || value || ''),
     getSlyaTxFeeLamports: (result) => Number(result?.slyaTxFeeLamports ?? result?.meta?.fee ?? 0),
     GM: {
@@ -53,14 +61,20 @@ test('mining transaction helper adds successful start and stop fees without coun
       deleteValue: async (key) => values.delete(key),
     },
   };
-  vm.runInNewContext(`${helperRegion}\nthis.helpers = { getSlyaSuccessfulTxCount, savePendingMiningTransaction, loadPendingMiningTransaction, clearPendingMiningTransaction, buildMiningTxCostInfluxFields };`, context);
+  vm.runInNewContext(`${helperRegion}\nthis.helpers = { getSlyaSuccessfulTxCount, stagePendingMiningTransaction, recordConfirmedMiningSupportTransaction, savePendingMiningTransaction, loadPendingMiningTransaction, clearPendingMiningTransaction, buildMiningTxCostInfluxFields };`, context);
   const fleet = { publicKey: 'fleet-account', label: 'Mining Fleet' };
+  values.set('fleet-account', JSON.stringify({ assignment: 'Mine' }));
+  await context.helpers.recordConfirmedMiningSupportTransaction(fleet, 'UNLOAD', { slyaTxFeeLamports: 6000, slyaTxSliceCount: 1, meta: { err: null } });
+  await context.helpers.recordConfirmedMiningSupportTransaction(fleet, 'RESUPPLY', { slyaTxFeeLamports: 8000, slyaTxSliceCount: 1, meta: { err: null } });
+  await context.helpers.recordConfirmedMiningSupportTransaction(fleet, 'SCAN', { meta: { fee: 9000, err: null } });
+  await context.helpers.recordConfirmedMiningSupportTransaction(fleet, 'LOAD', { meta: { fee: 9999, err: { InstructionError: [0, 'x'] } } });
   const pending = await context.helpers.savePendingMiningTransaction(fleet, { meta: { fee: 5000, err: null } }, 'resource-account');
-  assert.equal(pending.transactionCount, 1);
+  assert.equal(pending.transactionCount, 3);
+  assert.equal(pending.txFeeLamports, 19000);
   assert.deepEqual(await context.helpers.loadPendingMiningTransaction(fleet, 'other-resource'), null);
   const loaded = await context.helpers.loadPendingMiningTransaction(fleet, 'resource-account');
-  assert.equal(loaded.txFeeLamports, 5000);
-  assert.equal(context.helpers.buildMiningTxCostInfluxFields(loaded, { meta: { fee: 7000, err: null } }), ',txCostSol=0.000012,txFeeLamports=12000i,txCount=2i');
+  assert.equal(loaded.txFeeLamports, 19000);
+  assert.equal(context.helpers.buildMiningTxCostInfluxFields(loaded, { meta: { fee: 7000, err: null } }), ',txCostSol=0.000026,txFeeLamports=26000i,txCount=4i');
   assert.equal(context.helpers.getSlyaSuccessfulTxCount({ meta: { fee: 7000, err: { InstructionError: [0, 'x'] } } }), 0);
   await context.helpers.clearPendingMiningTransaction(fleet);
   assert.deepEqual(await context.helpers.loadPendingMiningTransaction(fleet, 'resource-account'), null);
@@ -72,5 +86,5 @@ test('standalone and Electron userscript copies remain byte-identical', () => {
 
 test('feature does not change userscript version metadata', () => {
   assert.match(source, /^\/\/ @version\s+0\.7\.35$/m);
-  assert.match(source, /^\/\/ @aephia-version\s+0\.7\.35-276$/m);
+  assert.match(source, /^\/\/ @aephia-version\s+0\.7\.35-277$/m);
 });

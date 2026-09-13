@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-276
+// @aephia-version 0.7.35-277
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -9748,16 +9748,52 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return `slya:mining-pending-transaction:${fleetAccount}`;
 	}
 
+	function getStagedMiningTransactionKey(fleet) {
+		const fleetAccount = getPubkeyString(fleet?.publicKey) || String(fleet?.label || 'unknown');
+		return `slya:mining-staged-transaction:${fleetAccount}`;
+	}
+
+	async function stagePendingMiningTransaction(fleet, txResult) {
+		const transactionCount = getSlyaSuccessfulTxCount(txResult);
+		if(transactionCount < 1) return null;
+		const key = getStagedMiningTransactionKey(fleet);
+		let staged = { txFeeLamports: 0, transactionCount: 0 };
+		try {
+			const raw = await GM.getValue(key, '');
+			if(raw) staged = JSON.parse(raw);
+		} catch (_) {}
+		staged.txFeeLamports = Math.max(0, Number(staged.txFeeLamports || 0)) + getSlyaTxFeeLamports(txResult);
+		staged.transactionCount = Math.max(0, Math.round(Number(staged.transactionCount || 0))) + transactionCount;
+		await GM.setValue(key, JSON.stringify(staged));
+		return staged;
+	}
+
+	async function recordConfirmedMiningSupportTransaction(fleet, opName, txResult) {
+		if(!globalSettings.influxURL.length || !fleet || !['LOAD', 'UNLOAD', 'RESUPPLY', 'DOCK', 'UNDOCK'].includes(String(opName || ''))) return null;
+		const raw = await GM.getValue(fleet.publicKey.toString(), '{}');
+		let fleetParsedData;
+		try { fleetParsedData = JSON.parse(raw); }
+		catch (_) { return null; }
+		if(fleetParsedData?.assignment !== 'Mine') return null;
+		return stagePendingMiningTransaction(fleet, txResult);
+	}
+
 	async function savePendingMiningTransaction(fleet, txResult, resource) {
 		const transactionCount = getSlyaSuccessfulTxCount(txResult);
 		if (transactionCount < 1) return null;
+		let staged = { txFeeLamports: 0, transactionCount: 0 };
+		try {
+			const raw = await GM.getValue(getStagedMiningTransactionKey(fleet), '');
+			if(raw) staged = JSON.parse(raw);
+		} catch (_) {}
 		const pending = {
 			resource: getPubkeyString(resource),
-			txFeeLamports: Math.round(getSlyaTxFeeLamports(txResult)),
-			transactionCount,
+			txFeeLamports: Math.round(Math.max(0, Number(staged.txFeeLamports || 0)) + getSlyaTxFeeLamports(txResult)),
+			transactionCount: Math.max(0, Math.round(Number(staged.transactionCount || 0))) + transactionCount,
 			startedAt: Date.now(),
 		};
 		await GM.setValue(getPendingMiningTransactionKey(fleet), JSON.stringify(pending));
+		await GM.deleteValue(getStagedMiningTransactionKey(fleet));
 		return pending;
 	}
 
@@ -9788,6 +9824,57 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const totalLamports = Math.max(0, startLamports) + stopLamports;
 		const transactionCount = Math.max(0, startCount) + stopCount;
 		return `,txCostSol=${totalLamports / 1000000000},txFeeLamports=${Math.round(totalLamports)}i,txCount=${Math.round(transactionCount)}i`;
+	}
+
+	function getPendingScanningMovementTransactionKey(fleet) {
+		const fleetAccount = getPubkeyString(fleet?.publicKey) || String(fleet?.label || 'unknown');
+		return `slya:scanning-pending-movement:${fleetAccount}`;
+	}
+
+	async function savePendingScanningMovementTransaction(fleet, movement) {
+		const transactionCount = getSlyaSuccessfulTxCount(movement?.txResult);
+		if(transactionCount < 1 || !movement?.movementTags) return null;
+		const pending = {
+			movementTags: String(movement.movementTags),
+			type: movement.type === 'warp' ? 'warp' : 'subwarp',
+			burnedFuel: Math.max(0, Number(movement.burnedFuel || 0)),
+			moveTime: Math.max(0, Number(movement.moveTime || 0)),
+			moveDist: Math.max(0, Number(movement.moveDist || 0)),
+			txFeeLamports: Math.max(0, Math.round(getSlyaTxFeeLamports(movement.txResult))),
+			transactionCount,
+			startedAt: Date.now()
+		};
+		await GM.setValue(getPendingScanningMovementTransactionKey(fleet), JSON.stringify(pending));
+		return pending;
+	}
+
+	async function clearPendingScanningMovementTransaction(fleet) {
+		await GM.deleteValue(getPendingScanningMovementTransactionKey(fleet));
+	}
+
+	async function completePendingScanningMovementTransaction(fleet, completionTxResult) {
+		let pending;
+		try {
+			const raw = await GM.getValue(getPendingScanningMovementTransactionKey(fleet), '');
+			pending = raw ? JSON.parse(raw) : null;
+		} catch (_) {
+			return false;
+		}
+		if(!pending?.movementTags || !Number.isSafeInteger(Number(pending.transactionCount)) || Number(pending.transactionCount) < 1) return false;
+		const observedCompletionCount = getSlyaSuccessfulTxCount(completionTxResult);
+		if(observedCompletionCount > 0) {
+			pending.completionTxFeeLamports = Math.max(0, Math.round(getSlyaTxFeeLamports(completionTxResult)));
+			pending.completionTransactionCount = observedCompletionCount;
+			await GM.setValue(getPendingScanningMovementTransactionKey(fleet), JSON.stringify(pending));
+		}
+		const completionCount = Number(pending.completionTransactionCount || 0);
+		if(!Number.isSafeInteger(completionCount) || completionCount < 1) return false;
+		const completionLamports = Math.max(0, Number(pending.completionTxFeeLamports || 0));
+		const line = `movement,${pending.movementTags} type=${optimizationInfluxString(`${pending.type}_exit`)},burnedFuel=0,moveTime=0,moveDist=0,txCostSol=${completionLamports / 1000000000},txFeeLamports=${Math.round(completionLamports)}i,txCount=${Math.round(completionCount)}i`;
+		const sent = await sendToInflux(line);
+		if(!sent) return false;
+		await clearPendingScanningMovementTransaction(fleet);
+		return true;
 	}
 
 	function appendInfluxFieldsToLines(lines, fields) {
@@ -10529,6 +10616,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				].join(','), `,operation=${influxEscape(opName || 'unknown')}`);
 
 				if(!instructionError && !(txResult?.meta?.err)) {
+					try { await recordConfirmedMiningSupportTransaction(fleet, opName, txResult); }
+					catch(error) { cLog(1, `${FleetTimeStamp(fleetName)} <${opName}> mining transaction staging failed`, error); }
 					try { await applyConfirmedCargoTelemetry(ix, fleet); }
 					catch(error) { cLog(1, `${FleetTimeStamp(fleetName)} <${opName}> confirmed cargo telemetry failed`, error); }
 				}
@@ -11628,8 +11717,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		let miningStarbaseContext = await getTelemetryStarbaseContextFromCoords(targetX, targetY);
 		let miningFactionTag = miningStarbaseContext.faction ? `,faction=${influxEscape(miningStarbaseContext.faction)}` : '';
 		const pendingStart = await loadPendingMiningTransaction(fleet, sageResource);
-		await sendToInflux(`mining,fleet=${influxEscape(fleet.label)},starbase=${influxEscape(miningStarbaseContext.starbaseName || 'unknown')},sectorX=${targetX},sectorY=${targetY}${miningFactionTag},rss=${influxEscape(minedRssName)} burnedFuel=${fleet.planetExitFuelAmount},burnedFood=${burnedFood},burnedAmmo=${burnedAmmo},amount=${minedAmount}${buildMiningTxCostInfluxFields(pendingStart, txResult)}`);
-		await clearPendingMiningTransaction(fleet);
+		const sent = await sendToInflux(`mining,fleet=${influxEscape(fleet.label)},starbase=${influxEscape(miningStarbaseContext.starbaseName || 'unknown')},sectorX=${targetX},sectorY=${targetY}${miningFactionTag},rss=${influxEscape(minedRssName)} burnedFuel=${fleet.planetExitFuelAmount},burnedFood=${burnedFood},burnedAmmo=${burnedAmmo},amount=${minedAmount}${buildMiningTxCostInfluxFields(pendingStart, txResult)}`);
+		if(sent) await clearPendingMiningTransaction(fleet);
             }
 
         });
@@ -15394,6 +15483,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	}
 
 	async function handleMovement(i, moveDist, moveX, moveY, isStarbaseAndWarpSubwarp, movementDiagnostic = null) {
+		// Retry a completed Scan movement write before a new movement can replace
+		// its durable pending state. In-progress records have no completion count
+		// yet and are left untouched until their exit transaction confirms.
+		await completePendingScanningMovementTransaction(userFleets[i]);
 		if (movementDiagnostic) {
 			Object.assign(movementDiagnostic, {
 				started: true, completed: false, alreadyAtTarget: false,
@@ -15538,6 +15631,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						const movementCycleTag = costCycle?.id ? `,cycleId=${influxEscape(costCycle.id)}` : '';
 						const movementTags = `fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${influxEscape(assignment || 'unknown')},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag}${movementCycleTag}`;
 						const movementFields = `type="warp",burnedFuel=${burnedFuel},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(movementTxResult)}`;
+						if(assignment === 'Scan') await savePendingScanningMovementTransaction(userFleets[i], { movementTags, type: 'warp', burnedFuel, moveTime, moveDist, txResult: movementTxResult });
 						await sendToInflux(`movement,${movementTags} ${movementFields}`);
 						await sendFleetMovementCargoTelemetry(userFleets[i], fleetParsedData, fleetCurrentCargo, movementTags, 'warp');
 						if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].warpFuelConsumptionRate/100);
@@ -15567,6 +15661,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						const movementCycleTag = costCycle?.id ? `,cycleId=${influxEscape(costCycle.id)}` : '';
 						const movementTags = `fleet=${influxEscape(userFleets[i].label)},fromX=${extra[0]},fromY=${extra[1]},toX=${moveX},toY=${moveY},assignment=${influxEscape(assignment || 'unknown')},starbase=${influxEscape(movementStarbaseContext.starbaseName || 'unknown')}${movementFactionTag}${movementCycleTag}`;
 						const movementFields = `type="subwarp",burnedFuel=${burnedFuel},moveTime=${moveTime},moveDist=${moveDist}${buildSlyaTxCostInfluxFields(subwarpResult)}`;
+						if(assignment === 'Scan') await savePendingScanningMovementTransaction(userFleets[i], { movementTags, type: 'subwarp', burnedFuel, moveTime, moveDist, txResult: subwarpResult });
 						await sendToInflux(`movement,${movementTags} ${movementFields}`);
 						await sendFleetMovementCargoTelemetry(userFleets[i], fleetParsedData, fleetCurrentCargo, movementTags, 'subwarp');
 						if(userFleets[i].scanLastFuelAmount) userFleets[i].scanLastFuelAmount -= moveDist*(userFleets[i].subwarpFuelConsumptionRate/100);
@@ -15618,14 +15713,16 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				userFleets[i].exitWarpSubwarpPending = 1;
 				updateFleetState(userFleets[i], 'Idle');
 			} else {
-				await execExitWarp(userFleets[i]);
+				const movementCompletionTxResult = await execExitWarp(userFleets[i]);
+				await completePendingScanningMovementTransaction(userFleets[i], movementCompletionTxResult);
 			}
 		} else if (fleetState == 'MoveSubwarp'){
 			if (localQueueExitWarpSubwarp) {
 				userFleets[i].exitWarpSubwarpPending = 2;
 				updateFleetState(userFleets[i], 'Idle');
 			} else {
-				await execExitSubwarp(userFleets[i]);
+				const movementCompletionTxResult = await execExitSubwarp(userFleets[i]);
+				await completePendingScanningMovementTransaction(userFleets[i], movementCompletionTxResult);
 			}
 		}
 		userFleets[i].scanOptimizationMovementContext = null;
@@ -15728,7 +15825,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-276', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-277', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
