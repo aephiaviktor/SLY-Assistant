@@ -49,9 +49,10 @@ function loadBuilders() {
     ${extractFunction('getSlyaCostSourceScope')}
     ${extractFunction('getSlyaCostEventTimestamp')}
     ${extractFunction('buildSlyaFuelCostSourceEvent')}
+    ${extractFunction('getSlyaFleetAssignmentFromConfig')}
     ${extractFunction('getSlyaTransactionFeeSourceEvents')}
     ${extractFunction('buildSlyaCostSourceEventLine')}
-    this.api = { getSlyaCostEventTimestamp, buildSlyaFuelCostSourceEvent, getSlyaTransactionFeeSourceEvents, buildSlyaCostSourceEventLine };
+    this.api = { getSlyaCostEventTimestamp, buildSlyaFuelCostSourceEvent, getSlyaFleetAssignmentFromConfig, getSlyaTransactionFeeSourceEvents, buildSlyaCostSourceEventLine };
   `, context);
   return context.api;
 }
@@ -105,6 +106,34 @@ test('SOL fee identity uses real signature and exact native lamports', () => {
   assert.equal(fee.eventIdentity, 'UST:USTUR1:sol_fee:real-signature');
   assert.equal(fee.txFeeLamports, 987654);
   assert.match(buildSlyaCostSourceEventLine(fee), /txFeeLamports=987654i/);
+});
+
+test('canonical fee assignment resolves from saved fleet config and rejects unknown values', () => {
+  const { getSlyaFleetAssignmentFromConfig } = loadBuilders();
+  for (const assignment of ['Mine', 'Scan', 'Transport', 'Supply Chain']) {
+    assert.equal(getSlyaFleetAssignmentFromConfig(JSON.stringify({ assignment })), assignment);
+  }
+  assert.equal(getSlyaFleetAssignmentFromConfig(JSON.stringify({ assignment: 'Craft' })), '');
+  assert.equal(getSlyaFleetAssignmentFromConfig('{broken'), '');
+  assert.equal(getSlyaFleetAssignmentFromConfig(JSON.stringify({ assignment: 'Scan' }), 'Mine'), 'Mine');
+  const queue = source.slice(source.indexOf('async function queueSlyaTransactionFeeSourceEvents'), source.indexOf('function annotateSlyaTxCost'));
+  assert.match(queue, /GM\.getValue\(fleetAccount/);
+  assert.match(queue, /getSlyaFleetAssignmentFromConfig/);
+});
+
+test('canonical fee events preserve every operational assignment and include finalized failures that paid fees', () => {
+  const { getSlyaTransactionFeeSourceEvents } = loadBuilders();
+  for (const assignment of ['Mine', 'Scan', 'Transport', 'Supply Chain']) {
+    const [fee] = getSlyaTransactionFeeSourceEvents({
+      ...tx(`sig-${assignment}`, 5001),
+      slyaAssignment: assignment,
+      meta: { fee: 5001, err: { InstructionError: [0, { Custom: 1 }] } },
+    });
+    assert.equal(fee.assignment, assignment);
+    assert.equal(fee.txFeeLamports, 5001);
+  }
+  const sender = source.slice(source.indexOf('function txSignAndSend'), source.indexOf('async function execScan'));
+  assert.ok(sender.indexOf('await queueSlyaTransactionFeeSourceEvents') < sender.indexOf("if(!instructionError && !(txResult?.meta?.err))"));
 });
 
 test('transaction replay is identical; distinct signatures and real positions remain separate', () => {

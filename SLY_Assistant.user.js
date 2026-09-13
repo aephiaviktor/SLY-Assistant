@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-277
+// @aephia-version 0.7.35-278
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -9625,6 +9625,19 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		};
 	}
 
+	function getSlyaFleetAssignmentFromConfig(rawConfig, explicitAssignment = '') {
+		const operationalAssignments = ['Mine', 'Scan', 'Transport', 'Supply Chain'];
+		const explicit = String(explicitAssignment || '').trim();
+		if (operationalAssignments.includes(explicit)) return explicit;
+		try {
+			const parsed = typeof rawConfig === 'string' ? JSON.parse(rawConfig) : rawConfig;
+			const saved = String(parsed?.assignment || '').trim();
+			return operationalAssignments.includes(saved) ? saved : '';
+		} catch (_error) {
+			return '';
+		}
+	}
+
 	function getSlyaTransactionFeeSourceEvents(txResult) {
 		if (!txResult) return [];
 		const entries = Array.isArray(txResult.slyaTxResults) && txResult.slyaTxResults.length ? txResult.slyaTxResults : [txResult];
@@ -9684,7 +9697,15 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			if (getSlyaTxFeeLamports(txResult) > 0) countSlyaCostSourceMissing('missing_fleet_account');
 			return 0;
 		}
-		const fleetContext = { slyaFleetAccount: fleetAccount, slyaFleetLabel: String(fleet?.label || ''), slyaAssignment: String(assignment || '') };
+		let resolvedAssignment = getSlyaFleetAssignmentFromConfig(null, assignment);
+		if (!resolvedAssignment) {
+			try {
+				resolvedAssignment = getSlyaFleetAssignmentFromConfig(await GM.getValue(fleetAccount, ''));
+			} catch (_error) {
+				resolvedAssignment = '';
+			}
+		}
+		const fleetContext = { slyaFleetAccount: fleetAccount, slyaFleetLabel: String(fleet?.label || ''), slyaAssignment: resolvedAssignment };
 		const source = Array.isArray(txResult?.slyaTxResults) && txResult.slyaTxResults.length
 			? { ...txResult, slyaTxResults: txResult.slyaTxResults.map(entry => ({ ...entry, ...fleetContext })) }
 			: { ...txResult, ...fleetContext };
@@ -15825,7 +15846,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-277', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-278', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
