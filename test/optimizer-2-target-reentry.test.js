@@ -50,7 +50,7 @@ function loadPlanApi() {
       finalBufferDays: crew > 0 ? candidate.inventoryGlobal / crew : Infinity,
     }),
   });
-  vm.runInContext(`${extractFunction('applyUpgradeAutomationOptimizer2TargetReentry')}\n${extractFunction('computeUpgradeAutomationNetAtlasPlan')}\nthis.fn=computeUpgradeAutomationNetAtlasPlan;`, context);
+  vm.runInContext(`${extractFunction('computeUpgradeAutomationTargetRamp')}\n${extractFunction('applyUpgradeAutomationOptimizer2TargetReentry')}\n${extractFunction('computeUpgradeAutomationNetAtlasPlan')}\nthis.fn=computeUpgradeAutomationNetAtlasPlan;`, context);
   return context.fn;
 }
 

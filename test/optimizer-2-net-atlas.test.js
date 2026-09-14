@@ -86,7 +86,7 @@ test('current ONI epoch inputs create colored pools and reallocate target crew',
 		})
 	};
 	vm.createContext(context);
-	vm.runInContext(`${extractFunction('applyUpgradeAutomationOptimizer2TargetReentry')}; ${extractFunction('computeUpgradeAutomationNetAtlasPlan')}; this.computePlan = computeUpgradeAutomationNetAtlasPlan;`, context);
+	vm.runInContext(`${extractFunction('computeUpgradeAutomationTargetRamp')}; ${extractFunction('applyUpgradeAutomationOptimizer2TargetReentry')}; ${extractFunction('computeUpgradeAutomationNetAtlasPlan')}; this.computePlan = computeUpgradeAutomationNetAtlasPlan;`, context);
 	const rows = [
 		{ name: 'Framework', displayName: 'Framework', crew: 101, secondsPerUnit: 12, lpPerUnit: 68, inventoryPhantom: 8_791_663, inventoryGlobal: 100000, phantomUpgradeEligible: true },
 		{ name: 'Electronics', displayName: 'Electronics', crew: 20, secondsPerUnit: 14, lpPerUnit: 92, inventoryPhantom: 4_797_958, inventoryGlobal: 100000, phantomUpgradeEligible: true },
@@ -104,10 +104,10 @@ test('current ONI epoch inputs create colored pools and reallocate target crew',
 	assert.equal(neutralResult.rows.find(row => row.name === 'Framework').optimizer2Crew, 101);
 
 	const midpointResult = context.computePlan(rows, metrics, 20_000_000_000, 2_000_000, new Date('2026-08-08T14:30:00Z'));
-	assert.ok(Math.abs(midpointResult.targetMultiplier - 0.5) < 1e-12);
-	assert.ok(Math.abs(midpointResult.neutralMultiplier - 0.5) < 1e-12);
-	assert.equal(midpointResult.transfers, 51);
-	assert.equal(midpointResult.rows.find(row => row.name === 'Framework').optimizer2Crew, 50);
+	assert.ok(Math.abs(midpointResult.targetMultiplier - 0.84375) < 1e-12);
+	assert.ok(Math.abs(midpointResult.neutralMultiplier - 0.15625) < 1e-12);
+	assert.equal(midpointResult.transfers, 85);
+	assert.equal(midpointResult.rows.find(row => row.name === 'Framework').optimizer2Crew, 16);
 
 	const result = context.computePlan(rows, metrics, 20_000_000_000, 2_000_000, new Date('2026-08-08T23:00:00Z'));
 	assert.equal(result.targetMultiplier, 1);

@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-278
+// @aephia-version 0.7.35-279
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -3531,6 +3531,17 @@
 		};
 	}
 
+	function computeUpgradeAutomationTargetRamp(now = new Date(), startHour = 12, endHour = 23, acceleration = 2) {
+		const effectiveNow = now instanceof Date ? now : new Date(now);
+		const fractionalUtcHour = effectiveNow.getUTCHours() + effectiveNow.getUTCMinutes() / 60 + effectiveNow.getUTCSeconds() / 3600;
+		const normalizedStart = Math.max(0, Math.min(23, Number(startHour)));
+		const normalizedEnd = Math.max(normalizedStart + 1, Math.min(24, Number(endHour)));
+		const linearProgress = Math.max(0, Math.min(1, (fractionalUtcHour - normalizedStart) / (normalizedEnd - normalizedStart)));
+		const normalizedAcceleration = Math.max(1, Number(acceleration) || 1);
+		const acceleratedProgress = 1 - Math.pow(1 - linearProgress, normalizedAcceleration);
+		return acceleratedProgress * acceleratedProgress * (3 - 2 * acceleratedProgress);
+	}
+
 	function computeUpgradeAutomationNeutralPlan(crewTotal, installedTodayByComponent = {}, now = new Date(), specialRiskControl = null, options = {}) {
 		const totalCrew = Math.max(0, Math.floor(Number(crewTotal || 0)));
 		const blockSpecialNeutral = options.blockSpecialNeutral !== false;
@@ -3779,10 +3790,8 @@
 		const planning = getUpgradeAutomationPlanningHorizon(now);
 		const remainingHours = planning.planningHours;
 		const effectiveNow = now instanceof Date ? now : new Date(now);
-		const fractionalUtcHour = effectiveNow.getUTCHours() + effectiveNow.getUTCMinutes() / 60 + effectiveNow.getUTCSeconds() / 3600;
 		const neutralPhaseLength = Math.max(0, Math.min(23, Number(globalSettings?.upgradeAutomationAggressivenessStartHour ?? 12)));
-		const targetProgress = Math.max(0, Math.min(1, (fractionalUtcHour - neutralPhaseLength) / Math.max(1, 23 - neutralPhaseLength)));
-		const targetMultiplier = targetProgress * targetProgress * (3 - 2 * targetProgress);
+		const targetMultiplier = computeUpgradeAutomationTargetRamp(effectiveNow, neutralPhaseLength);
 		const neutralMultiplier = 1 - targetMultiplier;
 		const redemption = Number(expectedTotalLpByEod);
 		const pool = Number(atlasPool);
@@ -5669,11 +5678,8 @@
 		const userPercent = 100;
 		const userScale = 1;
 		const effectiveNow = now || new Date();
-		const utcHour = effectiveNow.getUTCHours() + (effectiveNow.getUTCMinutes() / 60);
 		const neutralPhaseLength = Math.max(0, Math.min(23, Number(globalSettings?.upgradeAutomationAggressivenessStartHour ?? 12)));
-		const rampHours = Math.max(1, 24 - neutralPhaseLength);
-		const progress = clamp(Math.max(0, (utcHour - neutralPhaseLength) / rampHours), 0, 1);
-		const timeWeight = progress * progress * (3 - 2 * progress);
+		const timeWeight = computeUpgradeAutomationTargetRamp(effectiveNow, neutralPhaseLength);
 		const relMultiplier = Math.max(0, Number(globalSettings?.upgradeAutomationRelMultiplier ?? 1));
 		const aggrRel = clamp(1 + relMultiplier * score, 0, 2);
 		const absAdjustment = computeAbsoluteAggressivenessAdjustment(control, influxTarget, now, expectedTotalLpByEod);
@@ -15846,7 +15852,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-278', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-279', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
