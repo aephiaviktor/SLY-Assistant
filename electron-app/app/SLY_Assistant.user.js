@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-279
+// @aephia-version 0.7.35-280
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -3982,17 +3982,16 @@
 
 	function selectUpgradeAutomationOptimizerPlan(requestedVersion, optimizer1Plan, optimizer2Plan) {
 		const requested = normalizeUpgradeAutomationOptimizerVersion(requestedVersion);
-		const optimizer1Rows = Array.isArray(optimizer1Plan?.rows) ? optimizer1Plan.rows : [];
 		const optimizer2Ready = Array.isArray(optimizer2Plan?.rows)
 			&& optimizer2Plan.rows.length > 0
 			&& Number.isFinite(Number(optimizer2Plan.lpValue));
-		if (requested !== 'O2' || !optimizer2Ready) {
+		if (!optimizer2Ready) {
 			return {
-				...optimizer1Plan,
-				rows: optimizer1Rows,
-				version: 'O1',
+				...optimizer2Plan,
+				rows: [],
+				version: 'O2',
 				requestedVersion: requested,
-				fallbackReason: requested === 'O2' ? 'optimizer_2_inputs_unavailable' : ''
+				fallbackReason: 'optimizer_2_inputs_unavailable'
 			};
 		}
 		const rows = optimizer2Plan.rows.map(row => ({
@@ -5766,7 +5765,7 @@
 			`uninstalled_under_24h_lp=${Math.round(Number(uninstalledSummary.under24hLp || 0))}i`,
 			`uninstalled_over_24h_lp=${Math.round(Number(uninstalledSummary.over24hLp || 0))}i`,
 			`oldest_uninstalled_over_24h_age_seconds=${Math.max(0, Math.round(Number(uninstalledSummary.oldestOver24hAgeSeconds || 0)))}i`,
-			`optimizer_version=${influxFieldString(executionSummary.optimizerVersion || 'O1')}`
+			`optimizer_version=${influxFieldString(executionSummary.optimizerVersion || 'O2')}`
 		];
 		if (summary.expectedLpByEod != null && Number.isFinite(Number(summary.expectedLpByEod))) aggregateFields.push(`expected_additional_lp_eod=${Math.round(Number(summary.expectedLpByEod))}i`);
 		if (summary.expectedTotalLpByEod != null && Number.isFinite(Number(summary.expectedTotalLpByEod))) aggregateFields.push(`expected_total_lp_eod=${Math.round(Number(summary.expectedTotalLpByEod))}i`);
@@ -5849,7 +5848,7 @@
 				`,final_buffer_days=${row.finalBufferDays == null ? 0 : (Number.isFinite(row.finalBufferDays) ? Number(row.finalBufferDays) : 9999)}` +
 				`,buffer_days_phantom=${bufferDaysPhantom == null ? 0 : (Number.isFinite(bufferDaysPhantom) ? Number(bufferDaysPhantom) : 9999)}` +
 				`,buffer_days_global=${row.bufferDaysGlobal == null ? 0 : (Number.isFinite(row.bufferDaysGlobal) ? Number(row.bufferDaysGlobal) : 9999)}` +
-				`,optimizer_version=${influxFieldString(executionSummary.optimizerVersion || 'O1')}` +
+				`,optimizer_version=${influxFieldString(executionSummary.optimizerVersion || 'O2')}` +
 				`,snapshot_for_hour=${influxFieldString(snapshotForHour)}`
 			);
 		}
@@ -5872,7 +5871,7 @@
 			`,phantom_crew=${Math.floor(Number(executionSummary.effectiveCrewTotal != null ? executionSummary.effectiveCrewTotal : executionSummary.crewTotal || 0))}i` +
 			`,optimizer_uplift=${Math.round(Number(executionSummary.achievableLpTargetOpt || 0)) - Math.round(Number(executionSummary.neutralLpTarget || 0))}i` +
 			`,execution_gap=${Math.round(Number(executionSummary.achievableLpTargetOpt || 0)) - Math.round(Number(executionSummary.installedToday || 0))}i` +
-			`,optimizer_version=${influxFieldString(executionSummary.optimizerVersion || 'O1')}` +
+			`,optimizer_version=${influxFieldString(executionSummary.optimizerVersion || 'O2')}` +
 			`,snapshot_for_hour=${influxFieldString(snapshotForHour)}`
 		);
 		lines.push(
@@ -5881,7 +5880,7 @@
 			`,requested_lp_target_full_day=${Math.round(Number(executionSummary.requestedLpTargetFullDay || 0))}i` +
 			`,achievable_lp_target_full_day=${Math.round(Number(executionSummary.achievableLpTargetFullDay || 0))}i` +
 			`,full_day_hours=${Math.max(0, Math.floor(Number(executionSummary.remainingHoursFloor || 0))) + 1}i` +
-			`,optimizer_version=${influxFieldString(executionSummary.optimizerVersion || 'O1')}` +
+			`,optimizer_version=${influxFieldString(executionSummary.optimizerVersion || 'O2')}` +
 			`,snapshot_for_hour=${influxFieldString(snapshotForHour)}`
 		);
 		lines.push(
@@ -5906,8 +5905,8 @@
 			`,fstab_sdu_priority_transfers=${Math.max(0, Math.floor(Number(executionSummary?.specialPriorityTransfers || 0)))}i` +
 			`,target_added_idle_crew=${Math.max(0, Math.floor(Number(executionSummary?.targetAddedIdleCrew || 0)))}i` +
 			`,lp_automation_on=${!!globalSettings.upgradeAutomationEnabled ? 1 : 0}i` +
-			`,optimizer_version=${influxFieldString(executionSummary.optimizerVersion || 'O1')}` +
-			`,optimizer_requested_version=${influxFieldString(executionSummary.optimizerRequestedVersion || executionSummary.optimizerVersion || 'O1')}` +
+			`,optimizer_version=${influxFieldString(executionSummary.optimizerVersion || 'O2')}` +
+			`,optimizer_requested_version=${influxFieldString(executionSummary.optimizerRequestedVersion || executionSummary.optimizerVersion || 'O2')}` +
 			`,optimizer_fallback_reason=${influxFieldString(executionSummary.optimizerFallbackReason || '')}` +
 			`,faction_name=${influxFieldString(lpAutoFactionTag)}` +
 			`,snapshot_for_hour=${influxFieldString(snapshotForHour)}`
@@ -7028,7 +7027,6 @@
 			upgradeAutomationLpInstance: normalizeUpgradeAutomationLpInstance(globalSettings.upgradeAutomationLpInstance),
 			upgradeAutomationInfluxTracking: parseBoolDefault(globalSettings.upgradeAutomationInfluxTracking, false),
 			upgradeAutomationEnabled: parseBoolDefault(globalSettings.upgradeAutomationEnabled, false),
-			upgradeAutomationOptimizerVersion: normalizeUpgradeAutomationOptimizerVersion(globalSettings.upgradeAutomationOptimizerVersion),
 			upgradeAutomationStartCraftSlot: parseIntDefault(globalSettings.upgradeAutomationStartCraftSlot, 1),
 			upgradeAutomationAggressivenessStartHour: parseIntDefault(globalSettings.upgradeAutomationAggressivenessStartHour, 12),
 			upgradeAutomationNeutralBlockSingleTx: parseBoolDefault(globalSettings.upgradeAutomationNeutralBlockSingleTx, false),
@@ -7076,7 +7074,7 @@
 		'Radiation Absorber',
 		'Survey Data Unit'
 	];
-	const UPGRADE_AUTOMATION_NEUTRAL_SPECIAL_BLOCKED_COMPONENTS = new Set(['Field Stabilizer', 'Survey Data Unit', 'SDU']);
+	const UPGRADE_AUTOMATION_NEUTRAL_SPECIAL_BLOCKED_COMPONENTS = new Set(['Field Stabilizer', 'Survey Data Unit', 'Electromagnet', 'SDU']);
 	function isUpgradeAutomationNeutralSpecialBlockedComponent(name) {
 		return UPGRADE_AUTOMATION_NEUTRAL_SPECIAL_BLOCKED_COMPONENTS.has(String(name || ''));
 	}
@@ -7196,8 +7194,6 @@
 			const selectedFaction = normalizeUpgradeAutomationLpInstance(globalSettings.upgradeAutomationLpInstance || 'MUD');
 			const aggressivenessStartHourOptions = Array.from({ length: 24 }, (_, i) => '<option value="' + i + '" ' + (i === selectedAggressivenessStartHour ? 'selected' : '') + '>' + i + '</option>').join('');
 			const factionOptions = ['MUD','ONI','UST'].map(x => '<option value="' + x + '" ' + (x === selectedFaction ? 'selected' : '') + '>' + x + '</option>').join('');
-			const selectedOptimizerVersion = normalizeUpgradeAutomationOptimizerVersion(globalSettings.upgradeAutomationOptimizerVersion);
-			const optimizerVersionOptions = ['O2','O1'].map(x => '<option value="' + x + '" ' + (x === selectedOptimizerVersion ? 'selected' : '') + '>' + x + '</option>').join('');
 
 			content += openSection('lp-auto-automation');
 			content += '<tr style="opacity:0.66"><td colspan="6"><b>Automation</b></td></tr>';
@@ -7206,10 +7202,10 @@
 			const poolSkewMultiplier = Math.max(0, parseFloat(globalSettings.upgradeAutomationPoolSkewMultiplier ?? 3));
 			const relMultiplier = Math.max(0, Number(globalSettings.upgradeAutomationRelMultiplier ?? 1));
 			const absAggrMultiplier = Math.max(0, Number(globalSettings.upgradeAutomationAbsAggrMultiplier ?? 1));
-			content += '<tr><td>LP Automation On/Off</td><td align="right"><input id="lpAutomationEnabledToggle" type="checkbox" ' + (lpAutomationEnabled ? 'checked' : '') + '></td><td></td><td style="padding-left:18px;">Optimizer</td><td align="right"><select id="upgradeAutomationOptimizerVersion" style="width:66px">' + optimizerVersionOptions + '</select></td><td>' + (upgradeAutomationExecutionSummary?.optimizerFallbackReason ? 'fallback: O1' : 'active') + '</td></tr>';
+			content += '<tr><td>LP Automation On/Off</td><td align="right"><input id="lpAutomationEnabledToggle" type="checkbox" ' + (lpAutomationEnabled ? 'checked' : '') + '></td><td></td><td></td><td></td><td></td></tr>';
 			content += '<tr><td>Faction</td><td align="right"><select id="upgradeAutomationFaction" style="width:66px">' + factionOptions + '</select></td><td></td><td style="padding-left:18px;">Lower Boundary</td><td align="right"><input id="upgradeAutomationAbsAggrBoundaryLow" type="number" min="0" max="1000" step="1" value="' + absAggrBoundaryLow + '" style="width:66px"></td><td>Billions</td></tr>';
 			content += '<tr><td>Neutral Phase length</td><td align="right"><input id="upgradeAutomationAggressivenessStartHour" type="number" min="0" max="23" step="1" value="' + selectedAggressivenessStartHour + '" style="width:66px"></td><td style="white-space:nowrap; text-align:left;">hours</td><td style="padding-left:18px;">Upper Boundary</td><td align="right"><input id="upgradeAutomationAbsAggrBoundaryHigh" type="number" min="0" max="1000" step="1" value="' + absAggrBoundaryHigh + '" style="width:66px"></td><td>Billions</td></tr>';
-			content += '<tr><td><span title="Scales Field Stabilizer and Survey Data Unit usage from projected LP redemption: 30B=0, 22.5B=1, 15B=2, then dampened by time remaining. Low-redemption target redistribution prioritizes this bucket first.">Dynamic FSTAB/SDU Risk Control</span></td><td align="right"><input id="upgradeAutomationBlockSpecialNeutral" type="checkbox" ' + (blockSpecialNeutral ? 'checked' : '') + '></td><td></td><td style="padding-left:18px;">Multiplier rel.</td><td align="right"><input id="upgradeAutomationRelMultiplier" type="number" min="0" max="100" step="0.5" value="' + relMultiplier + '" style="width:66px"></td><td></td></tr>';
+			content += '<tr><td><span title="Scales Field Stabilizer, Survey Data Unit and Electromagnet usage from projected LP redemption: 30B=0, 22.5B=1, 15B=2, then dampened by time remaining. Low-redemption target redistribution prioritizes this bucket first.">Dynamic FSTAB/SDU/ELECMAG Risk Control</span></td><td align="right"><input id="upgradeAutomationBlockSpecialNeutral" type="checkbox" ' + (blockSpecialNeutral ? 'checked' : '') + '></td><td></td><td style="padding-left:18px;">Multiplier rel.</td><td align="right"><input id="upgradeAutomationRelMultiplier" type="number" min="0" max="100" step="0.5" value="' + relMultiplier + '" style="width:66px"></td><td></td></tr>';
 			content += '<tr><td>First automation slot</td><td align="right"><select id="lpAutomationStartCraftSlot" style="width:66px" ' + startCraftSlotDisabled + '>' + startCraftSlotOptions + '</select></td><td style="opacity:0.8">' + startCraftSlotStatus + '</td><td style="padding-left:18px;">Multiplier abs.</td><td align="right"><input id="upgradeAutomationAbsAggrMultiplier" type="number" min="0" max="100" step="0.5" value="' + absAggrMultiplier + '" style="width:66px"></td><td></td></tr>';
 			const currentPhantomCrew = Number(upgradeAutomationExecutionSummary?.crewTotal || 0);
 			const selectedMaxPhantomCrew = globalSettings.upgradeAutomationMaxPhantomCrew != null ? Math.max(0, parseIntDefault(globalSettings.upgradeAutomationMaxPhantomCrew, 0)) : currentPhantomCrew;
@@ -7231,12 +7227,7 @@
 			if (upgradeAutomationLpControl || upgradeAutomationExecutionSummary) {
 				const lpControlTime = upgradeAutomationLpControl?.utcTime || '';
 				const lpControlSource = String(upgradeAutomationLpControl?.effectiveTargetNowSource || 'epoch_fallback');
-				const lpTargetNowInflux = Number.isFinite(Number(upgradeAutomationLpControl?.targetNowInflux)) ? Number(upgradeAutomationLpControl.targetNowInflux) : 0;
 				const lpToday = Number(upgradeAutomationLpControl?.today || 0);
-				const lpAggActive = !!upgradeAutomationLpControl?.aggressivenessActive;
-				const lpAggLabel = lpAggActive ? 'Aggr. (active)' : 'Aggr. (not active)';
-				const lpAggPreLabel = 'Aggr. (rel.)';
-				const lpAggColor = lpAggActive ? '#80ff80' : '#ff8080';
 				const executionTime = upgradeAutomationExecutionSummary?.utcTime || '';
 				const remainingHours = Math.floor(Number(upgradeAutomationExecutionSummary?.remainingHours || 0));
 				const phantomCrew = upgradeAutomationExecutionSummary?.crewTotal ?? '';
@@ -7248,8 +7239,6 @@
 				const effectivePhantomCrew = Number(upgradeAutomationExecutionSummary?.effectiveCrewTotal || 0);
 				const rawPhantomCrew = Number(upgradeAutomationExecutionSummary?.crewTotal || 0);
 				const phantomCrewDisplay = effectivePhantomCrew && effectivePhantomCrew !== rawPhantomCrew ? effectivePhantomCrew + ' / ' + rawPhantomCrew : String(phantomCrew);
-				const optimizerVersion = normalizeUpgradeAutomationOptimizerVersion(upgradeAutomationExecutionSummary?.optimizerVersion);
-				const optimizerSelectorDisplay = upgradeAutomationExecutionSummary?.optimizerFallbackReason ? 'Optimizer 1 (fallback)' : (optimizerVersion === 'O2' ? 'Optimizer 2' : 'Optimizer 1');
 				content += '<tr><td>Time (UTC)</td><td align="right">' + (executionTime || lpControlTime) + '</td><td>Remaining Hours</td><td align="right">' + remainingHours.toLocaleString() + '</td><td>Phantom Crew</td><td align="right">' + phantomCrewDisplay + '</td></tr>';
 				const expectedLpByEod = Number.isFinite(upgradeAutomationLpControl?.expectedLpByEod) ? upgradeAutomationLpControl.expectedLpByEod : null;
 				const expectedTotalLpByEod = Number.isFinite(upgradeAutomationLpControl?.expectedTotalLpByEod) ? upgradeAutomationLpControl.expectedTotalLpByEod : null;
@@ -7259,13 +7248,11 @@
 				const expectedLpTitle = expectedLpByEod !== null
 					? `Expected additional LP by 00:00 UTC from active and uninstalled upgrade jobs using each player/component's median restart delay over the last 7 days. Uninstalled jobs older than 24 hours are excluded. Latest snapshot: ${expectedLpSnapshotTime || 'unknown'}; profiles: ${expectedLpProfiles}; rows: ${expectedLpRows}.`
 					: `Unavailable${upgradeAutomationLpControl?.expectedLpByEodError ? ': ' + String(upgradeAutomationLpControl.expectedLpByEodError) : ''}`;
-				const absAdjustment = Number.isFinite(upgradeAutomationLpControl?.absAdjustment) ? upgradeAutomationLpControl.absAdjustment : 0;
 				content += '<tr><td>Faction LP Installed Today</td><td align="right">' + Math.round(lpToday).toLocaleString() + '</td><td title="' + expectedLpTitle.replace(/["<>]/g, '') + '">Expected Additional LP by EOD</td><td align="right" title="' + expectedLpTitle.replace(/["<>]/g, '') + '">' + (expectedLpByEod !== null ? Math.round(expectedLpByEod).toLocaleString() : '-') + '</td><td>Expected Total LP by EOD</td><td align="right">' + (expectedTotalLpByEod !== null ? Math.round(expectedTotalLpByEod).toLocaleString() : '-') + '</td></tr>';
 				if (upgradeAutomationUninstalledLp) content += '<tr><td>Uninstalled LP (&lt;24h)</td><td align="right">' + Math.round(Number(upgradeAutomationUninstalledLp.under24hLp || 0)).toLocaleString() + '</td><td>Uninstalled LP (&gt;24h)</td><td align="right">' + Math.round(Number(upgradeAutomationUninstalledLp.over24hLp || 0)).toLocaleString() + '</td></tr>';
-				content += '<tr><td>LP Target Now Hourly</td><td align="right">' + Math.round(lpTargetNowInflux).toLocaleString() + '</td><td>LP Faction yday</td><td align="right">' + (lpFactionYesterdayRaw != null && Number.isFinite(lpFactionYesterday) ? Math.round(lpFactionYesterday).toLocaleString() : '-') + '</td><td>LP Installed yday</td><td align="right">' + (lpInstalledYesterdayRaw != null && Number.isFinite(lpInstalledYesterday) ? Math.round(lpInstalledYesterday).toLocaleString() : '-') + '</td></tr>';
-				content += '<tr><td>' + lpAggPreLabel + '</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrRelative ?? upgradeAutomationLpControl?.rawAggressiveness ?? upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td><td>Aggr. (abs.)</td><td align="right">' + Number(upgradeAutomationLpControl?.aggrAbsolute ?? (1 + absAdjustment)).toFixed(3) + '</td><td style="color:' + lpAggColor + '">Aggr.</td><td align="right" style="color:' + lpAggColor + '">' + Number(upgradeAutomationLpControl?.aggressiveness ?? 1).toFixed(3) + '</td></tr>';
+				content += '<tr><td>LP Faction yday</td><td align="right">' + (lpFactionYesterdayRaw != null && Number.isFinite(lpFactionYesterday) ? Math.round(lpFactionYesterday).toLocaleString() : '-') + '</td><td>LP Installed yday</td><td align="right">' + (lpInstalledYesterdayRaw != null && Number.isFinite(lpInstalledYesterday) ? Math.round(lpInstalledYesterday).toLocaleString() : '-') + '</td><td></td><td></td></tr>';
 				content += '<tr><td colspan="6">&nbsp;</td></tr>';
-				content += '<tr><td>Player LP Installed Today</td><td align="right">' + Math.round(installedToday).toLocaleString() + '</td><td>Optimizer Selector</td><td align="right">' + optimizerSelectorDisplay + '</td><td></td><td></td></tr>';
+				content += '<tr><td>Player LP Installed Today</td><td align="right">' + Math.round(installedToday).toLocaleString() + '</td><td></td><td></td><td></td><td></td></tr>';
 				if (upgradeAutomationLpControlError || upgradeAutomationExecutionSummaryError) {
 					const lpErrors = [upgradeAutomationLpControlError, upgradeAutomationExecutionSummaryError].filter(Boolean).join(' | ');
 					content += '<tr><td colspan="6" style="color:#ffb366">LP Control using last good data; refresh issue: ' + String(lpErrors).replace(/[<>]/g, '') + '</td></tr>';
@@ -7344,38 +7331,6 @@
 				content += '<tr><td colspan="8">Performance metrics unavailable</td></tr>';
 			}
 			content += closeSection;
-			content += '<div class="lp-auto-section-gap"></div>';
-
-			content += openSection('lp-auto-components');
-			if (upgradeAutomationExecutionSummary?.neutralComponentPlan?.length) {
-				const nextCycleTarget = typeof upgradeAutomationExecutionSummary.nextCycleTarget === 'boolean' ? upgradeAutomationExecutionSummary.nextCycleTarget : isUpgradeAutomationNextCycleTarget(globalSettings, new Date());
-				const nextCycleLabel = nextCycleTarget ? 'Target' : 'Neutral';
-				const highlightNeutral = !nextCycleTarget;
-				const neutralHighlightStyle = highlightNeutral ? ' style="background:rgba(80,200,120,0.16); box-shadow: inset 0 0 0 1px rgba(80,200,120,0.30);"' : '';
-				const finalHighlightStyle = !highlightNeutral ? ' style="background:rgba(80,200,120,0.16); box-shadow: inset 0 0 0 1px rgba(80,200,120,0.30);"' : '';
-				content += '<tr style="opacity:0.66"><td rowspan="2" style="min-width:180px"><b>Optimizer 1<br>Component</b><br><small>Next cycle: ' + nextCycleLabel + '</small></td><td rowspan="2" align="right" style="min-width:120px"><b>Installed Today</b></td><td colspan="3" align="center" style="min-width:270px"' + neutralHighlightStyle + '><b>Neutral</b></td><td colspan="3" align="center" style="min-width:270px"' + finalHighlightStyle + '><b>Target</b></td></tr>';
-			content += '<tr style="opacity:0.66"><td align="right" style="min-width:72px"' + neutralHighlightStyle + '><b>Crew</b></td><td align="right" style="min-width:96px"' + neutralHighlightStyle + '><b>' + (upgradeAutomationExecutionSummary.neutralPhaseMode ? 'Upgrading / Phase' : 'Upgrading<br>/ Hour') + '</b></td><td align="right" style="min-width:78px"' + neutralHighlightStyle + '><b>Buffer Days</b></td><td align="right" style="min-width:72px"' + finalHighlightStyle + '><b>Crew</b></td><td align="right" style="min-width:96px"' + finalHighlightStyle + '><b>Upgrading<br>/ Hour</b></td><td align="right" style="min-width:78px"' + finalHighlightStyle + '><b>Buffer Days</b></td></tr>';
-				for (const row of upgradeAutomationExecutionSummary.neutralComponentPlan) {
-					const finalCraft24h = Number(row.craft24h || 0);
-					const finalUpgradingDay = Number(row.finalUpgradingDay || 0);
-					const finalBufferDisplay = !row.phantomUpgradeEligible || row.finalBufferDays == null ? '' : (Number.isFinite(row.finalBufferDays) ? Number(row.finalBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
-					const neutralCraft24h = Number(row.craft24h || 0);
-					const neutralUpgradingDay = Number(row.neutralUpgradingDay || 0);
-					const neutralBufferDisplay = !row.phantomUpgradeEligible || row.neutralBufferDays == null ? '' : (Number.isFinite(row.neutralBufferDays) ? Number(row.neutralBufferDays).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'Infinity');
-					const neutralBufferWarning = row.phantomUpgradeEligible && row.neutralBufferDays != null && Number.isFinite(Number(row.neutralBufferDays)) && Number(row.neutralBufferDays) < 5;
-					const finalBufferWarning = row.phantomUpgradeEligible && row.finalBufferDays != null && Number.isFinite(Number(row.finalBufferDays)) && Number(row.finalBufferDays) < 5;
-					const neutralBufferStyle = neutralBufferWarning ? (neutralHighlightStyle ? neutralHighlightStyle.replace(/"$/, '; color:#ffb366"') : ' style="color:#ffb366"') : neutralHighlightStyle;
-					const finalBufferStyle = finalBufferWarning ? (finalHighlightStyle ? finalHighlightStyle.replace(/"$/, '; color:#ffb366"') : ' style="color:#ffb366"') : finalHighlightStyle;
-					const actualSideStyle = row.optimizerSource ? ' style="background:rgba(255,180,80,0.16); box-shadow: inset 0 0 0 1px rgba(255,180,80,0.30);"' : (row.optimizerDestination ? ' style="background:rgba(80,170,255,0.16); box-shadow: inset 0 0 0 1px rgba(80,170,255,0.30);"' : '');
-					const riskLabel = row.specialRiskControlled ? (' (risk ' + Math.round(Number(row.specialRiskMultiplier || 0) * 100) + '%)') : '';
-					const neutralBlockedLabel = row.neutralPhaseBlocked && !row.specialRiskBlocked && highlightNeutral ? ' (neutral blocked)' : '';
-					const optimizerDisplayName = row.phantomInventoryBlocked ? row.displayName + ' (blocked)' : (row.specialRiskBlocked ? row.displayName + ' (risk blocked)' : row.displayName + neutralBlockedLabel + riskLabel);
-					content += '<tr><td' + actualSideStyle + '>' + optimizerDisplayName + '</td><td align="right">' + Math.floor(Number(row.installedToday || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(row.crew || 0)).toLocaleString() + '</td><td align="right"' + neutralHighlightStyle + '>' + Math.floor(Number(upgradeAutomationExecutionSummary.neutralPhaseMode ? (row.neutralUpgradingPhase || 0) : (row.neutralUpgradingHour || 0)) || 0).toLocaleString() + '</td><td align="right"' + neutralBufferStyle + '>' + neutralBufferDisplay + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalCrew || 0)).toLocaleString() + '</td><td align="right"' + finalHighlightStyle + '>' + Math.floor(Number(row.finalUpgradingHour || 0)).toLocaleString() + '</td><td align="right"' + finalBufferStyle + '>' + finalBufferDisplay + '</td></tr>';
-				}
-			} else {
-				content += '<tr><td colspan="8">Component plan unavailable</td></tr>';
-			}
-			content += closeSection;
 		} catch (e) {
 			if (!e?.aephiaGate) content += '<div class="lp-auto-section"><table class="lp-auto-section-table lp-auto-summary-table"><tr><td colspan="6" style="color:#ff8080">Automation render error: ' + String(e?.message || e || 'unknown_error').replace(/[<>]/g, '') + '</td></tr></table></div>';
 		}
@@ -7400,7 +7355,6 @@
 			const upgradeAutomationRelMultiplier = el.querySelector('#upgradeAutomationRelMultiplier');
 			const upgradeAutomationAbsAggrMultiplier = el.querySelector('#upgradeAutomationAbsAggrMultiplier');
 			const upgradeAutomationPoolSkewMultiplier = el.querySelector('#upgradeAutomationPoolSkewMultiplier');
-			const upgradeAutomationOptimizerVersion = el.querySelector('#upgradeAutomationOptimizerVersion');
 			const parseLocaleFloat = (value, fallback) => {
 				const normalized = String(value ?? '').trim().replace(',', '.');
 				const parsed = parseFloat(normalized);
@@ -7427,18 +7381,11 @@
 				const absAggrMultiplier = Math.max(0, parseLocaleFloat(upgradeAutomationAbsAggrMultiplier?.value, 1));
 				globalSettings.upgradeAutomationAbsAggrMultiplier = absAggrMultiplier;
 				globalSettings.upgradeAutomationPoolSkewMultiplier = poolSkewMultiplier;
-				globalSettings.upgradeAutomationOptimizerVersion = normalizeUpgradeAutomationOptimizerVersion(upgradeAutomationOptimizerVersion?.value || globalSettings.upgradeAutomationOptimizerVersion);
 				await saveGlobalSettings('aggressiveness-settings-apply');
 				await refreshUpgradeAutomationInfluxStats();
 				await refreshUpgradeAutomationExecutionSummary();
 				renderLpAutomationContent();
 			};
-			if (upgradeAutomationOptimizerVersion && !upgradeAutomationOptimizerVersion.dataset.bound) {
-				upgradeAutomationOptimizerVersion.dataset.bound = '1';
-				upgradeAutomationOptimizerVersion.addEventListener('change', async () => {
-					await applyAggressivenessSettings();
-				});
-			}
 			if (upgradeAutomationFaction && !upgradeAutomationFaction.dataset.bound) {
 				upgradeAutomationFaction.dataset.bound = '1';
 				upgradeAutomationFaction.addEventListener('change', async () => {
@@ -15059,7 +15006,6 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			statusPanelOpacity: parseIntDefault(document.querySelector('#statusPanelOpacity').value, 75),
 			upgradeAutomationLpInstance: document.querySelector('#upgradeAutomationLpInstance') ? normalizeUpgradeAutomationLpInstance(document.querySelector('#upgradeAutomationLpInstance').value) : normalizeUpgradeAutomationLpInstance(globalSettings.upgradeAutomationLpInstance),
 			upgradeAutomationEnabled: document.querySelector('#upgradeAutomationEnabled') ? document.querySelector('#upgradeAutomationEnabled').checked : !!globalSettings.upgradeAutomationEnabled,
-			upgradeAutomationOptimizerVersion: document.querySelector('#upgradeAutomationOptimizerVersion') ? normalizeUpgradeAutomationOptimizerVersion(document.querySelector('#upgradeAutomationOptimizerVersion').value) : normalizeUpgradeAutomationOptimizerVersion(globalSettings.upgradeAutomationOptimizerVersion),
 			upgradeAutomationStartCraftSlot: document.querySelector('#lpAutomationStartCraftSlot') ? parseIntDefault(document.querySelector('#lpAutomationStartCraftSlot').value, 1) : parseIntDefault(globalSettings.upgradeAutomationStartCraftSlot, 1),
 			upgradeAutomationAggressivenessPct: document.querySelector('#upgradeAutomationAggressivenessPct') ? parseIntDefault(document.querySelector('#upgradeAutomationAggressivenessPct').value, 100) : parseIntDefault(globalSettings.upgradeAutomationAggressivenessPct, 100),
 			upgradeAutomationAggressivenessStartHour: document.querySelector('#upgradeAutomationAggressivenessStartHour') ? parseIntDefault(document.querySelector('#upgradeAutomationAggressivenessStartHour').value, 12) : parseIntDefault(globalSettings.upgradeAutomationAggressivenessStartHour, 12),
@@ -15852,7 +15798,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-279', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-280', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),

@@ -32,12 +32,16 @@ test('Optimizer 2 ranks pools by net ATLAS profit per second internally', () => 
 	assert.match(source, /rgba\(80,170,255,0\.16\)/);
 });
 
-test('atomic optimizer selector defaults to O2 and preserves explicit O1 fallback', () => {
+test('atomic optimizer selector always selects O2 with no O1 fallback', () => {
 	assert.match(source, /function normalizeUpgradeAutomationOptimizerVersion\(/);
-	assert.match(source, /upgradeAutomationOptimizerVersion[^\n]+normalizeUpgradeAutomationOptimizerVersion/);
 	assert.match(source, /const selectedOptimizerPlan = selectUpgradeAutomationOptimizerPlan\(/);
 	assert.match(source, /getUpgradeAutomationScheduleState\(\{ neutralComponentPlan: selectedOptimizerPlan\.rows/);
 	assert.match(source, /optimizerVersion: selectedOptimizerPlan\.version/);
+	assert.match(source, /function selectUpgradeAutomationOptimizerPlan\(/);
+	assert.match(source, /version: 'O2'/);
+	assert.match(source, /fallbackReason: 'optimizer_2_inputs_unavailable'/);
+	assert.doesNotMatch(source, /version: 'O1'/);
+	assert.doesNotMatch(source, /requested !== 'O2'/);
 });
 
 test('selected O2 rows become the complete execution contract', () => {
@@ -127,24 +131,27 @@ test('current ONI epoch inputs create colored pools and reallocate target crew',
 	assert.ok(Math.abs((electromagnet.optimizer2Crew - 20) - (electronics.optimizer2Crew - 20)) <= 1);
 });
 
-test('LP Control shows the effective optimizer and omits O1 target summaries', () => {
+test('LP Control omits O1-era summaries and selector', () => {
 	const sectionStart = source.indexOf("openSection('lp-auto-control')");
 	const sectionEnd = source.indexOf("content += closeSection;", sectionStart);
 	const section = source.slice(sectionStart, sectionEnd);
-	assert.match(section, /Optimizer Selector/);
-	assert.match(section, /optimizerVersion === 'O2' \? 'Optimizer 2' : 'Optimizer 1'/);
-	assert.match(section, /Optimizer 1 \(fallback\)/);
+	assert.doesNotMatch(section, /LP Target Now Hourly/);
+	assert.doesNotMatch(section, /Aggr\. \(rel\.\)/);
+	assert.doesNotMatch(section, /Aggr\. \(abs\.\)/);
+	assert.doesNotMatch(section, />Aggr\.</);
+	assert.doesNotMatch(section, /Optimizer Selector/);
+	assert.doesNotMatch(section, /Optimizer 1 \(fallback\)/);
 	assert.doesNotMatch(section, />Neutral LP Target</);
 	assert.doesNotMatch(section, />Requested LP Target</);
 	assert.doesNotMatch(section, />Optimizer LP Target</);
 });
 
-test('Optimizer 2 is immediately after LP Control and before Optimizer 1', () => {
+test('Optimizer 2 is immediately after LP Control and Optimizer 1 section is gone', () => {
 	const control = source.indexOf("openSection('lp-auto-control')");
 	const optimizer2 = source.indexOf("openSection('lp-auto-optimizer-2')");
-	const optimizer1 = source.indexOf("openSection('lp-auto-components')");
-	assert.ok(control < optimizer2 && optimizer2 < optimizer1);
-	assert.match(source.slice(optimizer1, source.indexOf('content += closeSection;', optimizer1)), /<b>Optimizer 1<br>Component<\/b>/);
+	assert.ok(control < optimizer2);
+	assert.equal(source.indexOf("openSection('lp-auto-components')"), -1);
+	assert.doesNotMatch(source, /<b>Optimizer 1<br>Component<\/b>/);
 });
 
 test('Performance Metrics orders value periods and derives daily per-crew profit', () => {

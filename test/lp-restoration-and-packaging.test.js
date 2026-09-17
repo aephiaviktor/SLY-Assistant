@@ -32,7 +32,7 @@ test('packaged userscript is byte-identical to the canonical root', () => {
 
 test('LP Control panel exposes the current forecast and uninstalled metrics', () => {
   const panelStart = canonical.indexOf("openSection('lp-auto-control')");
-  const panelEnd = canonical.indexOf("openSection('lp-auto-components')", panelStart);
+  const panelEnd = canonical.indexOf("openSection('lp-auto-optimizer-2')", panelStart);
   const panel = canonical.slice(panelStart, panelEnd);
   for (const label of [
     'Expected Additional LP by EOD',
