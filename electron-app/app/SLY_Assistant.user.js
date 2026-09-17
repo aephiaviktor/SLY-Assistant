@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-280
+// @aephia-version 0.7.35-281
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -7197,20 +7197,15 @@
 
 			content += openSection('lp-auto-automation');
 			content += '<tr style="opacity:0.66"><td colspan="6"><b>Automation</b></td></tr>';
-			const absAggrBoundaryLow = Math.max(0, Number(globalSettings.upgradeAutomationAbsAggrBoundaryLow ?? 20_000_000_000) / 1000000000);
-			const absAggrBoundaryHigh = Math.max(0, Number(globalSettings.upgradeAutomationAbsAggrBoundaryHigh ?? 35_000_000_000) / 1000000000);
-			const poolSkewMultiplier = Math.max(0, parseFloat(globalSettings.upgradeAutomationPoolSkewMultiplier ?? 3));
-			const relMultiplier = Math.max(0, Number(globalSettings.upgradeAutomationRelMultiplier ?? 1));
-			const absAggrMultiplier = Math.max(0, Number(globalSettings.upgradeAutomationAbsAggrMultiplier ?? 1));
 			content += '<tr><td>LP Automation On/Off</td><td align="right"><input id="lpAutomationEnabledToggle" type="checkbox" ' + (lpAutomationEnabled ? 'checked' : '') + '></td><td></td><td></td><td></td><td></td></tr>';
-			content += '<tr><td>Faction</td><td align="right"><select id="upgradeAutomationFaction" style="width:66px">' + factionOptions + '</select></td><td></td><td style="padding-left:18px;">Lower Boundary</td><td align="right"><input id="upgradeAutomationAbsAggrBoundaryLow" type="number" min="0" max="1000" step="1" value="' + absAggrBoundaryLow + '" style="width:66px"></td><td>Billions</td></tr>';
-			content += '<tr><td>Neutral Phase length</td><td align="right"><input id="upgradeAutomationAggressivenessStartHour" type="number" min="0" max="23" step="1" value="' + selectedAggressivenessStartHour + '" style="width:66px"></td><td style="white-space:nowrap; text-align:left;">hours</td><td style="padding-left:18px;">Upper Boundary</td><td align="right"><input id="upgradeAutomationAbsAggrBoundaryHigh" type="number" min="0" max="1000" step="1" value="' + absAggrBoundaryHigh + '" style="width:66px"></td><td>Billions</td></tr>';
-			content += '<tr><td><span title="Scales Field Stabilizer, Survey Data Unit and Electromagnet usage from projected LP redemption: 30B=0, 22.5B=1, 15B=2, then dampened by time remaining. Low-redemption target redistribution prioritizes this bucket first.">Dynamic FSTAB/SDU/ELECMAG Risk Control</span></td><td align="right"><input id="upgradeAutomationBlockSpecialNeutral" type="checkbox" ' + (blockSpecialNeutral ? 'checked' : '') + '></td><td></td><td style="padding-left:18px;">Multiplier rel.</td><td align="right"><input id="upgradeAutomationRelMultiplier" type="number" min="0" max="100" step="0.5" value="' + relMultiplier + '" style="width:66px"></td><td></td></tr>';
-			content += '<tr><td>First automation slot</td><td align="right"><select id="lpAutomationStartCraftSlot" style="width:66px" ' + startCraftSlotDisabled + '>' + startCraftSlotOptions + '</select></td><td style="opacity:0.8">' + startCraftSlotStatus + '</td><td style="padding-left:18px;">Multiplier abs.</td><td align="right"><input id="upgradeAutomationAbsAggrMultiplier" type="number" min="0" max="100" step="0.5" value="' + absAggrMultiplier + '" style="width:66px"></td><td></td></tr>';
+			content += '<tr><td>Faction</td><td align="right"><select id="upgradeAutomationFaction" style="width:66px">' + factionOptions + '</select></td><td></td><td></td><td></td><td></td></tr>';
+			content += '<tr><td>Neutral Phase length</td><td align="right"><input id="upgradeAutomationAggressivenessStartHour" type="number" min="0" max="23" step="1" value="' + selectedAggressivenessStartHour + '" style="width:66px"></td><td style="white-space:nowrap; text-align:left;">hours</td><td></td><td></td><td></td></tr>';
+			content += '<tr><td><span title="Scales Field Stabilizer, Survey Data Unit and Electromagnet usage from projected LP redemption: 30B=0, 22.5B=1, 15B=2, then dampened by time remaining. Low-redemption target redistribution prioritizes this bucket first.">Dynamic FSTAB/SDU/ELECMAG Risk Control</span></td><td align="right"><input id="upgradeAutomationBlockSpecialNeutral" type="checkbox" ' + (blockSpecialNeutral ? 'checked' : '') + '></td><td></td><td></td><td></td><td></td></tr>';
+			content += '<tr><td>First automation slot</td><td align="right"><select id="lpAutomationStartCraftSlot" style="width:66px" ' + startCraftSlotDisabled + '>' + startCraftSlotOptions + '</select></td><td style="opacity:0.8">' + startCraftSlotStatus + '</td><td></td><td></td><td></td></tr>';
 			const currentPhantomCrew = Number(upgradeAutomationExecutionSummary?.crewTotal || 0);
 			const selectedMaxPhantomCrew = globalSettings.upgradeAutomationMaxPhantomCrew != null ? Math.max(0, parseIntDefault(globalSettings.upgradeAutomationMaxPhantomCrew, 0)) : currentPhantomCrew;
 			const phantomCrewUnlimited = globalSettings.upgradeAutomationPhantomCrewUnlimited != null ? !!globalSettings.upgradeAutomationPhantomCrewUnlimited : true;
-			content += '<tr><td>Phantom Crew Unlimited</td><td align="right"><input id="phantomCrewUnlimitedToggle" type="checkbox" ' + (phantomCrewUnlimited ? 'checked' : '') + '></td><td style="white-space:nowrap; text-align:left;">Max <input id="upgradeAutomationMaxPhantomCrew" type="number" min="0" step="1" value="' + selectedMaxPhantomCrew + '" style="width:58px" ' + (phantomCrewUnlimited ? 'disabled' : '') + '></td><td style="padding-left:18px;">Target Skew</td><td align="right"><input id="upgradeAutomationPoolSkewMultiplier" type="number" min="0" max="100" step="0.5" value="' + poolSkewMultiplier + '" style="width:66px"></td><td></td></tr>';
+			content += '<tr><td>Phantom Crew Unlimited</td><td align="right"><input id="phantomCrewUnlimitedToggle" type="checkbox" ' + (phantomCrewUnlimited ? 'checked' : '') + '></td><td style="white-space:nowrap; text-align:left;">Max <input id="upgradeAutomationMaxPhantomCrew" type="number" min="0" step="1" value="' + selectedMaxPhantomCrew + '" style="width:58px" ' + (phantomCrewUnlimited ? 'disabled' : '') + '></td><td></td><td></td><td></td></tr>';
 			content += closeSection;
 			content += '<div class="lp-auto-section-gap"></div>';
 
@@ -7350,37 +7345,15 @@
 			const upgradeAutomationNeutralBlockSingleTx = el.querySelector('#upgradeAutomationNeutralBlockSingleTx');
 			const upgradeAutomationBlockSpecialNeutral = el.querySelector('#upgradeAutomationBlockSpecialNeutral');
 			const upgradeAutomationFaction = el.querySelector('#upgradeAutomationFaction');
-			const upgradeAutomationAbsAggrBoundaryLow = el.querySelector('#upgradeAutomationAbsAggrBoundaryLow');
-			const upgradeAutomationAbsAggrBoundaryHigh = el.querySelector('#upgradeAutomationAbsAggrBoundaryHigh');
-			const upgradeAutomationRelMultiplier = el.querySelector('#upgradeAutomationRelMultiplier');
-			const upgradeAutomationAbsAggrMultiplier = el.querySelector('#upgradeAutomationAbsAggrMultiplier');
-			const upgradeAutomationPoolSkewMultiplier = el.querySelector('#upgradeAutomationPoolSkewMultiplier');
-			const parseLocaleFloat = (value, fallback) => {
-				const normalized = String(value ?? '').trim().replace(',', '.');
-				const parsed = parseFloat(normalized);
-				return Number.isFinite(parsed) ? parsed : fallback;
-			};
 			const applyAggressivenessSettings = async () => {
 				const hourValue = Math.max(0, Math.min(23, parseIntDefault(upgradeAutomationAggressivenessStartHour?.value, 12)));
 				const neutralBlockSingleTx = !!upgradeAutomationNeutralBlockSingleTx?.checked;
 				const blockSpecialNeutral = !!upgradeAutomationBlockSpecialNeutral?.checked;
 				const factionValue = normalizeUpgradeAutomationLpInstance(upgradeAutomationFaction?.value || globalSettings.upgradeAutomationLpInstance || 'MUD');
-				const absAggrBoundaryLow = Math.max(0, parseLocaleFloat(upgradeAutomationAbsAggrBoundaryLow?.value, 20));
-				const absAggrBoundaryHigh = Math.max(0, parseLocaleFloat(upgradeAutomationAbsAggrBoundaryHigh?.value, 35));
-				const relMultiplier = Math.max(0, parseLocaleFloat(upgradeAutomationRelMultiplier?.value, 1));
-				const poolSkewMultiplier = Math.max(0, parseLocaleFloat(upgradeAutomationPoolSkewMultiplier?.value, 3));
-				const absAggrBoundaryLowRaw = absAggrBoundaryLow * 1000000000;
-				const absAggrBoundaryHighRaw = absAggrBoundaryHigh * 1000000000;
 				globalSettings.upgradeAutomationAggressivenessStartHour = hourValue;
 				globalSettings.upgradeAutomationNeutralBlockSingleTx = neutralBlockSingleTx;
 				globalSettings.upgradeAutomationBlockSpecialNeutral = blockSpecialNeutral;
 				globalSettings.upgradeAutomationLpInstance = factionValue;
-				globalSettings.upgradeAutomationAbsAggrBoundaryLow = absAggrBoundaryLowRaw;
-				globalSettings.upgradeAutomationAbsAggrBoundaryHigh = absAggrBoundaryHighRaw;
-				globalSettings.upgradeAutomationRelMultiplier = relMultiplier;
-				const absAggrMultiplier = Math.max(0, parseLocaleFloat(upgradeAutomationAbsAggrMultiplier?.value, 1));
-				globalSettings.upgradeAutomationAbsAggrMultiplier = absAggrMultiplier;
-				globalSettings.upgradeAutomationPoolSkewMultiplier = poolSkewMultiplier;
 				await saveGlobalSettings('aggressiveness-settings-apply');
 				await refreshUpgradeAutomationInfluxStats();
 				await refreshUpgradeAutomationExecutionSummary();
@@ -7407,36 +7380,6 @@
 			if (upgradeAutomationBlockSpecialNeutral && !upgradeAutomationBlockSpecialNeutral.dataset.bound) {
 				upgradeAutomationBlockSpecialNeutral.dataset.bound = '1';
 				upgradeAutomationBlockSpecialNeutral.addEventListener('change', async () => {
-					await applyAggressivenessSettings();
-				});
-			}
-			if (upgradeAutomationAbsAggrBoundaryLow && !upgradeAutomationAbsAggrBoundaryLow.dataset.bound) {
-				upgradeAutomationAbsAggrBoundaryLow.dataset.bound = '1';
-				upgradeAutomationAbsAggrBoundaryLow.addEventListener('change', async () => {
-					await applyAggressivenessSettings();
-				});
-			}
-			if (upgradeAutomationAbsAggrBoundaryHigh && !upgradeAutomationAbsAggrBoundaryHigh.dataset.bound) {
-				upgradeAutomationAbsAggrBoundaryHigh.dataset.bound = '1';
-				upgradeAutomationAbsAggrBoundaryHigh.addEventListener('change', async () => {
-					await applyAggressivenessSettings();
-				});
-			}
-			if (upgradeAutomationRelMultiplier && !upgradeAutomationRelMultiplier.dataset.bound) {
-				upgradeAutomationRelMultiplier.dataset.bound = '1';
-				upgradeAutomationRelMultiplier.addEventListener('change', async () => {
-					await applyAggressivenessSettings();
-				});
-			}
-			if (upgradeAutomationAbsAggrMultiplier && !upgradeAutomationAbsAggrMultiplier.dataset.bound) {
-				upgradeAutomationAbsAggrMultiplier.dataset.bound = '1';
-				upgradeAutomationAbsAggrMultiplier.addEventListener('change', async () => {
-					await applyAggressivenessSettings();
-				});
-			}
-			if (upgradeAutomationPoolSkewMultiplier && !upgradeAutomationPoolSkewMultiplier.dataset.bound) {
-				upgradeAutomationPoolSkewMultiplier.dataset.bound = '1';
-				upgradeAutomationPoolSkewMultiplier.addEventListener('change', async () => {
 					await applyAggressivenessSettings();
 				});
 			}
@@ -15011,9 +14954,6 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			upgradeAutomationAggressivenessStartHour: document.querySelector('#upgradeAutomationAggressivenessStartHour') ? parseIntDefault(document.querySelector('#upgradeAutomationAggressivenessStartHour').value, 12) : parseIntDefault(globalSettings.upgradeAutomationAggressivenessStartHour, 12),
 			upgradeAutomationNeutralBlockSingleTx: document.querySelector('#upgradeAutomationNeutralBlockSingleTx') ? document.querySelector('#upgradeAutomationNeutralBlockSingleTx').checked : !!globalSettings.upgradeAutomationNeutralBlockSingleTx,
 			upgradeAutomationBlockSpecialNeutral: document.querySelector('#upgradeAutomationBlockSpecialNeutral') ? document.querySelector('#upgradeAutomationBlockSpecialNeutral').checked : !!globalSettings.upgradeAutomationBlockSpecialNeutral,
-			upgradeAutomationRelMultiplier: document.querySelector('#upgradeAutomationRelMultiplier') ? Number(document.querySelector('#upgradeAutomationRelMultiplier').value) : Math.max(0, Number(globalSettings.upgradeAutomationRelMultiplier ?? 1)),
-			upgradeAutomationAbsAggrMultiplier: document.querySelector('#upgradeAutomationAbsAggrMultiplier') ? Number(document.querySelector('#upgradeAutomationAbsAggrMultiplier').value) : Math.max(0, Number(globalSettings.upgradeAutomationAbsAggrMultiplier ?? 1)),
-			upgradeAutomationPoolSkewMultiplier: document.querySelector('#upgradeAutomationPoolSkewMultiplier') ? Number(document.querySelector('#upgradeAutomationPoolSkewMultiplier').value) : Math.max(0, Number(globalSettings.upgradeAutomationPoolSkewMultiplier ?? 3)),
 			upgradeAutomationPhantomCrewUnlimited: document.querySelector('#phantomCrewUnlimitedToggle') ? document.querySelector('#phantomCrewUnlimitedToggle').checked : parseBoolDefault(globalSettings.upgradeAutomationPhantomCrewUnlimited, true),
 			upgradeAutomationMaxPhantomCrew: document.querySelector('#upgradeAutomationMaxPhantomCrew') ? Math.max(0, parseIntDefault(document.querySelector('#upgradeAutomationMaxPhantomCrew').value, 0)) : Math.max(0, parseIntDefault(globalSettings.upgradeAutomationMaxPhantomCrew, 0)),
 			autoStartScript: document.querySelector('#autoStartScript').checked,
@@ -15798,7 +15738,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-280', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-281', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
