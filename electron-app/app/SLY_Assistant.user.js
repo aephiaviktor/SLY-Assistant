@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-281
+// @aephia-version 0.7.35-282
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -15738,7 +15738,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-281', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-282', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -19528,6 +19528,36 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
     }
 
 
+	function isProfileKeyActive(expireTime, nowUnixSeconds = Math.floor(Date.now() / 1000)) {
+		const expiration = Number(expireTime?.toString?.() ?? expireTime);
+		return expiration === -1 || (Number.isFinite(expiration) && expiration >= nowUnixSeconds);
+	}
+
+	function resolveProfileKeyIndexes(profileKeys, expectedKey, scopes, nowUnixSeconds = Math.floor(Date.now() / 1000)) {
+		const indexes = {};
+		const expectedKeyString = expectedKey?.toString?.() ?? String(expectedKey);
+		const scopeEntries = Object.entries(scopes || {}).map(([name, scope]) => [name, scope?.toString?.() ?? String(scope)]);
+		for (let index = 0; index < profileKeys.length; index += 1) {
+			const profileKey = profileKeys[index];
+			if ((profileKey?.key?.toString?.() ?? String(profileKey?.key)) !== expectedKeyString) continue;
+			if (!isProfileKeyActive(profileKey.expireTime, nowUnixSeconds)) continue;
+			const scopeString = profileKey?.scope?.toString?.() ?? String(profileKey?.scope);
+			const scopeMatch = scopeEntries.find(([, scope]) => scope === scopeString);
+			if (scopeMatch) indexes[scopeMatch[0]] = index;
+		}
+		return indexes;
+	}
+
+	function decodeProfileKeysFromAccountData(profileAccountData) {
+		const profileKeys = [];
+		let remainingData = profileAccountData.subarray(30);
+		while (remainingData.length >= 80) {
+			profileKeys.push(profileProgram.coder.types.decode('ProfileKey', remainingData.subarray(0, 80)));
+			remainingData = remainingData.subarray(80);
+		}
+		return profileKeys;
+	}
+
 	function initUser() {
 		return new Promise(async resolve => {
 
@@ -19553,12 +19583,43 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				userPublicKey = solflare.publicKey;
 			}
 
+            let queryUserProfiles = true;
             if (globalSettings.saveProfile && globalSettings.savedProfile && globalSettings.savedProfile.length > 0) {
-                cLog(1, 'Skipping User Profile query, using saved profile');
                 userProfileAcct = new solanaWeb3.PublicKey(globalSettings.savedProfile[0]);
-                userProfileKeyIdx = globalSettings.savedProfile[1];
-                pointsProfileKeyIdx = globalSettings.savedProfile[2];
-            } else {
+                try {
+                    const savedProfileAccount = await solanaReadConnection.getAccountInfo(userProfileAcct);
+                    const savedProfileIndexes = savedProfileAccount ? resolveProfileKeyIndexes(
+                        decodeProfileKeysFromAccountData(savedProfileAccount.data),
+                        userPublicKey,
+                        {
+                            sage: sageProgramPK,
+                            points: pointsProgramId,
+                            points_store: pointsStoreProgramId,
+                            default: profileProgramPK,
+                        }
+                    ) : {};
+                    if (Number.isInteger(savedProfileIndexes.sage)) {
+                        const previousSageIndex = Number(globalSettings.savedProfile[1]);
+                        const previousPointsIndex = Number(globalSettings.savedProfile[2]);
+                        userProfileKeyIdx = savedProfileIndexes.sage;
+                        pointsProfileKeyIdx = Number.isInteger(savedProfileIndexes.points) ? savedProfileIndexes.points : 0;
+                        queryUserProfiles = false;
+                        if (userProfileKeyIdx !== previousSageIndex || pointsProfileKeyIdx !== previousPointsIndex) {
+                            cLog(1, `Saved profile key indexes changed; refreshing SAGE ${previousSageIndex} -> ${userProfileKeyIdx}, Points ${previousPointsIndex} -> ${pointsProfileKeyIdx}`);
+                            globalSettings.savedProfile = [userProfileAcct.toString(), userProfileKeyIdx, pointsProfileKeyIdx];
+                            await saveGlobalSettings('profile-key-index-refresh');
+                        } else {
+                            cLog(1, 'Saved profile selection and key indexes validated');
+                        }
+                    } else {
+                        cLog(1, 'Saved profile does not contain an active SAGE key for the current signer; querying profiles again');
+                    }
+                } catch (error) {
+                    cLog(1, 'Could not validate saved profile; querying profiles again', error);
+                }
+            }
+
+            if (queryUserProfiles) {
                 cLog(1, 'Getting User Profiles (this takes a while)');
                 let userProfiles = await solanaReadConnection.getProgramAccounts(profileProgramPK);
                 let foundProf = [];
@@ -19570,7 +19631,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                     while (userProfData.length >= 80) {
                         let currProf = userProfData.subarray(0, 80);
                         let profDecoded = profileProgram.coder.types.decode('ProfileKey', currProf);
-                        if (profDecoded.key.toString() === userPublicKey.toString()) {
+                        if (profDecoded.key.toString() === userPublicKey.toString() && isProfileKeyActive(profDecoded.expireTime)) {
                             let [playerNameAcct] = await solanaReadConnection.getProgramAccounts(
                                 profileProgramPK,
                                 {
@@ -19602,8 +19663,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                                     break;
                             }
 
-                            let profAdded = foundProf.findIndex(item => item.profile === userProf.pubkey.toString());
-                            profAdded > -1 ? foundProf[profAdded][permissionType] = iter : foundProf.push({profile: userProf.pubkey.toString(), name: playerName, [permissionType]: iter})
+                            if (permissionType) {
+                                let profAdded = foundProf.findIndex(item => item.profile === userProf.pubkey.toString());
+                                profAdded > -1 ? foundProf[profAdded][permissionType] = iter : foundProf.push({profile: userProf.pubkey.toString(), name: playerName, [permissionType]: iter})
+                            }
                             //foundProf.push({profile: userProf.pubkey.toString(), name: playerName, scope: permissionType, idx: iter})
                         }
                         userProfData = userProfData.subarray(80);
@@ -19614,9 +19677,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
                 //Wait for user to select a profile if more than 1 is available
                 let userProfile = foundProf.length > 1 ? await assistProfileToggle(foundProf) : foundProf[0];
+                if (!userProfile || !Number.isInteger(userProfile.sage)) {
+                    throw new Error('No active SAGE profile key was found for the current signer');
+                }
                 userProfileAcct = new solanaWeb3.PublicKey(userProfile.profile);
-                userProfileKeyIdx = userProfile.sage || 0;
-                pointsProfileKeyIdx = userProfile.points || 0;
+                userProfileKeyIdx = userProfile.sage;
+                pointsProfileKeyIdx = Number.isInteger(userProfile.points) ? userProfile.points : 0;
                 if (globalSettings.saveProfile) {
                     /*
                     globalSettings = {
