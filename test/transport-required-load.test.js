@@ -361,3 +361,65 @@ test('resource checkbox has required-load tooltip and custom background in both 
     assert.match(source, /transportResourceCrewTotal\.title = 'Treat this crew amount as a total to dispatch, not per roundtrip\.';/);
   }
 });
+
+for (const assignment of ['Transport', 'Supply Chain']) {
+  for (const scenario of [
+    { name: 'due Copper retry uses chain Idle', expected: ['Idle'] },
+    { name: 'cooldown does not dispatch', retryAt: 3000, expected: [] },
+    { name: 'stopped fleet does not dispatch', state: 'STOPPED', expected: [] },
+    { name: 'error fleet does not dispatch', state: 'ERROR: transaction failed', expected: [] },
+    { name: 'in-progress resupply is not bypassed', resupplying: true, expected: [] },
+    { name: 'non-Idle chain state is not fabricated as Idle', chainState: 'StarbaseLoadingBay', expected: ['Waiting for Copper Ore'] },
+    { name: 'non-retry dispatch is unchanged', retryAt: 0, state: 'Idle', expected: ['Idle'] },
+  ]) {
+  test(`${assignment}: ${scenario.name}`, async () => {
+    const fleet = { publicKey: { toString: () => 'fleet' }, label: 'CF-05|06', state: 'Waiting for Copper Ore', transportLoadRetryAt: 1000, transportLoadRetryResource: 'Copper Ore', iterCnt: 3 };
+    if(scenario.retryAt !== undefined) fleet.transportLoadRetryAt = scenario.retryAt;
+    if(scenario.state) fleet.state = scenario.state;
+    fleet.resupplying = !!scenario.resupplying;
+    const calls = [];
+    const errors = [];
+    const context = vm.createContext({
+      userFleets: [fleet], Date: { now: () => 2000 }, globalErrorTracker: { errorCount: 0 },
+      GM: { getValue: async () => JSON.stringify({ assignment }) },
+      getTransportLoadRetry: f => f.transportLoadRetryAt ? { retryAt: f.transportLoadRetryAt, resource: f.transportLoadRetryResource } : null,
+      openTransportLoadRetryGate: f => { f.transportLoadRetryAt = 0; },
+      recordTransportLoadDiagnostic() {}, getTransportUnloadRetry: () => null,
+      getAccountInfo: async () => ({}), updateFleetMiscStats() {}, getFleetState: () => [scenario.chainState || 'Idle', [1, 2]],
+      updateFleetState: (f, state) => { f.state = state; },
+      cLog() {}, FleetTimeStamp: () => '', logError: e => errors.push(e),
+      handleTransport: async (_i, state) => calls.push(state),
+      handleSupplyChain: async (_i, state) => calls.push(state),
+    });
+    vm.runInContext(`async ${readFunctionSource('operateFleet')}; this.run = operateFleet;`, context);
+    await context.run(0);
+    assert.deepEqual(errors, []);
+    assert.deepEqual(calls, scenario.expected);
+  });
+  }
+}
+
+test('timer diagnostics cannot make old balances or thresholds look newly observed', () => {
+  let now = 1000;
+  const rows = new Map();
+  const fleet = { label: 'CF-05|06', state: 'Waiting for Copper Ore' };
+  const context = vm.createContext({ Date: { now: () => now }, transportLoadDiagnostics: rows, document: { querySelector: () => null } });
+  vm.runInContext(`${readFunctionSource('recordTransportLoadDiagnostic')}; this.record = recordTransportLoadDiagnostic;`, context);
+  context.record(fleet, { starbaseTotal: 65683, thresholds: [{ aboard: 65683 }] });
+  now = 2000;
+  context.record(fleet, { phase: 'retry-gate', gate: 'cooldown' });
+  assert.equal(rows.get(fleet.label).updatedAt, 2000);
+  assert.equal(rows.get(fleet.label).balancesObservedAt, 1000);
+  assert.equal(rows.get(fleet.label).thresholdsObservedAt, 1000);
+  now = 3000;
+  context.record(fleet, { starbaseTotal: 158883 });
+  assert.equal(rows.get(fleet.label).balancesObservedAt, 3000);
+  assert.equal(rows.get(fleet.label).thresholdsObservedAt, 1000);
+});
+
+test('CF-05|06 fresh Copper balances permit topping up and departing at full capacity', () => {
+  const plan = loadFunction('planStarbaseCargoLoads')([{ cargoPod: 'starbase-not-fleet', token: 'copper-source', amount: 158883 }], 20639, true, 0);
+  assert.equal(plan.amount, 20639);
+  const wait = loadFunction('getTransportRequiredLoadWait')([{ res: 'copper', amt: 87000, cargoTotal: true }], { copper: 65683 + plan.amount }, 0, { copper: 1 }, {});
+  assert.equal(wait, null);
+});

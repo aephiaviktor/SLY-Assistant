@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-288
+// @aephia-version 0.7.35-289
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -7197,6 +7197,7 @@
 				const text =
 					'fleet=' + String(row.fleet || '-') + ' state=' + String(row.state || '-') + ' updated=' + (row.updatedAt ? new Date(row.updatedAt).toISOString() : '-') + '\n' +
 					'phase=' + String(row.phase || '-') + ' gate=' + String(row.gate || '-') + ' retryAt=' + (retryAt ? new Date(retryAt).toISOString() : '-') + ' retryRemainingMs=' + Math.floor(retryRemainingMs) + ' wake=' + String(row.wake || '-') + ' inFlight=' + (!!row.inFlight) + '\n' +
+					'balancesObservedAt=' + (row.balancesObservedAt ? new Date(row.balancesObservedAt).toISOString() : 'not-observed') + ' thresholdsObservedAt=' + (row.thresholdsObservedAt ? new Date(row.thresholdsObservedAt).toISOString() : 'not-observed') + ' (last load observations, not refreshed by timer events)\n' +
 					'resource=' + String(row.resource || '-') + ' mint=' + String(row.mint || row.blockingMint || '-') + '\n' +
 					'requested=' + Math.floor(Number(row.requested || 0)) + ' starbaseTotal=' + Math.floor(Number(row.starbaseTotal || 0)) + ' starbaseUsable=' + Math.floor(Number(row.starbaseUsable || 0)) + ' reserved=' + Math.floor(Number(row.reserved || 0)) + ' keepOne=' + (!!row.keepOne) + '\n' +
 					'planned=' + Math.floor(Number(row.planned || 0)) + ' planRemaining=' + Math.floor(Number(row.planRemaining || 0)) + ' instructions=' + Math.floor(Number(row.instructionCount || 0)) + ' submittedInstructions=' + Math.floor(Number(row.submissionInstructionCount || 0)) + ' result=' + String(row.result || '-') + '\n' +
@@ -12646,9 +12647,13 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		if(!fleet) return;
 		const key = fleet.publicKey ? fleet.publicKey.toString() : String(fleet.label || 'unknown');
 		const previous = transportLoadDiagnostics.get(key) || {};
+		const observations = {};
+		if(patch && Object.prototype.hasOwnProperty.call(patch, 'starbaseTotal')) observations.balancesObservedAt = Date.now();
+		if(patch && Object.prototype.hasOwnProperty.call(patch, 'thresholds')) observations.thresholdsObservedAt = Date.now();
 		transportLoadDiagnostics.set(key, {
 			...previous,
 			...(patch || {}),
+			...observations,
 			key,
 			fleet: String(fleet.label || key),
 			state: String(fleet.state || ''),
@@ -15959,7 +15964,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-288', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-289', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -18758,10 +18763,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					await handleMining(i, userFleets[i].state, fleetCoords, fleetMining);
 				}
 				else if (fleetParsedData.assignment == 'Transport') {
-					await handleTransport(i, userFleets[i].state, fleetCoords);
+					// A due required-load retry retains its Waiting UI label. Route loading
+					// must use the freshly observed Idle state, not that display label.
+					await handleTransport(i, transportLoadRetry && fleetState === 'Idle' ? fleetState : userFleets[i].state, fleetCoords);
 				}
 				else if (fleetParsedData.assignment == 'Supply Chain') {
-					await handleSupplyChain(i, userFleets[i].state, fleetCoords);
+					await handleSupplyChain(i, transportLoadRetry && fleetState === 'Idle' ? fleetState : userFleets[i].state, fleetCoords);
 				}
 		} catch (err) {
 			cLog(1,`${FleetTimeStamp(userFleets[i].label)} ERROR`, err);
