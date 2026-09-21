@@ -109,6 +109,42 @@ test('fuel and ammo loading account for the amount actually available', () => {
   assert.match(source, /amountLoaded = Math\.max\(0, Number\(resp && resp\.amount \|\| 0\)\);/);
 });
 
+test('required transport load can satisfy the remaining amount across multiple starbase cargo pods', () => {
+  const planStarbaseCargoLoads = loadFunction('planStarbaseCargoLoads');
+  const result = planStarbaseCargoLoads([
+    { cargoPod: 'pod-a', token: 'token-a', amount: 25000 },
+    { cargoPod: 'pod-b', token: 'token-b', amount: 50000 },
+  ], 41958, false, 0);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    requested: 41958,
+    amount: 41958,
+    remaining: 0,
+    loads: [{ cargoPod: 'pod-b', token: 'token-b', amount: 41958 }],
+  });
+});
+
+test('required transport load combines split cargo pods and preserves one token in each source', () => {
+  const planStarbaseCargoLoads = loadFunction('planStarbaseCargoLoads');
+  const result = planStarbaseCargoLoads([
+    { cargoPod: 'pod-a', token: 'token-a', amount: 25000 },
+    { cargoPod: 'pod-b', token: 'token-b', amount: 20000 },
+  ], 41958, true, 0);
+
+  assert.equal(result.amount, 41958);
+  assert.equal(result.remaining, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.loads)), [
+    { cargoPod: 'pod-a', token: 'token-a', amount: 24999 },
+    { cargoPod: 'pod-b', token: 'token-b', amount: 16959 },
+  ]);
+});
+
+test('transport loading opts into multi-pod source loading and collects every planned transaction', () => {
+  const source = readSource();
+  assert.match(source, /execCargoFromStarbaseToFleet\([\s\S]*?resMax,[\s\S]*?true\s*\)/);
+  assert.match(source, /transactions\.push\(\.\.\.\(resp\.transactions \|\| \[\]\)\)/);
+});
+
 test('resource checkbox uses a light-brown background while unchecked and checked', () => {
   const styleTransportRequiredLoadCheckbox = loadFunction('styleTransportRequiredLoadCheckbox');
   let refresh = null;

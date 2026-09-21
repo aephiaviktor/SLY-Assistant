@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-283
+// @aephia-version 0.7.35-284
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -11221,7 +11221,32 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		await getAccountInfo(fleet.label, 'fleet fuel token', fleet.fuelToken) || await createPDA(fleet.fuelToken, fleet.fuelTank, new solanaWeb3.PublicKey(fuelItem.token), fleet);
 	}
 
-	async function execCargoFromStarbaseToFleet(fleet, cargoPodTo, tokenTo, tokenMint, cargoType, dockCoords, amount, forceAmount, returnTx, alreadyLoadedInTransaction) {
+	function planStarbaseCargoLoads(sources, requestedAmount, keepOne, reservedAmount) {
+		const requested = Math.max(0, Math.floor(Number(requestedAmount || 0)));
+		let remaining = requested;
+		let reserved = Math.max(0, Math.floor(Number(reservedAmount || 0)));
+		const loads = [];
+		const sortedSources = (sources || [])
+			.map((source, index) => ({ ...source, amount: Math.max(0, Math.floor(Number(source.amount || 0))), index }))
+			.sort((left, right) => right.amount - left.amount || left.index - right.index);
+
+		for(const source of sortedSources) {
+			let available = Math.max(0, source.amount - (keepOne ? 1 : 0));
+			if(reserved > 0) {
+				const reservedHere = Math.min(available, reserved);
+				available -= reservedHere;
+				reserved -= reservedHere;
+			}
+			if(remaining <= 0 || available <= 0) continue;
+			const loadAmount = Math.min(remaining, available);
+			loads.push({ cargoPod: source.cargoPod, token: source.token, amount: loadAmount });
+			remaining -= loadAmount;
+		}
+
+		return { requested, amount: requested - remaining, remaining, loads };
+	}
+
+	async function execCargoFromStarbaseToFleet(fleet, cargoPodTo, tokenTo, tokenMint, cargoType, dockCoords, amount, forceAmount, returnTx, alreadyLoadedInTransaction, loadAcrossCargoHolds = false) {
 		return new Promise(async resolve => {
 			let txResult = {};
 			let starbaseX = dockCoords.split(',')[0].trim();
@@ -11236,8 +11261,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						},
 				},
 			]);
-			let starbasePlayerCargoHold = starbasePlayerCargoHolds[0];
-			let mostFound = 0;
+			const cargoSources = [];
             for (let cargoHold of starbasePlayerCargoHolds) {
                 if (cargoHold.account && cargoHold.account.openTokenAccounts > 0) {
                     let cargoHoldTokens = await solanaReadConnection.getParsedTokenAccountsByOwner(cargoHold.publicKey, {programId: tokenProgramPK});
@@ -11246,33 +11270,20 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			await influxStarbaseCargoHold(starbaseX,starbaseY,cargoHoldTokens);
                     }
 
-                    let cargoHoldFound = cargoHoldTokens.value.find(item => item.account.data.parsed.info.mint === tokenMint && item.account.data.parsed.info.tokenAmount.uiAmount >= amount);
-                    if (cargoHoldFound) {
-                        starbasePlayerCargoHold = cargoHold;
-                        mostFound = cargoHoldFound.account.data.parsed.info.tokenAmount.uiAmount;
-                        break;
-                    } else {
-                        let cargoHoldFound = cargoHoldTokens.value.find(item => item.account.data.parsed.info.mint === tokenMint && item.account.data.parsed.info.tokenAmount.uiAmount >= mostFound);
-                        if (cargoHoldFound) {
-                            starbasePlayerCargoHold = cargoHold;
-                            mostFound = cargoHoldFound.account.data.parsed.info.tokenAmount.uiAmount;
-                        }
-                    }
+					const cargoHoldFound = cargoHoldTokens.value.find(item => item.account.data.parsed.info.mint === tokenMint);
+					if(cargoHoldFound) cargoSources.push({
+						cargoPod: cargoHold.publicKey,
+						token: cargoHoldFound.pubkey,
+						amount: cargoHoldFound.account.data.parsed.info.tokenAmount.uiAmount
+					});
                 }
             }
 
-			if(alreadyLoadedInTransaction) {
-				mostFound = mostFound - alreadyLoadedInTransaction;
-			}
-
-			//amount = amount > mostFound ? mostFound : amount;
-			let orgAmount = amount;
-			if(globalSettings.starbaseKeep1) {
-				// don't close the token account; also prevents a race condition if a transporter loads and closes the account while a miner unloads in the same moment
-				amount = amount >= mostFound ? mostFound-1 : amount;
-			} else {
-				amount = amount > mostFound ? mostFound : amount;
-			}
+			const orgAmount = Math.max(0, Math.floor(Number(amount || 0)));
+			const sortedSources = cargoSources.slice().sort((left, right) => Number(right.amount || 0) - Number(left.amount || 0));
+			const plannedSources = loadAcrossCargoHolds ? sortedSources : sortedSources.slice(0, 1);
+			const loadPlan = planStarbaseCargoLoads(plannedSources, orgAmount, globalSettings.starbaseKeep1, alreadyLoadedInTransaction);
+			amount = loadPlan.amount;
 
 			//if (amount > 0) {
 			if ((!forceAmount && amount > 0) || (forceAmount && amount >= orgAmount)) {
@@ -11280,20 +11291,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				const tokenMintPK = new solanaWeb3.PublicKey(tokenMint)
 				await getAccountInfo(fleet.label, 'fleet cargo token', tokenTo) || await createPDA(tokenTo, cargoPodTo, tokenMintPK, fleet);
 
-				let [starbaseCargoToken] = await BrowserAnchor.anchor.web3.PublicKey.findProgramAddressSync(
-					[
-							starbasePlayerCargoHold.publicKey.toBuffer(),
-							tokenProgramPK.toBuffer(),
-							tokenMintPK.toBuffer()
-					],
-					programPK
-				);
-
-				//Get/create source account (why?)
-				//await getAccountInfo(fleet.label, 'Starbase cargo token', starbaseCargoToken) || await createPDA(starbaseCargoToken, starbasePlayerCargoHold.publicKey, new solanaWeb3.PublicKey(tokenMint), fleet);
-
-				//Build tx
-				let tx = { instruction: await sageProgram.methods.depositCargoToFleet({ amount: new BrowserAnchor.anchor.BN(amount), keyIndex: new BrowserAnchor.anchor.BN(userProfileKeyIdx) }).accountsStrict({
+				const transactions = [];
+				for(const plannedLoad of loadPlan.loads) {
+					let tx = { instruction: await sageProgram.methods.depositCargoToFleet({ amount: new BrowserAnchor.anchor.BN(plannedLoad.amount), keyIndex: new BrowserAnchor.anchor.BN(userProfileKeyIdx) }).accountsStrict({
 						gameAccountsFleetAndOwner: {
 								gameFleetAndOwner: {
 										fleetAndOwner: {
@@ -11311,37 +11311,42 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 								starbase: starbase.publicKey,
 								starbasePlayer: starbasePlayer.publicKey
 						},
-						cargoPodFrom: starbasePlayerCargoHold.publicKey,
+						cargoPodFrom: plannedLoad.cargoPod,
 						cargoPodTo: cargoPodTo,
 						cargoType: cargoType.publicKey,
 						cargoStatsDefinition: sageGameAcct.account.cargo.statsDefinition,
-						tokenFrom: starbaseCargoToken,
+						tokenFrom: plannedLoad.token,
 						tokenTo: tokenTo,
 						tokenMint: tokenMint,
 						cargoProgram: cargoProgramPK,
 						tokenProgram: tokenProgAddy
-				}).remainingAccounts([{
+					}).remainingAccounts([{
 						pubkey: starbase.publicKey,
 						isSigner: false,
 						isWritable: false
-				}]).instruction()}
+					}]).instruction()}
+					transactions.push(tx);
+				}
 
 				//Send tx
 				//txResult = {amount: amount, result: await txSignAndSend(tx, fleet, 'LOAD', 100)};
 				if(returnTx) {
-					tx.slyaCargoTelemetry = {
+					for(const [transactionIndex, tx] of transactions.entries()) tx.slyaCargoTelemetry = {
 						kind: 'load',
 						loadType: cargoPodTo == fleet.fuelTank ? 'fuel_in' : cargoPodTo == fleet.ammoBank ? 'ammo_in' : 'cargo_in',
 						mint: tokenMint,
 						rssName: cargoItems.find(r => r.token == tokenMint)?.name,
-						amount,
+						amount: loadPlan.loads[transactionIndex].amount,
 						starbase: validTargets.find(target => (target.x + ',' + target.y) == (starbaseX + ',' + starbaseY))?.name,
 						sectorX: starbaseX,
 						sectorY: starbaseY
 					};
-					txResult = {amount: amount, tx: tx };
+					txResult = {amount: amount, tx: transactions[0], transactions: transactions };
 				} else {
-					txResult = {amount: amount, result: await txSignAndSend(tx, fleet, 'LOAD', 100)};
+					const sendResult = transactions.length === 1
+						? await txSignAndSend(transactions[0], fleet, 'LOAD', 100)
+						: await txSliceAndSend(transactions, fleet, 'LOAD', 100, 5);
+					txResult = {amount: amount, result: sendResult};
 				}
 			}
 			else txResult = {name: "NotEnoughResource"};
@@ -13825,6 +13830,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	}
 
 
+	function isScanningStatusFleet(fleet) {
+		return !!fleet && fleet.assignment === 'Scan';
+	}
+
+
 	function updateAssistStatus(fleet) {
         let rowPK = fleet.publicKey ? fleet.publicKey.toString() : fleet.label;
 		let targetRow = document.querySelectorAll('#assistStatus .assist-fleet-row[pk="' + rowPK + '"]');
@@ -13832,10 +13842,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		if (targetRow.length > 0) {
 			const statusRow = targetRow[0];
 
-			if(fleet.publicKey) {
+			if(fleet.publicKey && isScanningStatusFleet(fleet)) {
 				setInnerHtmlIfChanged(statusRow.children[1].firstChild, fleet.foodCnt || 0);
 				setInnerHtmlIfChanged(statusRow.children[2].firstChild, fleet.sduCnt || 0);
 				setInnerHtmlIfChanged(statusRow.children[3].firstChild, fleet.state);
+			} else if(fleet.publicKey) {
+				setInnerHtmlIfChanged(statusRow.children[1].firstChild, fleet.state);
 			} else {
 				//targetRow[0].children[0].firstChild.innerHTML = fleet.label + " [" + fleet.coordinates + "]";
 				let target = fleet.craftingId ? validTargets.find(target => (target.x + ',' + target.y) == fleet.craftingCoords) : validTargets.find(target => (target.x + ',' + target.y) == fleet.coordinates);
@@ -13879,18 +13891,22 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			}
 			if(fleet.publicKey) {
 				fleetStatusTd.addEventListener('click', async() => { await resetFleetState(fleet); });
-				let fleetTool = document.createElement('span');
-				fleetTool.innerHTML = fleet.foodCnt || 0;
-				let fleetToolTd = document.createElement('td');
-				fleetToolTd.appendChild(fleetTool);
-				let fleetSdu = document.createElement('span');
-				fleetSdu.innerHTML = fleet.sduCnt || 0;
-				let fleetSduTd = document.createElement('td');
-				fleetSduTd.appendChild(fleetSdu);
 				fleetStatusTd.appendChild(fleetStatus);
 				fleetRow.appendChild(fleetLabelTd);
-				fleetRow.appendChild(fleetToolTd);
-				fleetRow.appendChild(fleetSduTd);
+				if(isScanningStatusFleet(fleet)) {
+					let fleetTool = document.createElement('span');
+					fleetTool.innerHTML = fleet.foodCnt || 0;
+					let fleetToolTd = document.createElement('td');
+					fleetToolTd.appendChild(fleetTool);
+					let fleetSdu = document.createElement('span');
+					fleetSdu.innerHTML = fleet.sduCnt || 0;
+					let fleetSduTd = document.createElement('td');
+					fleetSduTd.appendChild(fleetSdu);
+					fleetRow.appendChild(fleetToolTd);
+					fleetRow.appendChild(fleetSduTd);
+				} else {
+					fleetStatusTd.setAttribute('colspan', 3);
+				}
 				fleetRow.appendChild(fleetStatusTd);
 			} else {
 				fleetStatusTd.setAttribute('colspan', 3);
@@ -15750,7 +15766,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-283', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-284', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -18199,7 +18215,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						resMax,
 						false,
 						returnTx,
-						((returnTx && entry.alreadyLoadedInTransaction) ? entry.alreadyLoadedInTransaction : 0)
+						((returnTx && entry.alreadyLoadedInTransaction) ? entry.alreadyLoadedInTransaction : 0),
+						true
 					);
                     cLog(1,`${FleetTimeStamp(userFleets[i].label)} Loaded ${resp.amount} ${entry.res}: `, resp);
                     cargoSpace -= resp && resp.amount ? cargoItems.find(r => r.token == entry.res).size * resp.amount : 0;
@@ -18213,8 +18230,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						cLog(1,`${FleetTimeStamp(userFleets[i].label)} Not enough ${resShort}`);
 						notEnoughInfo += 'Not enough ' + resShort + '\n';
 					}
-					else if(returnTx && resp && resp.tx) {
-						transactions.push(resp.tx);
+					else if(returnTx && resp && resp.transactions) {
+						transactions.push(...(resp.transactions || []));
 					}
 				}
 
@@ -19931,6 +19948,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				userFleets.push({
 					publicKey: fleet.publicKey,
 					label: fleetLabel,
+					assignment: fleetParsedData.assignment || '',
 					state: fleetState,
 					exitWarpSubwarpPending: 0,
 					exitSubwarpWillBurnFuel: 0,

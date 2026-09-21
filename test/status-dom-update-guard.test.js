@@ -25,16 +25,16 @@ function extractFunction(source, name) {
   throw new Error(`Could not extract ${name}: unbalanced braces`);
 }
 
-function loadHelper(file) {
+function loadHelper(file, name = 'setInnerHtmlIfChanged') {
   const source = fs.readFileSync(path.join(ROOT, file), 'utf8');
-  const fnText = extractFunction(source, 'setInnerHtmlIfChanged');
+  const fnText = extractFunction(source, name);
   const context = {};
   vm.createContext(context);
   vm.runInContext(
-    `${fnText}\nthis.setInnerHtmlIfChanged = setInnerHtmlIfChanged;`,
+    `${fnText}\nthis.result = ${name};`,
     context,
   );
-  return context.setInnerHtmlIfChanged;
+  return context.result;
 }
 
 function makeFakeElement(initialHtml) {
@@ -84,5 +84,16 @@ for (const file of USERSCRIPTS) {
       assert.strictEqual(el.calls.setter, 0, 'numeric 12 vs existing "12" must not invoke the setter');
       assert.strictEqual(el.state.html, '12', 'innerHTML must remain "12"');
     }
+  });
+
+  test(`status fleet columns: ${file} keeps Food/SDUs only for scanning fleets`, () => {
+    const source = fs.readFileSync(path.join(ROOT, file), 'utf8');
+    const isScanningStatusFleet = loadHelper(file, 'isScanningStatusFleet');
+
+    assert.equal(isScanningStatusFleet({ assignment: 'Scan' }), true);
+    assert.equal(isScanningStatusFleet({ assignment: 'Transport' }), false);
+    assert.equal(isScanningStatusFleet({ assignment: 'Supply Chain' }), false);
+    assert.match(source, /fleet\.assignment === 'Scan'/);
+    assert.match(source, /fleetStatusTd\.setAttribute\('colspan', 3\)/);
   });
 }
