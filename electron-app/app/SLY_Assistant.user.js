@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-290
+// @aephia-version 0.7.35-291
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -12440,15 +12440,21 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	}
 
 	function transportSubwarpPrefToMoveType(subwarpPref) {
-		return subwarpPref == 4 ? 'automated' : (subwarpPref == 1 ? 'subwarp' : (subwarpPref == 2 ? 'warpsubwarp' : (subwarpPref == 3 ? 'warp-subwarp-warp' : 'warp')));
+		return subwarpPref == 5 ? 'warp-smart' : (subwarpPref == 4 ? 'automated' : (subwarpPref == 1 ? 'subwarp' : (subwarpPref == 2 ? 'warpsubwarp' : (subwarpPref == 3 ? 'warp-subwarp-warp' : 'warp'))));
 	}
 
 	function transportMoveTypeToSubwarpPref(moveType) {
+		if(moveType == 'warp-smart') return 5;
 		if(moveType == 'automated') return 4;
 		if(moveType == 'subwarp') return 1;
 		if(moveType == 'warpsubwarp') return 2;
 		if(moveType == 'warp-subwarp-warp') return 3;
 		return 0;
+	}
+
+	function resolveWarpSmartTravelMode(configuredMoveType, resumedRequiredLoadWait = false) {
+		if(configuredMoveType != 'warp-smart') return configuredMoveType;
+		return resumedRequiredLoadWait ? 'subwarp' : 'warp';
 	}
 
 	function calculateAutomatedTravelMode({ manifest = [], loadedCargo = [], cargoCapacity = 0, ammoCapacity = 0, fuelCapacity = 0, ammoMint = '', fuelMint = '', cargoSizes = {} }) {
@@ -12822,6 +12828,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const savedMoveType = configuredMoveType || moveType;
 		fleetParsedData.moveType = savedMoveType;
 		fleetParsedData.subwarpPref = transportMoveTypeToSubwarpPref(savedMoveType);
+		fleetParsedData.transportEffectiveMoveType = moveType;
 		fleetParsedData.moveTarget = moveTarget;
 		if(transportPlusRouteIndex !== null && !isNaN(transportPlusRouteIndex)) fleetParsedData.transportPlusRouteIndex = transportPlusRouteIndex;
 		await saveFleetConfig(fleetPK, fleetParsedData, 'assist-move-type');
@@ -13023,7 +13030,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let fleetSubwarpPref = document.createElement('select');
 			fleetSubwarpPref.style.width = '85px';
 			fleetSubwarpPref.style.display = fleetParsedData && fleetParsedData.assignment == 'Supply Chain' ? 'none' : 'inline-block';
-			fleetSubwarpPref.innerHTML = '<option value="4">Automated</option><option value="0">Warp</option><option value="1">Subwarp</option><option value="2">Warp(SB) / Subwarp</option><option value="3">Warp, Subwarp, Warp, ...</option>';
+			fleetSubwarpPref.innerHTML = '<option value="5">Warp Smart</option><option value="4">Automated</option><option value="0">Warp</option><option value="1">Subwarp</option><option value="2">Warp(SB) / Subwarp</option><option value="3">Warp, Subwarp, Warp, ...</option>';
 			if(fleetParsedData) { if(fleetParsedData.subwarpPref == 'false') fleetParsedData.subwarpPref=0; if(fleetParsedData.subwarpPref == 'true') fleetParsedData.subwarpPref=1; } // compatibility to old version
 			fleetSubwarpPref.value = fleetParsedData && fleetParsedData.subwarpPref ? fleetParsedData.subwarpPref : 0;
 			let fleetSubwarpPrefTd = document.createElement('td');
@@ -13488,7 +13495,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				let routeMoveType = document.createElement('select');
 				routeMoveType.classList.add('transport-plus-movetype');
 				routeMoveType.style.width = '110px';
-				routeMoveType.innerHTML = '<option value="4">Automated</option><option value="0">Warp</option><option value="1">Subwarp</option><option value="2">Warp(SB) / Subwarp</option><option value="3">Warp, Subwarp, Warp, ...</option>';
+				routeMoveType.innerHTML = '<option value="5">Warp Smart</option><option value="4">Automated</option><option value="0">Warp</option><option value="1">Subwarp</option><option value="2">Warp(SB) / Subwarp</option><option value="3">Warp, Subwarp, Warp, ...</option>';
 				routeMoveType.value = routeData.subwarpPref || 0;
 
 				routeHeader.appendChild(routeLabel);
@@ -15906,7 +15913,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-290', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-291', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -17003,6 +17010,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			if(configuredMoveType == 'automated') {
 				userFleets[i].moveType = await resolveAutomatedTravelMode(userFleets[i], destinationManifest);
 				userFleets[i].automatedTravelMoveType = userFleets[i].moveType;
+			} else if(configuredMoveType == 'warp-smart') {
+				userFleets[i].moveType = resolveWarpSmartTravelMode(configuredMoveType, false);
 			}
 
 			// Loaded cargo proves which leg was prepared, but it does not prove the
@@ -17063,6 +17072,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let effectiveMoveType = leg.moveType || userFleets[i].moveType;
 			const configuredMoveType = leg.configuredMoveType || effectiveMoveType;
 			if(effectiveMoveType == 'automated') effectiveMoveType = await resolveAutomatedTravelMode(userFleets[i], leg.destinationManifest || []);
+			else effectiveMoveType = resolveWarpSmartTravelMode(effectiveMoveType, false);
 			userFleets[i].moveType = effectiveMoveType;
 			await persistFleetTransportRouteState(i, effectiveMoveType, leg.destCoord, leg.routeIndex, configuredMoveType);
 			cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${logPrefix} - recovered route to ${leg.destCoord} (${recovery.reason})`);
@@ -17215,7 +17225,15 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
         const fleetParsedData = JSON.parse(await GM.getValue(userFleets[i].publicKey.toString(), '{}'));
 		const configuredMoveType = transportSubwarpPrefToMoveType(fleetParsedData.subwarpPref || 0);
+		const resumedRequiredLoadWait = configuredMoveType == 'warp-smart' && !!String(userFleets[i].transportLoadRetryResource || '');
 		if(configuredMoveType == 'automated') userFleets[i].moveType = 'warp';
+		else if(configuredMoveType == 'warp-smart') {
+			const persistedEffectiveMoveType = String(fleetParsedData.transportEffectiveMoveType || '');
+			const hasPersistedMoveTarget = !!String(fleetParsedData.moveTarget || '').trim();
+			userFleets[i].moveType = hasPersistedMoveTarget && ['warp', 'subwarp'].includes(persistedEffectiveMoveType)
+				? persistedEffectiveMoveType
+				: resolveWarpSmartTravelMode(configuredMoveType, false);
+		}
 		const targetTotalContext = getLegacyTransportTotalContext('transportResource1', userFleets[i].starbaseCoord, userFleets[i].destCoord);
 		const starbaseTotalContext = getLegacyTransportTotalContext('transportSBResource1', userFleets[i].starbaseCoord, userFleets[i].destCoord);
         let targetCargoManifest = [
@@ -17421,8 +17439,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				if(configuredMoveType == 'automated') {
 					userFleets[i].moveType = await resolveAutomatedTravelMode(userFleets[i], targetTotalManifest);
 					userFleets[i].automatedTravelMoveType = userFleets[i].moveType;
+				} else if(configuredMoveType == 'warp-smart') {
+					userFleets[i].moveType = resolveWarpSmartTravelMode(configuredMoveType, resumedRequiredLoadWait);
 				}
-                userFleets[i].moveTarget = userFleets[i].destCoord;
+                if(configuredMoveType == 'warp-smart') await persistFleetTransportRouteState(i, userFleets[i].moveType, userFleets[i].destCoord, null, configuredMoveType);
+                else userFleets[i].moveTarget = userFleets[i].destCoord;
                 userFleets[i].resupplying = false;
                 cLog(3,`${FleetTimeStamp(userFleets[i].label)} userFleets[i]: `, userFleets[i]);
             }
@@ -17595,8 +17616,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				if(configuredMoveType == 'automated') {
 					userFleets[i].moveType = await resolveAutomatedTravelMode(userFleets[i], starbaseTotalManifest);
 					userFleets[i].automatedTravelMoveType = userFleets[i].moveType;
+				} else if(configuredMoveType == 'warp-smart') {
+					userFleets[i].moveType = resolveWarpSmartTravelMode(configuredMoveType, resumedRequiredLoadWait);
 				}
-                userFleets[i].moveTarget = userFleets[i].starbaseCoord;
+                if(configuredMoveType == 'warp-smart') await persistFleetTransportRouteState(i, userFleets[i].moveType, userFleets[i].starbaseCoord, null, configuredMoveType);
+                else userFleets[i].moveTarget = userFleets[i].starbaseCoord;
                 userFleets[i].resupplying = false;
                 cLog(3,`${FleetTimeStamp(userFleets[i].label)} userFleets[i]: `, userFleets[i]);
             }
@@ -17704,7 +17728,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const sourceCoords = ConvertCoords(sourceCoord);
 		const destCoords = ConvertCoords(destCoord);
 		const configuredMoveType = moveType;
-		userFleets[i].moveType = configuredMoveType == 'automated' ? 'warp' : configuredMoveType;
+		const resumedRequiredLoadWait = configuredMoveType == 'warp-smart' && !!String(userFleets[i].transportLoadRetryResource || '');
+		userFleets[i].moveType = configuredMoveType == 'automated' ? 'warp' : resolveWarpSmartTravelMode(configuredMoveType, false);
 		userFleets[i].resupplying = true;
 
 		let sourceCargoManifest = cloneTransportManifest(currentManifest);
@@ -17862,6 +17887,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		if(configuredMoveType == 'automated') {
 			userFleets[i].moveType = await resolveAutomatedTravelMode(userFleets[i], destinationTotalManifest);
 			userFleets[i].automatedTravelMoveType = userFleets[i].moveType;
+		} else if(configuredMoveType == 'warp-smart') {
+			userFleets[i].moveType = resolveWarpSmartTravelMode(configuredMoveType, resumedRequiredLoadWait);
 		}
 		await persistFleetTransportRouteState(i, userFleets[i].moveType, destCoord, routeIndex, configuredMoveType);
 		userFleets[i].resupplying = false;
@@ -17913,7 +17940,13 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				}
 				if(!activeLeg) activeLeg = transportPlusLegs.find(route => CoordsEqual(ConvertCoords(route.destCoord), activeMoveTargetCoords));
 				if(activeLeg) {
-					userFleets[i].moveType = activeLeg.moveType == 'automated' ? (userFleets[i].automatedTravelMoveType || 'subwarp') : activeLeg.moveType;
+					if(activeLeg.moveType == 'automated') userFleets[i].moveType = userFleets[i].automatedTravelMoveType || 'subwarp';
+					else if(activeLeg.moveType == 'warp-smart') {
+						const persistedEffectiveMoveType = String(fleetParsedData.transportEffectiveMoveType || '');
+						userFleets[i].moveType = ['warp', 'subwarp'].includes(userFleets[i].moveType)
+							? userFleets[i].moveType
+							: (['warp', 'subwarp'].includes(persistedEffectiveMoveType) ? persistedEffectiveMoveType : 'warp');
+					} else userFleets[i].moveType = activeLeg.moveType;
 					userFleets[i].moveTarget = activeMoveTarget;
 					userFleets[i].transportPlusRouteIndex = activeLeg.routeIndex;
 				}
