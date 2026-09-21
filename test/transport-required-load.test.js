@@ -106,13 +106,15 @@ test('required-load retry is one minute and uses the concise activity text', () 
   assert.doesNotMatch(source, /Waiting for \$\{resourceName\}.*retrying/i);
 });
 
-test('required-load retry has an independent per-fleet wake timer and cancels it when cleared', () => {
+test('required-load retry has an independent recurring per-fleet wake timer and cancels it when cleared', () => {
   const source = readSource();
   assert.match(source, /const transportLoadRetryTimers = new Map\(\);/);
   assert.match(source, /function armTransportLoadRetryTimer\(fleet, retryAt\)/);
+  assert.match(source, /function ensureTransportLoadRetryTimer\(fleet\)/);
   assert.match(source, /setTimeout\(async \(\) =>[\s\S]*?startFleet\(fleetIndex, false, 'transport-load-retry'\)/);
   assert.match(source, /scheduleTransportLoadRetry[\s\S]*?armTransportLoadRetryTimer\(fleet, fleet\.transportLoadRetryAt\)/);
   assert.match(source, /clearTransportLoadRetry[\s\S]*?clearTransportLoadRetryTimer\(fleet\)/);
+  assert.match(source, /finally \{[\s\S]*?ensureTransportLoadRetryTimer\(fleet\)/);
 });
 
 test('fleet operation single-flight prevents overlapping wake and normal-loop work', () => {
@@ -173,6 +175,57 @@ test('independent retry timer dispatches once and defers safely while fleet work
   assert.deepEqual(starts, []);
   assert.equal(diagnostics.at(-1).phase, 'retry-wake-blocked');
   assert.equal(scheduled.at(-1).delay, 5000);
+});
+
+test('retry lifecycle re-arms every 60 seconds while the same required-load wait remains', () => {
+  let now = 1000;
+  const scheduled = [];
+  const diagnostics = [];
+  const fleet = {
+    label: 'CF-05|06',
+    state: 'Waiting for Copper Ore',
+    transportLoadRetryAt: 0,
+    transportLoadRetryResource: 'Copper Ore',
+    publicKey: { toString: () => 'fleet-pk' },
+  };
+  const context = vm.createContext({
+    Date: { now: () => now },
+    userFleets: [fleet],
+    enableAssistant: true,
+    TRANSPORT_LOAD_RETRY_DELAY_MS: 60000,
+    transportLoadRetryTimers: new Map(),
+    fleetOperationInFlight: new Set(),
+    setTimeout(callback, delay) {
+      const timer = { callback, delay };
+      scheduled.push(timer);
+      return timer;
+    },
+    clearTimeout() {},
+    recordTransportLoadDiagnostic(_fleet, patch) { diagnostics.push(patch); },
+    async startFleet() {},
+  });
+  vm.runInContext([
+    readFunctionSource('getTransportFleetRuntimeKey'),
+    readFunctionSource('clearTransportLoadRetryTimer'),
+    readFunctionSource('armTransportLoadRetryTimer'),
+    readFunctionSource('ensureTransportLoadRetryTimer'),
+    'this.ensure = ensureTransportLoadRetryTimer;',
+  ].join('\n'), context);
+
+  assert.equal(context.ensure(fleet), true);
+  assert.equal(scheduled.at(-1).delay, 60000);
+  assert.equal(fleet.transportLoadRetryAt, 61000);
+  assert.equal(diagnostics.at(-1).phase, 'retry-rearmed');
+
+  assert.equal(context.ensure(fleet), false, 'an already armed wait must not duplicate its timer');
+  assert.equal(scheduled.length, 1);
+
+  fleet.state = 'Idle';
+  fleet.transportLoadRetryAt = 0;
+  context.transportLoadRetryTimers.clear();
+  now += 60000;
+  assert.equal(context.ensure(fleet), false, 'a resolved wait must not re-arm');
+  assert.equal(scheduled.length, 1);
 });
 
 test('transport diagnostics expose every required-load threshold', () => {

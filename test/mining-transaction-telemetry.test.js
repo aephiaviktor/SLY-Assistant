@@ -86,5 +86,5 @@ test('standalone and Electron userscript copies remain byte-identical', () => {
 
 test('feature does not change userscript version metadata', () => {
   assert.match(source, /^\/\/ @version\s+0\.7\.35$/m);
-  assert.match(source, /^\/\/ @aephia-version\s+0\.7\.35-287$/m);
+  assert.match(source, /^\/\/ @aephia-version\s+0\.7\.35-288$/m);
 });
