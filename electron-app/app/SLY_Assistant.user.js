@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-284
+// @aephia-version 0.7.35-285
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -11221,6 +11221,16 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		await getAccountInfo(fleet.label, 'fleet fuel token', fleet.fuelToken) || await createPDA(fleet.fuelToken, fleet.fuelTank, new solanaWeb3.PublicKey(fuelItem.token), fleet);
 	}
 
+	function collectStarbaseCargoSources(cargoPod, parsedTokenAccounts, tokenMint) {
+		return ((parsedTokenAccounts && parsedTokenAccounts.value) || [])
+			.filter(item => item && item.account && item.account.data && item.account.data.parsed && item.account.data.parsed.info && item.account.data.parsed.info.mint === tokenMint)
+			.map(item => ({
+				cargoPod,
+				token: item.pubkey,
+				amount: item.account.data.parsed.info.tokenAmount.uiAmount
+			}));
+	}
+
 	function planStarbaseCargoLoads(sources, requestedAmount, keepOne, reservedAmount) {
 		const requested = Math.max(0, Math.floor(Number(requestedAmount || 0)));
 		let remaining = requested;
@@ -11270,12 +11280,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			await influxStarbaseCargoHold(starbaseX,starbaseY,cargoHoldTokens);
                     }
 
-					const cargoHoldFound = cargoHoldTokens.value.find(item => item.account.data.parsed.info.mint === tokenMint);
-					if(cargoHoldFound) cargoSources.push({
-						cargoPod: cargoHold.publicKey,
-						token: cargoHoldFound.pubkey,
-						amount: cargoHoldFound.account.data.parsed.info.tokenAmount.uiAmount
-					});
+					cargoSources.push(...collectStarbaseCargoSources(cargoHold.publicKey, cargoHoldTokens, tokenMint));
                 }
             }
 
@@ -15766,7 +15771,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-284', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-285', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),

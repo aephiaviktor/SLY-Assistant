@@ -109,6 +109,31 @@ test('fuel and ammo loading account for the amount actually available', () => {
   assert.match(source, /amountLoaded = Math\.max\(0, Number\(resp && resp\.amount \|\| 0\)\);/);
 });
 
+test('starbase cargo discovery keeps every matching token account in the same cargo pod', () => {
+  const collectStarbaseCargoSources = loadFunction('collectStarbaseCargoSources');
+  const result = collectStarbaseCargoSources('pod-a', {
+    value: [
+      {
+        pubkey: 'copper-small',
+        account: { data: { parsed: { info: { mint: 'copper', tokenAmount: { uiAmount: 17522 } } } } },
+      },
+      {
+        pubkey: 'carbon',
+        account: { data: { parsed: { info: { mint: 'carbon', tokenAmount: { uiAmount: 1 } } } } },
+      },
+      {
+        pubkey: 'copper-large',
+        account: { data: { parsed: { info: { mint: 'copper', tokenAmount: { uiAmount: 79000 } } } } },
+      },
+    ],
+  }, 'copper');
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), [
+    { cargoPod: 'pod-a', token: 'copper-small', amount: 17522 },
+    { cargoPod: 'pod-a', token: 'copper-large', amount: 79000 },
+  ]);
+});
+
 test('required transport load can satisfy the remaining amount across multiple starbase cargo pods', () => {
   const planStarbaseCargoLoads = loadFunction('planStarbaseCargoLoads');
   const result = planStarbaseCargoLoads([
