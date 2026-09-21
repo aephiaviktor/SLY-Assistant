@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-286
+// @aephia-version 0.7.35-287
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -112,6 +112,8 @@
 	const craftPollRuntime = new Map();
 	const craftPollGeneration = new Map();
 	const transportLoadDiagnostics = new Map();
+	const transportLoadRetryTimers = new Map();
+	const fleetOperationInFlight = new Set();
 	let transportLoadDiagnosticRenderTimer = null;
 	let craftTransactionInFlightCount = 0;
 	const settingsGmKey = 'globalSettings';
@@ -7194,7 +7196,7 @@
 				).join('\n  ');
 				const text =
 					'fleet=' + String(row.fleet || '-') + ' state=' + String(row.state || '-') + ' updated=' + (row.updatedAt ? new Date(row.updatedAt).toISOString() : '-') + '\n' +
-					'phase=' + String(row.phase || '-') + ' gate=' + String(row.gate || '-') + ' retryAt=' + (retryAt ? new Date(retryAt).toISOString() : '-') + ' retryRemainingMs=' + Math.floor(retryRemainingMs) + '\n' +
+					'phase=' + String(row.phase || '-') + ' gate=' + String(row.gate || '-') + ' retryAt=' + (retryAt ? new Date(retryAt).toISOString() : '-') + ' retryRemainingMs=' + Math.floor(retryRemainingMs) + ' wake=' + String(row.wake || '-') + ' inFlight=' + (!!row.inFlight) + '\n' +
 					'resource=' + String(row.resource || '-') + ' mint=' + String(row.mint || row.blockingMint || '-') + '\n' +
 					'requested=' + Math.floor(Number(row.requested || 0)) + ' starbaseTotal=' + Math.floor(Number(row.starbaseTotal || 0)) + ' starbaseUsable=' + Math.floor(Number(row.starbaseUsable || 0)) + ' reserved=' + Math.floor(Number(row.reserved || 0)) + ' keepOne=' + (!!row.keepOne) + '\n' +
 					'planned=' + Math.floor(Number(row.planned || 0)) + ' planRemaining=' + Math.floor(Number(row.planRemaining || 0)) + ' instructions=' + Math.floor(Number(row.instructionCount || 0)) + ' submittedInstructions=' + Math.floor(Number(row.submissionInstructionCount || 0)) + ' result=' + String(row.result || '-') + '\n' +
@@ -14172,8 +14174,44 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		};
 	}
 
+	function getTransportFleetRuntimeKey(fleet) {
+		return fleet && fleet.publicKey ? fleet.publicKey.toString() : String(fleet?.label || 'unknown');
+	}
+
+	function clearTransportLoadRetryTimer(fleet) {
+		const fleetKey = getTransportFleetRuntimeKey(fleet);
+		const timer = transportLoadRetryTimers.get(fleetKey);
+		if(typeof timer !== 'undefined') clearTimeout(timer);
+		transportLoadRetryTimers.delete(fleetKey);
+	}
+
+	function armTransportLoadRetryTimer(fleet, retryAt) {
+		if(!fleet || !(Number(retryAt || 0) > 0)) return false;
+		const fleetKey = getTransportFleetRuntimeKey(fleet);
+		clearTransportLoadRetryTimer(fleet);
+		const delayMs = Math.max(0, Number(retryAt) - Date.now());
+		const timer = setTimeout(async () => {
+			transportLoadRetryTimers.delete(fleetKey);
+			const fleetIndex = userFleets.indexOf(fleet);
+			if(fleetIndex < 0 || !enableAssistant) {
+				recordTransportLoadDiagnostic(fleet, { phase: 'retry-wake-skipped', wake: fleetIndex < 0 ? 'fleet-missing' : 'assistant-stopped', wakeAt: Date.now() });
+				return;
+			}
+			if(fleetOperationInFlight.has(fleetKey)) {
+				recordTransportLoadDiagnostic(fleet, { phase: 'retry-wake-blocked', wake: 'in-flight', inFlight: true, wakeAt: Date.now() });
+				armTransportLoadRetryTimer(fleet, Date.now() + 5000);
+				return;
+			}
+			recordTransportLoadDiagnostic(fleet, { phase: 'retry-wake-dispatched', wake: 'dispatched', inFlight: false, wakeAt: Date.now() });
+			await startFleet(fleetIndex, false, 'transport-load-retry');
+		}, delayMs);
+		transportLoadRetryTimers.set(fleetKey, timer);
+		return true;
+	}
+
 	function clearTransportLoadRetry(fleet) {
 		if(!fleet) return;
+		clearTransportLoadRetryTimer(fleet);
 		fleet.transportLoadRetryAt = 0;
 		fleet.transportLoadRetryResource = '';
 	}
@@ -14182,6 +14220,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		if(!fleet || !resourceName) return false;
 		fleet.transportLoadRetryAt = Date.now() + TRANSPORT_LOAD_RETRY_DELAY_MS;
 		fleet.transportLoadRetryResource = resourceName;
+		armTransportLoadRetryTimer(fleet, fleet.transportLoadRetryAt);
 		recordTransportLoadDiagnostic(fleet, {
 			phase: 'retry-scheduled',
 			gate: 'cooldown',
@@ -15890,7 +15929,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-286', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-287', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -18557,7 +18596,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			return;
 		}
 		if(transportLoadRetry) {
-			userFleets[i].transportLoadRetryAt = 0;
+			clearTransportLoadRetry(userFleets[i]);
 			recordTransportLoadDiagnostic(userFleets[i], {
 				phase: 'retry-gate',
 				gate: 'open',
@@ -18700,12 +18739,20 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		}
 	}
 
-	async function startFleet(i) {
+	async function startFleet(i, scheduleNext = true, trigger = 'loop') {
 		//Bail if assistant is stopped
 		if (!enableAssistant) return;
 
 		let extraTime = 0;
 		const fleet = userFleets[i];
+		if(!fleet) return;
+		const fleetKey = getTransportFleetRuntimeKey(fleet);
+		if(fleetOperationInFlight.has(fleetKey)) {
+			if(trigger === 'transport-load-retry') recordTransportLoadDiagnostic(fleet, { phase: 'retry-wake-blocked', wake: 'in-flight', inFlight: true, wakeAt: Date.now() });
+			if(scheduleNext) setTimeout(() => { startFleet(i); }, 10000);
+			return;
+		}
+		fleetOperationInFlight.add(fleetKey);
 
 		try {
 			//cLog(1,`${FleetTimeStamp(userFleets[i].label)} Operating fleet ...`);
@@ -18740,9 +18787,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			fleet.fontColor = 'crimson';
 			updateAssistStatus(fleet);
 		}
-
-		//Add extra wait time if an uncaught error occurred
-		setTimeout(() => { startFleet(i); }, 10000 + extraTime);
+		finally {
+			fleetOperationInFlight.delete(fleetKey);
+			//Add extra wait time if an uncaught error occurred. Dedicated retry wakes
+			//never create a second recurring fleet loop.
+			if(scheduleNext) setTimeout(() => { startFleet(i); }, 10000 + extraTime);
+		}
 	}
 
     async function getStarbasePlayerCargoHolds(starbasePlayer) {
