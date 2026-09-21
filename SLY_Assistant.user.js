@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-285
+// @aephia-version 0.7.35-286
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -111,6 +111,8 @@
 	const CRAFT_WATCHDOG_LAST_RELOAD_KEY = 'craftWatchdogLastReloadAt';
 	const craftPollRuntime = new Map();
 	const craftPollGeneration = new Map();
+	const transportLoadDiagnostics = new Map();
+	let transportLoadDiagnosticRenderTimer = null;
 	let craftTransactionInFlightCount = 0;
 	const settingsGmKey = 'globalSettings';
 	const UPGRADE_AUTOMATION_LOG_KEY = 'upgradeAutomationLog';
@@ -7162,6 +7164,47 @@
 			return html;
 		}
 
+		function buildTransportLoadDebugRowsHtml() {
+			const rows = Array.from(transportLoadDiagnostics.values())
+				.sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))
+				.slice(0, 12);
+			if(!rows.length) return '<tr><td colspan="8" style="font-family:monospace;opacity:0.72;white-space:pre-wrap;">No transport load diagnostic has been captured yet.</td></tr>';
+			return rows.map(row => {
+				const retryAt = Number(row.retryAt || 0);
+				const retryRemainingMs = retryAt > 0 ? Math.max(0, retryAt - Date.now()) : 0;
+				const sources = (row.sources || []).map(source =>
+					'amount=' + Math.floor(Number(source.amount || 0)) + ' token=' + String(source.token || '-') + ' pod=' + String(source.cargoPod || '-')
+				).join('\n  ');
+				const plannedLoads = (row.plannedLoads || []).map(load =>
+					'amount=' + Math.floor(Number(load.amount || 0)) + ' token=' + String(load.token || '-') + ' pod=' + String(load.cargoPod || '-')
+				).join('\n  ');
+				const thresholds = (row.thresholds || []).map(threshold =>
+					'mint=' + String(threshold.res || '-') +
+					' required=' + Math.floor(Number(threshold.required || 0)) +
+					' chainAboard=' + Math.floor(Number(threshold.chainAboard ?? threshold.aboard ?? 0)) +
+					' projectedAboard=' + Math.floor(Number(threshold.aboard || 0)) +
+					' missing=' + Math.floor(Number(threshold.missing || 0)) +
+					' requiredLoad=' + (!!threshold.requiredLoad) +
+					' cargoSize=' + Number(threshold.cargoSize || 1) +
+					' cargoSpace=' + Math.floor(Number(threshold.cargoSpace || 0)) +
+					' dedicatedFree=' + Math.floor(Number(threshold.dedicatedFree || 0)) +
+					' compatibleFree=' + Math.floor(Number(threshold.compatibleFree || 0)) +
+					' thresholdMet=' + (!!threshold.thresholdMet) +
+					' departureBlocked=' + (!!threshold.departureBlocked)
+				).join('\n  ');
+				const text =
+					'fleet=' + String(row.fleet || '-') + ' state=' + String(row.state || '-') + ' updated=' + (row.updatedAt ? new Date(row.updatedAt).toISOString() : '-') + '\n' +
+					'phase=' + String(row.phase || '-') + ' gate=' + String(row.gate || '-') + ' retryAt=' + (retryAt ? new Date(retryAt).toISOString() : '-') + ' retryRemainingMs=' + Math.floor(retryRemainingMs) + '\n' +
+					'resource=' + String(row.resource || '-') + ' mint=' + String(row.mint || row.blockingMint || '-') + '\n' +
+					'requested=' + Math.floor(Number(row.requested || 0)) + ' starbaseTotal=' + Math.floor(Number(row.starbaseTotal || 0)) + ' starbaseUsable=' + Math.floor(Number(row.starbaseUsable || 0)) + ' reserved=' + Math.floor(Number(row.reserved || 0)) + ' keepOne=' + (!!row.keepOne) + '\n' +
+					'planned=' + Math.floor(Number(row.planned || 0)) + ' planRemaining=' + Math.floor(Number(row.planRemaining || 0)) + ' instructions=' + Math.floor(Number(row.instructionCount || 0)) + ' submittedInstructions=' + Math.floor(Number(row.submissionInstructionCount || 0)) + ' result=' + String(row.result || '-') + '\n' +
+					'sources=' + (sources ? '\n  ' + sources : ' none') + '\n' +
+					'plannedLoads=' + (plannedLoads ? '\n  ' + plannedLoads : ' none') + '\n' +
+					'thresholds=' + (thresholds ? '\n  ' + thresholds : ' none');
+				return '<tr><td colspan="8" style="font-family:monospace;white-space:pre-wrap;overflow-wrap:anywhere;opacity:0.82">' + escapeAephiaHtml(text) + '</td></tr>';
+			}).join('');
+		}
+
 		function renderLpAutomationContent() {
 		let content = '';
 		const openSection = extraClass => '<div class="lp-auto-section' + (extraClass ? ' ' + extraClass : '') + '"><table class="lp-auto-section-table lp-auto-summary-table">';
@@ -7206,6 +7249,12 @@
 			const selectedMaxPhantomCrew = globalSettings.upgradeAutomationMaxPhantomCrew != null ? Math.max(0, parseIntDefault(globalSettings.upgradeAutomationMaxPhantomCrew, 0)) : currentPhantomCrew;
 			const phantomCrewUnlimited = globalSettings.upgradeAutomationPhantomCrewUnlimited != null ? !!globalSettings.upgradeAutomationPhantomCrewUnlimited : true;
 			content += '<tr><td>Phantom Crew Unlimited</td><td align="right"><input id="phantomCrewUnlimitedToggle" type="checkbox" ' + (phantomCrewUnlimited ? 'checked' : '') + '></td><td style="white-space:nowrap; text-align:left;">Max <input id="upgradeAutomationMaxPhantomCrew" type="number" min="0" step="1" value="' + selectedMaxPhantomCrew + '" style="width:58px" ' + (phantomCrewUnlimited ? 'disabled' : '') + '></td><td></td><td></td><td></td></tr>';
+			content += closeSection;
+			content += '<div class="lp-auto-section-gap"></div>';
+
+			content += openSection('lp-auto-transport-debug');
+			content += '<tr style="opacity:0.66"><td colspan="8"><b>Transport Load Debugger</b><br><small>Live 60-second retry gate, discovered balances, load plan, and every departure threshold.</small></td></tr>';
+			content += buildTransportLoadDebugRowsHtml();
 			content += closeSection;
 			content += '<div class="lp-auto-section-gap"></div>';
 
@@ -11288,7 +11337,23 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const sortedSources = cargoSources.slice().sort((left, right) => Number(right.amount || 0) - Number(left.amount || 0));
 			const plannedSources = loadAcrossCargoHolds ? sortedSources : sortedSources.slice(0, 1);
 			const loadPlan = planStarbaseCargoLoads(plannedSources, orgAmount, globalSettings.starbaseKeep1, alreadyLoadedInTransaction);
+			const starbaseUsableBeforeReservation = plannedSources.reduce((sum, source) => sum + Math.max(0, Math.floor(Number(source.amount || 0)) - (globalSettings.starbaseKeep1 ? 1 : 0)), 0);
 			amount = loadPlan.amount;
+			recordTransportLoadDiagnostic(fleet, {
+				phase: 'load-plan',
+				mint: tokenMint,
+				resource: cargoItems.find(item => item.token === tokenMint)?.name || tokenMint,
+				requested: orgAmount,
+				reserved: Math.max(0, Math.floor(Number(alreadyLoadedInTransaction || 0))),
+				keepOne: !!globalSettings.starbaseKeep1,
+				starbaseTotal: sortedSources.reduce((sum, source) => sum + Math.max(0, Number(source.amount || 0)), 0),
+				starbaseUsable: Math.max(0, starbaseUsableBeforeReservation - Math.max(0, Math.floor(Number(alreadyLoadedInTransaction || 0)))),
+				sources: sortedSources.map(source => ({ cargoPod: String(source.cargoPod || ''), token: String(source.token || ''), amount: Math.max(0, Number(source.amount || 0)) })),
+				planned: loadPlan.amount,
+				planRemaining: loadPlan.remaining,
+				plannedLoads: loadPlan.loads.map(load => ({ cargoPod: String(load.cargoPod || ''), token: String(load.token || ''), amount: load.amount })),
+				instructionCount: loadPlan.loads.length
+			});
 
 			//if (amount > 0) {
 			if ((!forceAmount && amount > 0) || (forceAmount && amount >= orgAmount)) {
@@ -11355,6 +11420,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				}
 			}
 			else txResult = {name: "NotEnoughResource"};
+			recordTransportLoadDiagnostic(fleet, {
+				phase: txResult.name === 'NotEnoughResource' ? 'not-enough-resource' : (returnTx ? 'instructions-built' : (fleet.state.includes('ERROR') ? 'load-failed' : 'load-confirmed')),
+				result: txResult.name || (returnTx ? 'pending-bundle' : (fleet.state.includes('ERROR') ? fleet.state : 'confirmed')),
+				submissionInstructionCount: Array.isArray(txResult.transactions) ? txResult.transactions.length : (txResult.tx ? 1 : loadPlan.loads.length)
+			});
 
 			resolve(txResult);
 
@@ -12549,6 +12619,48 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			if(cargoRoom + dedicatedRoom > 0) return { entryIndex, res: entry.res, missing: required - carried };
 		}
 		return null;
+	}
+
+	function buildTransportRequiredLoadThresholds(manifest, cargoAmounts, cargoSpace, cargoSizes, extraFreeByResource) {
+		extraFreeByResource = extraFreeByResource || {};
+		return (manifest || [])
+			.map((entry, entryIndex) => ({ entry, entryIndex }))
+			.filter(({entry}) => entry && entry.res && Number(entry.amt || 0) > 0)
+			.map(({entry, entryIndex}) => {
+				const required = Math.max(0, Math.floor(Number(entry.amt || 0)));
+				const aboard = Math.max(0, Math.floor(Number((cargoAmounts || {})[entry.res] || 0)));
+				const missing = Math.max(0, required - aboard);
+				const requiredLoad = !!entry.cargoTotal;
+				const cargoSize = Math.max(1, Number((cargoSizes || {})[entry.res] || 1));
+				const cargoRoom = Math.max(0, Math.floor(Number(cargoSpace || 0) / cargoSize));
+				const dedicatedFree = Math.max(0, Math.floor(Number(extraFreeByResource[entry.res] || 0)));
+				const compatibleFree = cargoRoom + dedicatedFree;
+				const thresholdMet = missing <= 0;
+				return { entryIndex, res: entry.res, required, aboard, missing, requiredLoad, cargoSize, cargoSpace: Math.max(0, Number(cargoSpace || 0)), dedicatedFree, compatibleFree, thresholdMet, departureBlocked: requiredLoad && !thresholdMet && compatibleFree > 0 };
+			});
+	}
+
+	function recordTransportLoadDiagnostic(fleet, patch) {
+		if(!fleet) return;
+		const key = fleet.publicKey ? fleet.publicKey.toString() : String(fleet.label || 'unknown');
+		const previous = transportLoadDiagnostics.get(key) || {};
+		transportLoadDiagnostics.set(key, {
+			...previous,
+			...(patch || {}),
+			key,
+			fleet: String(fleet.label || key),
+			state: String(fleet.state || ''),
+			updatedAt: Date.now()
+		});
+		try {
+			const panel = document.querySelector('#assistLpAutomation');
+			if(panel && panel.style.display !== 'none' && !transportLoadDiagnosticRenderTimer) {
+				transportLoadDiagnosticRenderTimer = setTimeout(() => {
+					transportLoadDiagnosticRenderTimer = null;
+					renderLpAutomationContent();
+				}, 100);
+			}
+		} catch(e) {}
 	}
 
 	function applyTransportLoadedTotals(manifest, loadedCargo, loadedCrew) {
@@ -14070,6 +14182,13 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		if(!fleet || !resourceName) return false;
 		fleet.transportLoadRetryAt = Date.now() + TRANSPORT_LOAD_RETRY_DELAY_MS;
 		fleet.transportLoadRetryResource = resourceName;
+		recordTransportLoadDiagnostic(fleet, {
+			phase: 'retry-scheduled',
+			gate: 'cooldown',
+			resource: resourceName,
+			retryAt: fleet.transportLoadRetryAt,
+			retryDelayMs: TRANSPORT_LOAD_RETRY_DELAY_MS
+		});
 		updateFleetState(fleet, `Waiting for ${resourceName}`, true);
 		return true;
 	}
@@ -15771,7 +15890,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-285', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-286', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -16709,9 +16828,14 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		if(transactions.length < 1) return { transactions, flushed: false };
 
 		cLog(1,`${FleetTimeStamp(fleet.label)} Split bundled load/unload ${reason}`);
+		recordTransportLoadDiagnostic(fleet, { phase: 'submitting-bundle', result: 'submitting', bundleReason: reason, bundleInstructionCount: transactions.length });
 		updateFleetState(fleet, 'Exec tx bundle');
 		await txSliceAndSend(transactions, fleet, 'LOAD/UNLOAD', 100, 5);
-		if(fleet.state.includes('ERROR')) return { transactions: [], flushed: true, error: true };
+		if(fleet.state.includes('ERROR')) {
+			recordTransportLoadDiagnostic(fleet, { phase: 'bundle-failed', result: fleet.state, bundleReason: reason, bundleInstructionCount: transactions.length });
+			return { transactions: [], flushed: true, error: true };
+		}
+		recordTransportLoadDiagnostic(fleet, { phase: 'bundle-confirmed', result: 'confirmed', bundleReason: reason, bundleInstructionCount: transactions.length });
 
 		await wait(1000);
 		if(nextState) updateFleetState(fleet, nextState);
@@ -18146,11 +18270,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		let resp = null;
 		let transactions = [];
 		let loadedCargo = {};
-		const projectedCargoAmounts = {};
+		const chainCargoAmounts = {};
 		for(const tokenAccount of fleetCurrentCargo.value) {
 			const mint = tokenAccount.account.data.parsed.info.mint;
-			projectedCargoAmounts[mint] = (projectedCargoAmounts[mint] || 0) + Number(tokenAccount.account.data.parsed.info.tokenAmount.uiAmount || 0);
+			chainCargoAmounts[mint] = (chainCargoAmounts[mint] || 0) + Number(tokenAccount.account.data.parsed.info.tokenAmount.uiAmount || 0);
 		}
+		const projectedCargoAmounts = {...chainCargoAmounts};
 		let ammoLoadingIntoAmmoBank = 0;
 		let ammoAlreadyInAmmoBank = 0;
 		if(ammoEntry) {
@@ -18251,6 +18376,15 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			}
 		}
 		requiredLoadWait = requiredLoadWait || getTransportRequiredLoadWait(transportManifest, projectedCargoAmounts, cargoSpace, cargoSizes, extraFreeByResource);
+		const loadThresholds = buildTransportRequiredLoadThresholds(transportManifest, projectedCargoAmounts, cargoSpace, cargoSizes, extraFreeByResource);
+		recordTransportLoadDiagnostic(userFleets[i], {
+			phase: requiredLoadWait ? 'threshold-blocked' : 'thresholds-met',
+			cargoSpace: Math.max(0, Number(cargoSpace || 0)),
+			thresholds: loadThresholds.map(threshold => ({ ...threshold, chainAboard: Math.max(0, Math.floor(Number(chainCargoAmounts[threshold.res] || 0))) })),
+			blockingMint: requiredLoadWait ? requiredLoadWait.res : '',
+			blockingMissing: requiredLoadWait ? requiredLoadWait.missing : 0,
+			departureBlocked: !!requiredLoadWait
+		});
 
 		//Return true if cargo was added
 		//const fleetCurrentCargo = await solanaReadConnection.getParsedTokenAccountsByOwner(userFleets[i].cargoHold, {programId: tokenProgramPK});
@@ -18412,8 +18546,27 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		}
 
 		const transportLoadRetry = getTransportLoadRetry(userFleets[i]);
-		if(transportLoadRetry && Date.now() < transportLoadRetry.retryAt) return;
-		if(transportLoadRetry) userFleets[i].transportLoadRetryAt = 0;
+		if(transportLoadRetry && Date.now() < transportLoadRetry.retryAt) {
+			recordTransportLoadDiagnostic(userFleets[i], {
+				phase: 'retry-gate',
+				gate: 'cooldown',
+				resource: transportLoadRetry.resource,
+				retryAt: transportLoadRetry.retryAt,
+				gateRemainingMs: Math.max(0, transportLoadRetry.retryAt - Date.now())
+			});
+			return;
+		}
+		if(transportLoadRetry) {
+			userFleets[i].transportLoadRetryAt = 0;
+			recordTransportLoadDiagnostic(userFleets[i], {
+				phase: 'retry-gate',
+				gate: 'open',
+				resource: transportLoadRetry.resource,
+				retryAt: transportLoadRetry.retryAt,
+				gateRemainingMs: 0,
+				gateOpenedAt: Date.now()
+			});
+		}
 
 		const transportUnloadRetry = getTransportUnloadRetry(userFleets[i]);
 		if(transportUnloadRetry) {

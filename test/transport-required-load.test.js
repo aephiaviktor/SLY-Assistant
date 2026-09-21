@@ -103,6 +103,41 @@ test('required-load retry is one minute and uses the concise activity text', () 
   assert.doesNotMatch(source, /Waiting for \$\{resourceName\}.*retrying/i);
 });
 
+test('transport diagnostics expose every required-load threshold', () => {
+  const buildTransportRequiredLoadThresholds = loadFunction('buildTransportRequiredLoadThresholds');
+  const result = buildTransportRequiredLoadThresholds(
+    [
+      { res: 'copper', amt: 100000, cargoTotal: true },
+      { res: 'food', amt: 2000, cargoTotal: false },
+      { res: 'ammo', amt: 1000, cargoTotal: true },
+    ],
+    { copper: 17522, food: 250, ammo: 700 },
+    82478,
+    { copper: 1, food: 1, ammo: 1 },
+    { ammo: 500 },
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), [
+    { entryIndex: 0, res: 'copper', required: 100000, aboard: 17522, missing: 82478, requiredLoad: true, cargoSize: 1, cargoSpace: 82478, dedicatedFree: 0, compatibleFree: 82478, thresholdMet: false, departureBlocked: true },
+    { entryIndex: 1, res: 'food', required: 2000, aboard: 250, missing: 1750, requiredLoad: false, cargoSize: 1, cargoSpace: 82478, dedicatedFree: 0, compatibleFree: 82478, thresholdMet: false, departureBlocked: false },
+    { entryIndex: 2, res: 'ammo', required: 1000, aboard: 700, missing: 300, requiredLoad: true, cargoSize: 1, cargoSpace: 82478, dedicatedFree: 500, compatibleFree: 82978, thresholdMet: false, departureBlocked: true },
+  ]);
+});
+
+test('LP Automation debugger renders retry gate, mint, balances, plan, and thresholds', () => {
+  const source = readSource();
+  assert.match(source, /<b>Transport Load Debugger<\/b>/);
+  assert.match(source, /buildTransportLoadDebugRowsHtml\(\)/);
+  assert.match(source, /gate=/);
+  assert.match(source, /mint=/);
+  assert.match(source, /starbaseTotal=/);
+  assert.match(source, /requested=/);
+  assert.match(source, /planned=/);
+  assert.match(source, /thresholds=/);
+  assert.match(source, /recordTransportLoadDiagnostic\(userFleets\[i\],/);
+  assert.match(source, /recordTransportLoadDiagnostic\(fleet,/);
+});
+
 test('fuel and ammo loading account for the amount actually available', () => {
   const source = readSource();
   assert.match(source, /const actualFuelAdded = Math\.max\(0, Number\(execResp && execResp\.amount \|\| 0\)\);/);
