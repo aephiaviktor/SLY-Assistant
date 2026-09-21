@@ -249,18 +249,14 @@ test('transport diagnostics expose every required-load threshold', () => {
   ]);
 });
 
-test('LP Automation debugger renders retry gate, mint, balances, plan, and thresholds', () => {
-  const source = readSource();
-  assert.match(source, /<b>Transport Load Debugger<\/b>/);
-  assert.match(source, /buildTransportLoadDebugRowsHtml\(\)/);
-  assert.match(source, /gate=/);
-  assert.match(source, /mint=/);
-  assert.match(source, /starbaseTotal=/);
-  assert.match(source, /requested=/);
-  assert.match(source, /planned=/);
-  assert.match(source, /thresholds=/);
-  assert.match(source, /recordTransportLoadDiagnostic\(userFleets\[i\],/);
-  assert.match(source, /recordTransportLoadDiagnostic\(fleet,/);
+test('LP Automation panel no longer renders the temporary Transport Load Debugger', () => {
+  for (const sourcePath of ['SLY_Assistant.user.js', path.join('electron-app', 'app', 'SLY_Assistant.user.js')]) {
+    const source = readSource(sourcePath);
+    assert.doesNotMatch(source, /Transport Load Debugger/);
+    assert.doesNotMatch(source, /buildTransportLoadDebugRowsHtml/);
+    assert.doesNotMatch(source, /lp-auto-transport-debug/);
+    assert.doesNotMatch(source, /transportLoadDiagnosticRenderTimer/);
+  }
 });
 
 test('fuel and ammo loading account for the amount actually available', () => {

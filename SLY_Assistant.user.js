@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-289
+// @aephia-version 0.7.35-290
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -114,7 +114,6 @@
 	const transportLoadDiagnostics = new Map();
 	const transportLoadRetryTimers = new Map();
 	const fleetOperationInFlight = new Set();
-	let transportLoadDiagnosticRenderTimer = null;
 	let craftTransactionInFlightCount = 0;
 	const settingsGmKey = 'globalSettings';
 	const UPGRADE_AUTOMATION_LOG_KEY = 'upgradeAutomationLog';
@@ -7166,48 +7165,6 @@
 			return html;
 		}
 
-		function buildTransportLoadDebugRowsHtml() {
-			const rows = Array.from(transportLoadDiagnostics.values())
-				.sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))
-				.slice(0, 12);
-			if(!rows.length) return '<tr><td colspan="8" style="font-family:monospace;opacity:0.72;white-space:pre-wrap;">No transport load diagnostic has been captured yet.</td></tr>';
-			return rows.map(row => {
-				const retryAt = Number(row.retryAt || 0);
-				const retryRemainingMs = retryAt > 0 ? Math.max(0, retryAt - Date.now()) : 0;
-				const sources = (row.sources || []).map(source =>
-					'amount=' + Math.floor(Number(source.amount || 0)) + ' token=' + String(source.token || '-') + ' pod=' + String(source.cargoPod || '-')
-				).join('\n  ');
-				const plannedLoads = (row.plannedLoads || []).map(load =>
-					'amount=' + Math.floor(Number(load.amount || 0)) + ' token=' + String(load.token || '-') + ' pod=' + String(load.cargoPod || '-')
-				).join('\n  ');
-				const thresholds = (row.thresholds || []).map(threshold =>
-					'mint=' + String(threshold.res || '-') +
-					' required=' + Math.floor(Number(threshold.required || 0)) +
-					' chainAboard=' + Math.floor(Number(threshold.chainAboard ?? threshold.aboard ?? 0)) +
-					' projectedAboard=' + Math.floor(Number(threshold.aboard || 0)) +
-					' missing=' + Math.floor(Number(threshold.missing || 0)) +
-					' requiredLoad=' + (!!threshold.requiredLoad) +
-					' cargoSize=' + Number(threshold.cargoSize || 1) +
-					' cargoSpace=' + Math.floor(Number(threshold.cargoSpace || 0)) +
-					' dedicatedFree=' + Math.floor(Number(threshold.dedicatedFree || 0)) +
-					' compatibleFree=' + Math.floor(Number(threshold.compatibleFree || 0)) +
-					' thresholdMet=' + (!!threshold.thresholdMet) +
-					' departureBlocked=' + (!!threshold.departureBlocked)
-				).join('\n  ');
-				const text =
-					'fleet=' + String(row.fleet || '-') + ' state=' + String(row.state || '-') + ' updated=' + (row.updatedAt ? new Date(row.updatedAt).toISOString() : '-') + '\n' +
-					'phase=' + String(row.phase || '-') + ' gate=' + String(row.gate || '-') + ' retryAt=' + (retryAt ? new Date(retryAt).toISOString() : '-') + ' retryRemainingMs=' + Math.floor(retryRemainingMs) + ' wake=' + String(row.wake || '-') + ' inFlight=' + (!!row.inFlight) + '\n' +
-					'balancesObservedAt=' + (row.balancesObservedAt ? new Date(row.balancesObservedAt).toISOString() : 'not-observed') + ' thresholdsObservedAt=' + (row.thresholdsObservedAt ? new Date(row.thresholdsObservedAt).toISOString() : 'not-observed') + ' (last load observations, not refreshed by timer events)\n' +
-					'resource=' + String(row.resource || '-') + ' mint=' + String(row.mint || row.blockingMint || '-') + '\n' +
-					'requested=' + Math.floor(Number(row.requested || 0)) + ' starbaseTotal=' + Math.floor(Number(row.starbaseTotal || 0)) + ' starbaseUsable=' + Math.floor(Number(row.starbaseUsable || 0)) + ' reserved=' + Math.floor(Number(row.reserved || 0)) + ' keepOne=' + (!!row.keepOne) + '\n' +
-					'planned=' + Math.floor(Number(row.planned || 0)) + ' planRemaining=' + Math.floor(Number(row.planRemaining || 0)) + ' instructions=' + Math.floor(Number(row.instructionCount || 0)) + ' submittedInstructions=' + Math.floor(Number(row.submissionInstructionCount || 0)) + ' result=' + String(row.result || '-') + '\n' +
-					'sources=' + (sources ? '\n  ' + sources : ' none') + '\n' +
-					'plannedLoads=' + (plannedLoads ? '\n  ' + plannedLoads : ' none') + '\n' +
-					'thresholds=' + (thresholds ? '\n  ' + thresholds : ' none');
-				return '<tr><td colspan="8" style="font-family:monospace;white-space:pre-wrap;overflow-wrap:anywhere;opacity:0.82">' + escapeAephiaHtml(text) + '</td></tr>';
-			}).join('');
-		}
-
 		function renderLpAutomationContent() {
 		let content = '';
 		const openSection = extraClass => '<div class="lp-auto-section' + (extraClass ? ' ' + extraClass : '') + '"><table class="lp-auto-section-table lp-auto-summary-table">';
@@ -7252,12 +7209,6 @@
 			const selectedMaxPhantomCrew = globalSettings.upgradeAutomationMaxPhantomCrew != null ? Math.max(0, parseIntDefault(globalSettings.upgradeAutomationMaxPhantomCrew, 0)) : currentPhantomCrew;
 			const phantomCrewUnlimited = globalSettings.upgradeAutomationPhantomCrewUnlimited != null ? !!globalSettings.upgradeAutomationPhantomCrewUnlimited : true;
 			content += '<tr><td>Phantom Crew Unlimited</td><td align="right"><input id="phantomCrewUnlimitedToggle" type="checkbox" ' + (phantomCrewUnlimited ? 'checked' : '') + '></td><td style="white-space:nowrap; text-align:left;">Max <input id="upgradeAutomationMaxPhantomCrew" type="number" min="0" step="1" value="' + selectedMaxPhantomCrew + '" style="width:58px" ' + (phantomCrewUnlimited ? 'disabled' : '') + '></td><td></td><td></td><td></td></tr>';
-			content += closeSection;
-			content += '<div class="lp-auto-section-gap"></div>';
-
-			content += openSection('lp-auto-transport-debug');
-			content += '<tr style="opacity:0.66"><td colspan="8"><b>Transport Load Debugger</b><br><small>Live 60-second retry gate, discovered balances, load plan, and every departure threshold.</small></td></tr>';
-			content += buildTransportLoadDebugRowsHtml();
 			content += closeSection;
 			content += '<div class="lp-auto-section-gap"></div>';
 
@@ -12659,15 +12610,6 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			state: String(fleet.state || ''),
 			updatedAt: Date.now()
 		});
-		try {
-			const panel = document.querySelector('#assistLpAutomation');
-			if(panel && panel.style.display !== 'none' && !transportLoadDiagnosticRenderTimer) {
-				transportLoadDiagnosticRenderTimer = setTimeout(() => {
-					transportLoadDiagnosticRenderTimer = null;
-					renderLpAutomationContent();
-				}, 100);
-			}
-		} catch(e) {}
 	}
 
 	function applyTransportLoadedTotals(manifest, loadedCargo, loadedCrew) {
@@ -15964,7 +15906,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-289', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-290', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
