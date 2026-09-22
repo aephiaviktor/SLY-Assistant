@@ -84,7 +84,7 @@ test('standalone and Electron userscript copies remain byte-identical', () => {
   assert.equal(fs.readFileSync(electronCopyPath, 'utf8'), source);
 });
 
-test('feature does not change userscript version metadata', () => {
+test('userscript version metadata matches the local patch version', () => {
   assert.match(source, /^\/\/ @version\s+0\.7\.35$/m);
-  assert.match(source, /^\/\/ @aephia-version\s+0\.7\.35-291$/m);
+  assert.match(source, /^\/\/ @aephia-version\s+0\.7\.35-292$/m);
 });

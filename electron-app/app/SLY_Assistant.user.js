@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-291
+// @aephia-version 0.7.35-292
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -12556,8 +12556,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	function applyTransportTotalRemaining(manifest) {
 		return manifest.map(entry => {
 			const nextEntry = {...entry};
-			// Resource checkboxes are required-load gates. Their configured amount is
-			// still loaded on every trip; only checked crew remains a route total.
+			// Checked resources are required-load alternatives (OR). Their configured
+			// amount is still loaded per trip; checked crew remains a route total.
 			if(nextEntry.crewTotal) {
 				nextEntry.crew = Math.max(0, Math.floor(Number(nextEntry.crew || 0)) - Math.max(0, Math.floor(Number(nextEntry.crewDispatched || 0))));
 			}
@@ -12567,18 +12567,111 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 	function getTransportRequiredLoadWait(manifest, cargoAmounts, cargoSpace, cargoSizes, extraFreeByResource) {
 		extraFreeByResource = extraFreeByResource || {};
-		for(let entryIndex=0; entryIndex<(manifest || []).length; entryIndex++) {
-			const entry = manifest[entryIndex] || {};
-			if(!entry.cargoTotal || !entry.res || !(Number(entry.amt || 0) > 0)) continue;
+		const requiredEntries = (manifest || [])
+			.map((entry, entryIndex) => ({ entry: entry || {}, entryIndex }))
+			.filter(({entry}) => entry.cargoTotal && entry.res && Number(entry.amt || 0) > 0);
+		if(requiredEntries.length < 1) return null;
+
+		// Checked resources are alternatives. One fulfilled checked amount releases
+		// the complete OR gate; loading order remains the manifest's left-to-right order.
+		for(const {entry} of requiredEntries) {
 			const required = Math.max(0, Math.floor(Number(entry.amt || 0)));
 			const carried = Math.max(0, Math.floor(Number((cargoAmounts || {})[entry.res] || 0)));
-			if(carried >= required) continue;
+			if(carried >= required) return null;
+		}
+
+		// Recognize saturation from the resulting hold, including cargo loaded on
+		// an earlier retry. A keep-one residue or unrelated inbound cargo is not
+		// evidence that this departure's prioritized cargo saturated the hold.
+		const routeMints = new Set((manifest || []).filter(entry => entry && entry.res && Number(entry.amt) > 0).map(entry => entry.res));
+		const hasUnrelatedCargo = Object.entries(cargoAmounts || {}).some(([mint, amount]) => Number(amount) > 1 && !routeMints.has(mint));
+		const priorityFull = !hasUnrelatedCargo && (manifest || []).some(entry => {
+			if(!entry || !entry.res) return false;
+			const carried = Number((cargoAmounts || {})[entry.res] || 0);
+			const size = Math.max(1, Number((cargoSizes || {})[entry.res] || 1));
+			return carried > 1 && carried < Number(entry.amt || 0) && Number(cargoSpace || 0) < size
+				&& !(Number(extraFreeByResource[entry.res] || 0) > 0);
+		});
+		if(priorityFull) cargoSpace = 0;
+
+		const resources = requiredEntries.map(({entry}) => entry.res);
+		for(const {entry, entryIndex} of requiredEntries) {
+			const required = Math.max(0, Math.floor(Number(entry.amt || 0)));
+			const carried = Math.max(0, Math.floor(Number((cargoAmounts || {})[entry.res] || 0)));
 			const cargoSize = Math.max(1, Number((cargoSizes || {})[entry.res] || 1));
 			const cargoRoom = Math.max(0, Math.floor(Number(cargoSpace || 0) / cargoSize));
 			const dedicatedRoom = Math.max(0, Math.floor(Number((extraFreeByResource || {})[entry.res] || 0)));
-			if(cargoRoom + dedicatedRoom > 0) return { entryIndex, res: entry.res, missing: required - carried };
+			if(cargoRoom + dedicatedRoom > 0) return { entryIndex, res: entry.res, missing: required - carried, resources };
 		}
 		return null;
+	}
+
+	function isTransportPriorityFull(missingAmount, maxBySpace, loadedAmount, cargoSize, cargoSpaceAfter) {
+		const missing = Math.max(0, Math.floor(Number(missingAmount || 0)));
+		const spaceLimitedAmount = Math.max(0, Math.floor(Number(maxBySpace || 0)));
+		const loaded = Math.max(0, Math.floor(Number(loadedAmount || 0)));
+		const size = Math.max(1, Number(cargoSize || 1));
+		return spaceLimitedAmount > 0 && missing > spaceLimitedAmount && loaded >= spaceLimitedAmount && Number(cargoSpaceAfter || 0) < size;
+	}
+
+	function simulateTransportRequiredLoad(manifest, cargoAmounts, cargoSpace, cargoSizes, usableStarbaseAmounts, extraFreeByResource) {
+		const entries = manifest || [];
+		const projectedCargoAmounts = {...(cargoAmounts || {})};
+		const usable = {...(usableStarbaseAmounts || {})};
+		const dedicatedFree = {...(extraFreeByResource || {})};
+		let remainingCargoSpace = Math.max(0, Number(cargoSpace || 0));
+		let plannedAmount = 0;
+		let priorityFull = false;
+
+		// Match execution: the dedicated ammo bank is topped up before cargo-hold
+		// slots are visited, even if ammo appears after other manifest resources.
+		for(const mint of Object.keys(dedicatedFree)) {
+			const entry = entries.find(item => item && item.res === mint && Number(item.amt) > 0);
+			if(!entry) continue;
+			const amount = Math.max(0, Math.min(Number(dedicatedFree[mint] || 0), Number(entry.amt) - Number(projectedCargoAmounts[mint] || 0), Number(usable[mint] || 0)));
+			projectedCargoAmounts[mint] = Number(projectedCargoAmounts[mint] || 0) + amount;
+			dedicatedFree[mint] -= amount;
+			usable[mint] = Number(usable[mint] || 0) - amount;
+			plannedAmount += amount;
+		}
+
+		for(const entry of entries) {
+			if(!entry || !entry.res || !(Number(entry.amt || 0) > 0)) continue;
+			const required = Math.max(0, Math.floor(Number(entry.amt || 0)));
+			const carried = Math.max(0, Math.floor(Number(projectedCargoAmounts[entry.res] || 0)));
+			const missing = Math.max(0, required - carried);
+			if(missing < 1) continue;
+			const cargoSize = Math.max(1, Number((cargoSizes || {})[entry.res] || 1));
+			const cargoRoom = Math.max(0, Math.floor(remainingCargoSpace / cargoSize));
+			const dedicatedRoom = Math.max(0, Math.floor(Number(dedicatedFree[entry.res] || 0)));
+			const maxBySpace = cargoRoom + dedicatedRoom;
+			const planned = Math.min(missing, maxBySpace, Math.max(0, Math.floor(Number(usable[entry.res] || 0))));
+			if(planned < 1) continue;
+
+			const intoDedicated = Math.min(planned, dedicatedRoom);
+			const intoCargo = planned - intoDedicated;
+			projectedCargoAmounts[entry.res] = carried + planned;
+			usable[entry.res] = Math.max(0, Number(usable[entry.res] || 0) - planned);
+			dedicatedFree[entry.res] = Math.max(0, dedicatedRoom - intoDedicated);
+			remainingCargoSpace = Math.max(0, remainingCargoSpace - intoCargo * cargoSize);
+			plannedAmount += planned;
+			if(isTransportPriorityFull(missing, maxBySpace, planned, cargoSize, remainingCargoSpace)) {
+				priorityFull = true;
+				break;
+			}
+		}
+
+		const effectiveCargoSpace = priorityFull ? 0 : remainingCargoSpace;
+		const wait = getTransportRequiredLoadWait(entries, projectedCargoAmounts, effectiveCargoSpace, cargoSizes, dedicatedFree);
+
+		return {
+			ready: !wait,
+			waitingResources: wait ? wait.resources : [],
+			priorityFull,
+			plannedAmount,
+			projectedCargoAmounts,
+			cargoSpace: remainingCargoSpace
+		};
 	}
 
 	function buildTransportRequiredLoadThresholds(manifest, cargoAmounts, cargoSpace, cargoSizes, extraFreeByResource) {
@@ -13402,8 +13495,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				let transportResourceTotal = document.createElement('input');
 				transportResourceTotal.classList.add('transport-resource-total');
 				transportResourceTotal.setAttribute('type', 'checkbox');
-				transportResourceTotal.title = 'Require amount before departure.';
-				transportResourceTotal.setAttribute('aria-label', 'Require amount before departure');
+				transportResourceTotal.title = 'Require this resource as a departure alternative.';
+				transportResourceTotal.setAttribute('aria-label', 'Require this resource as a departure alternative');
 				transportResourceTotal.checked = !!(savedEntry && savedEntry.cargoTotal);
 				styleTransportRequiredLoadCheckbox(transportResourceTotal);
 				let transportResourceDiv = document.createElement('div');
@@ -14214,6 +14307,137 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		});
 		updateFleetState(fleet, `Waiting for ${resourceName}`, true);
 		return true;
+	}
+
+	function getTransportRequiredLoadResourceNames(manifest) {
+		return (manifest || [])
+			.filter(entry => entry && entry.cargoTotal && entry.res && Number(entry.amt || 0) > 0)
+			.map(entry => cargoItems.find(item => item.token === entry.res)?.name || entry.res);
+	}
+
+	function getTransportRequiredLoadLabel(manifest) {
+		return getTransportRequiredLoadResourceNames(manifest).join(', ');
+	}
+
+	async function readTransportStarbaseUsableCargoAmounts(dockCoords, manifest) {
+		const wantedMints = new Set((manifest || []).filter(entry => entry && entry.res && Number(entry.amt || 0) > 0).map(entry => entry.res));
+		const usableAmounts = {};
+		if(wantedMints.size < 1) return usableAmounts;
+
+		const [starbaseX, starbaseY] = String(dockCoords || '').split(',').map(value => value.trim());
+		const starbase = await getStarbaseFromCoords(starbaseX, starbaseY);
+		const starbasePlayer = await getStarbasePlayer(userProfileAcct, starbase.publicKey);
+		const cargoHolds = await cargoProgram.account.cargoPod.all([{ memcmp: { offset: 41, bytes: starbasePlayer.publicKey.toBase58() } }]);
+		for(const cargoHold of cargoHolds) {
+			if(!cargoHold.account || !(cargoHold.account.openTokenAccounts > 0)) continue;
+			const tokenAccounts = await solanaReadConnection.getParsedTokenAccountsByOwner(cargoHold.publicKey, {programId: tokenProgramPK});
+			for(const tokenAccount of tokenAccounts.value) {
+				const info = tokenAccount.account.data.parsed.info;
+				if(!wantedMints.has(info.mint)) continue;
+				const rawAmount = Math.max(0, Math.floor(Number(info.tokenAmount.uiAmount || 0)));
+				const usableAmount = Math.max(0, rawAmount - (globalSettings.starbaseKeep1 ? 1 : 0));
+				usableAmounts[info.mint] = (usableAmounts[info.mint] || 0) + usableAmount;
+			}
+		}
+		return usableAmounts;
+	}
+
+	function planTransportCargoUnload(manifest, cargoAmounts, ammoAmount, ammoMint, keepOne) {
+		const entries = new Map();
+		for(const entry of manifest || []) {
+			if(!entry || !entry.res || !(Number(entry.amt) > 0)) continue;
+			const merged = entries.get(entry.res) || { res: entry.res, plannedAmount: 0, extraAmount: 0, unloadAll: false, count: 0 };
+			merged.count++;
+			if(entry.extra) merged.extraAmount += Number(entry.amt);
+			else { merged.plannedAmount += Number(entry.amt); merged.unloadAll = true; }
+			entries.set(entry.res, merged);
+		}
+		for(const entry of entries.values()) {
+			const aboard = Math.max(0, Number(cargoAmounts[entry.res] || 0));
+			const raw = entry.unloadAll ? aboard : Math.min(aboard, entry.extraAmount);
+			entry.amount = Math.max(0, raw - (keepOne && raw > 0 ? 1 : 0));
+			entry.deficit = Math.max(0, entry.plannedAmount - entry.amount);
+		}
+		const ammo = entries.get(ammoMint);
+		const rawAmmo = ammo ? Math.min(Math.max(0, Number(ammoAmount || 0)), ammo.deficit) : 0;
+		return { entries: Array.from(entries.values()), ammoToUnload: Math.max(0, rawAmmo - (keepOne && rawAmmo > 0 ? 1 : 0)) };
+	}
+
+	async function preflightTransportRequiredLoadRetry(fleet, dockCoords, manifest, unloadManifest = [], fuelContext = null) {
+		const waitingLabel = getTransportRequiredLoadLabel(manifest);
+		if(!waitingLabel) return { ready: true, waitingLabel: '', waitingResources: [] };
+
+		try {
+		const cargoSizes = Object.fromEntries(cargoItems.map(item => [item.token, Math.max(1, Number(item.size || 1))]));
+		const cargoAmounts = {};
+		const fleetCurrentCargo = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.cargoHold, {programId: tokenProgramPK});
+		let occupiedCargoSpace = 0;
+		for(const tokenAccount of fleetCurrentCargo.value) {
+			const info = tokenAccount.account.data.parsed.info;
+			const amount = Math.max(0, Number(info.tokenAmount.uiAmount || 0));
+			cargoAmounts[info.mint] = (cargoAmounts[info.mint] || 0) + amount;
+			occupiedCargoSpace += amount * Math.max(1, Number(cargoSizes[info.mint] || 1));
+		}
+
+		const extraFreeByResource = {};
+		const ammoMint = sageGameAcct.account.mints.ammo.toString();
+		const ammoBankAmount = globalSettings.transportUseAmmoBank ? await getTransportAmmoBankAmount(fleet) : 0;
+		const unloadPlan = planTransportCargoUnload(unloadManifest, cargoAmounts, ammoBankAmount, ammoMint, globalSettings.transportKeep1);
+		for(const entry of unloadPlan.entries) {
+			cargoAmounts[entry.res] = Math.max(0, Number(cargoAmounts[entry.res] || 0) - entry.amount);
+			occupiedCargoSpace -= entry.amount * Math.max(1, Number(cargoSizes[entry.res] || 1));
+		}
+		const remainingAmmo = ammoBankAmount - unloadPlan.ammoToUnload;
+		if(globalSettings.transportUseAmmoBank && manifest.some(entry => entry.res === ammoMint && Number(entry.amt) > 0)) {
+			cargoAmounts[ammoMint] = (cargoAmounts[ammoMint] || 0) + remainingAmmo;
+			extraFreeByResource[ammoMint] = Math.max(0, Number(fleet.ammoCapacity || 0) - remainingAmmo);
+		}
+
+		const usableStarbaseAmounts = await readTransportStarbaseUsableCargoAmounts(dockCoords, manifest);
+		// Unloading occurs before loading. Credit returned stock conservatively:
+		// a newly created Starbase source also retains one when keep-one is on.
+		for(const entry of unloadPlan.entries) {
+			const returned = entry.amount + (entry.res === ammoMint ? unloadPlan.ammoToUnload : 0);
+			if(returned > 0) {
+				const retained = globalSettings.starbaseKeep1 && !Object.prototype.hasOwnProperty.call(usableStarbaseAmounts, entry.res) ? 1 : 0;
+				usableStarbaseAmounts[entry.res] = (usableStarbaseAmounts[entry.res] || 0) + Math.max(0, returned - retained);
+			}
+		}
+		const loadManifest = manifest.map(entry => ({...entry}));
+		if(fuelContext) {
+			const fuelMint = sageGameAcct.account.mints.fuel.toString();
+			const fuelEntry = loadManifest.find(entry => entry.res === fuelMint);
+			const { fuelData, roundTrip } = fuelContext;
+			let requested = Math.max(0, Math.min(fuelData.capacity, fuelData.fuelNeeded + Number(fuelEntry?.amt || 0)) - fuelData.amount);
+			if(requested > 0 && roundTrip && globalSettings.transportFuel100) requested = Math.max(requested, fuelData.capacity - fuelData.amount);
+			const added = Math.min(requested, Math.max(0, Number(usableStarbaseAmounts[fuelMint] || 0)));
+			usableStarbaseAmounts[fuelMint] = Math.max(0, Number(usableStarbaseAmounts[fuelMint] || 0) - added);
+			if(fuelEntry) fuelEntry.amt = Math.max(0, Number(fuelEntry.amt) - Math.max(0, fuelData.amount + added - fuelData.fuelNeeded));
+		}
+
+		const result = simulateTransportRequiredLoad(
+			loadManifest,
+			cargoAmounts,
+			Math.max(0, Number(fleet.cargoCapacity || 0) - occupiedCargoSpace),
+			cargoSizes,
+			usableStarbaseAmounts,
+			extraFreeByResource
+		);
+		recordTransportLoadDiagnostic(fleet, {
+			phase: result.ready ? 'retry-preflight-ready' : 'retry-preflight-waiting',
+			gate: 'read-only-preflight',
+			resource: waitingLabel,
+			planned: result.plannedAmount,
+			priorityFull: result.priorityFull,
+			departureBlocked: !result.ready
+		});
+		return { ...result, waitingLabel };
+		} catch(error) {
+			// A failed read is not permission to transact, and must not strand
+			// resupplying=true after the retry gate was opened.
+			recordTransportLoadDiagnostic(fleet, {phase: 'retry-preflight-read-failed', departureBlocked: true});
+			return { ready: false, waitingLabel, readFailed: true };
+		}
 	}
 
 	function getTransportUnloadRetry(fleet) {
@@ -15913,7 +16137,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-291', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-292', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -16989,6 +17213,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 		async function resumeLoadedTransportDeparture(i, fleetState, fleetCoords, sourceCoord, destCoord, destinationManifest, arrivalManifest, moveType, roundTrip, routeIndex = null, logPrefix = 'Transporting', persistedMoveTarget = '') {
 			if(fleetState !== 'Idle' || !CoordsEqual(fleetCoords, ConvertCoords(sourceCoord))) return false;
+			if(userFleets[i].transportLoadRetryResource) return false;
 			const savedTarget = String(userFleets[i].moveTarget || persistedMoveTarget || '').trim();
 			if(savedTarget) return false;
 			const cargoAmounts = await getTransportRecoveryCargoAmounts(userFleets[i]);
@@ -17225,7 +17450,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
         const fleetParsedData = JSON.parse(await GM.getValue(userFleets[i].publicKey.toString(), '{}'));
 		const configuredMoveType = transportSubwarpPrefToMoveType(fleetParsedData.subwarpPref || 0);
-		const resumedRequiredLoadWait = configuredMoveType == 'warp-smart' && !!String(userFleets[i].transportLoadRetryResource || '');
+		const hasRequiredLoadRetry = !!String(userFleets[i].transportLoadRetryResource || '');
+		const resumedRequiredLoadWait = configuredMoveType == 'warp-smart' && hasRequiredLoadRetry;
 		if(configuredMoveType == 'automated') userFleets[i].moveType = 'warp';
 		else if(configuredMoveType == 'warp-smart') {
 			const persistedEffectiveMoveType = String(fleetParsedData.transportEffectiveMoveType || '');
@@ -17295,6 +17521,16 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		let fuelToAdd = Math.min(fuelData.capacity, totalFuel) - fuelData.amount;
 		// Check for "Fuel to 100% for transporters" (roundTrip only = source starbase)
 		if(fuelToAdd > 0 && globalSettings.transportFuel100 && fuelToAdd < fuelData.capacity - fuelData.amount) fuelToAdd = fuelData.capacity - fuelData.amount;
+
+		if(hasRequiredLoadRetry) {
+			const retryPreflight = await preflightTransportRequiredLoadRetry(userFleets[i], userFleets[i].starbaseCoord, targetLoadManifest, starbaseCargoManifest, { fuelData, roundTrip: true });
+			if(!retryPreflight.ready) {
+				scheduleTransportLoadRetry(userFleets[i], retryPreflight.waitingLabel);
+				userFleets[i].resupplying = false;
+				return;
+			}
+			if(retryPreflight.waitingLabel) checkCargoResult.needToLoad = retryPreflight.plannedAmount > 0;
+		}
 
 		cLog(3,`${FleetTimeStamp(userFleets[i].label)} Fuel needed`, fuelData.fuelNeeded, '/ fuel found', fuelData.amount, '/ fuel to add', fuelToAdd, '/ needToLoad', checkCargoResult.needToLoad, '/ needToUnload', checkCargoResult.needToUnload, '/ needToLoadCrew', needToLoadCrew, '/ needToUnloadCrew', needToUnloadCrew);
 
@@ -17475,6 +17711,16 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fuelEntry = starbaseLoadManifest.find(e => e.res === sageGameAcct.account.mints.fuel.toString()) || {amt: 0};
 		const totalFuel = fuelData.fuelNeeded + fuelEntry.amt;
 		let fuelToAdd = Math.min(fuelData.capacity, totalFuel) - fuelData.amount;
+
+		if(hasRequiredLoadRetry) {
+			const retryPreflight = await preflightTransportRequiredLoadRetry(userFleets[i], userFleets[i].destCoord, starbaseLoadManifest, targetCargoManifest, { fuelData, roundTrip: false });
+			if(!retryPreflight.ready) {
+				scheduleTransportLoadRetry(userFleets[i], retryPreflight.waitingLabel);
+				userFleets[i].resupplying = false;
+				return;
+			}
+			if(retryPreflight.waitingLabel) checkCargoResult.needToLoad = retryPreflight.plannedAmount > 0;
+		}
 
 		cLog(3,`${FleetTimeStamp(userFleets[i].label)} Fuel needed`, fuelData.fuelNeeded, '/ fuel found', fuelData.amount, '/ fuel to add', fuelToAdd, '/ needToLoad', checkCargoResult.needToLoad, '/ needToUnload', checkCargoResult.needToUnload, '/ needToLoadCrew', needToLoadCrew, '/ needToUnloadCrew', needToUnloadCrew);
 
@@ -17728,7 +17974,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const sourceCoords = ConvertCoords(sourceCoord);
 		const destCoords = ConvertCoords(destCoord);
 		const configuredMoveType = moveType;
-		const resumedRequiredLoadWait = configuredMoveType == 'warp-smart' && !!String(userFleets[i].transportLoadRetryResource || '');
+		const hasRequiredLoadRetry = !!String(userFleets[i].transportLoadRetryResource || '');
+		const resumedRequiredLoadWait = configuredMoveType == 'warp-smart' && hasRequiredLoadRetry;
 		userFleets[i].moveType = configuredMoveType == 'automated' ? 'warp' : resolveWarpSmartTravelMode(configuredMoveType, false);
 		userFleets[i].resupplying = true;
 
@@ -17758,6 +18005,16 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const totalFuel = fuelData.fuelNeeded + fuelEntry.amt;
 		let fuelToAdd = Math.min(fuelData.capacity, totalFuel) - fuelData.amount;
 		if(fuelToAdd > 0 && globalSettings.transportFuel100 && roundTrip && fuelToAdd < fuelData.capacity - fuelData.amount) fuelToAdd = fuelData.capacity - fuelData.amount;
+
+		if(hasRequiredLoadRetry) {
+			const retryPreflight = await preflightTransportRequiredLoadRetry(userFleets[i], sourceCoord, destinationCargoManifest, sourceCargoManifest, { fuelData, roundTrip });
+			if(!retryPreflight.ready) {
+				scheduleTransportLoadRetry(userFleets[i], retryPreflight.waitingLabel);
+				userFleets[i].resupplying = false;
+				return false;
+			}
+			if(retryPreflight.waitingLabel) checkCargoResult.needToLoad = retryPreflight.plannedAmount > 0;
+		}
 
 		cLog(3,`${FleetTimeStamp(userFleets[i].label)} Fuel needed`, fuelData.fuelNeeded, '/ fuel found', fuelData.amount, '/ fuel to add', fuelToAdd, '/ needToLoad', checkCargoResult.needToLoad, '/ needToUnload', checkCargoResult.needToUnload, '/ needToLoadCrew', needToLoadCrew, '/ needToUnloadCrew', needToUnloadCrew);
 
@@ -18231,22 +18488,13 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		//Unloading resources from manifest
 		let fuelUnloadDeficit = 0;
 		let ammoUnloadDeficit = 0;
-		const unloadEntriesByMint = new Map();
-		for (const entry of transportManifest) {
-			if (!entry || entry.res === '' || !(entry.amt > 0)) continue;
-			let unloadEntry = unloadEntriesByMint.get(entry.res);
-			if(!unloadEntry) {
-				unloadEntry = { res: entry.res, plannedAmount: 0, extraAmount: 0, unloadAll: false, count: 0 };
-				unloadEntriesByMint.set(entry.res, unloadEntry);
-			}
-			unloadEntry.count++;
-			if(entry.extra) {
-				unloadEntry.extraAmount += Number(entry.amt || 0);
-			} else {
-				unloadEntry.plannedAmount += Number(entry.amt || 0);
-				unloadEntry.unloadAll = true;
-			}
+		const unloadCargoAmounts = {};
+		for(const tokenAccount of fleetCurrentCargo.value) {
+			const info = tokenAccount.account.data.parsed.info;
+			unloadCargoAmounts[info.mint] = (unloadCargoAmounts[info.mint] || 0) + Number(info.tokenAmount.uiAmount || 0);
 		}
+		const unloadPlan = planTransportCargoUnload(transportManifest, unloadCargoAmounts, 0, ammoMint, globalSettings.transportKeep1);
+		const unloadEntriesByMint = new Map(unloadPlan.entries.map(entry => [entry.res, entry]));
 
 		for (const entry of unloadEntriesByMint.values()) {
 			const isFuel = entry.res === sageGameAcct.account.mints.fuel.toString();
@@ -18255,8 +18503,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const currentResCnt = currentRes ? currentRes.account.data.parsed.info.tokenAmount.uiAmount : 0;
 			if(entry.count > 1) cLog(1,`${FleetTimeStamp(fleet.label)} Merged duplicate unload entries for ${entry.res}`);
 
-			let amountToUnload = entry.unloadAll ? currentResCnt : Math.min(currentResCnt, entry.extraAmount);
-			if(globalSettings.transportKeep1 && amountToUnload > 0) { amountToUnload -= 1; }
+			const amountToUnload = entry.amount;
 			if (amountToUnload > 0) {
 				cLog(1,`${FleetTimeStamp(fleet.label)} Unloading ${amountToUnload} ${entry.res}`);
 				let resp = await execCargoFromFleetToStarbase(fleet, fleet.cargoHold, entry.res, starbaseCoord, amountToUnload, returnTx);
@@ -18352,6 +18599,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 		let notEnoughInfo = '';
 		let requiredLoadWait = null;
+		let priorityFull = false;
 		const cargoSizes = Object.fromEntries(cargoItems.map(item => [item.token, Number(item.size || 1)]));
 		const extraFreeByResource = {};
 		if(ammoEntry) extraFreeByResource[ammoMint] = Math.max(0, Number(userFleets[i].ammoCapacity || 0) - ammoAlreadyInAmmoBank - ammoLoadingIntoAmmoBank);
@@ -18380,7 +18628,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				const isAmmo = entry.res === ammoMint;
 				//For ammo SLYA didn't check the ammo in the cargo room, added
 				const missingCargoAmount = isAmmo ? entry.amt - ammoInAmmoBankForManifest - currentResAmt : entry.amt - currentResAmt;
-				const resMax = Math.floor(Math.min(cargoSpace / cargoItems.find(r => r.token == entry.res).size, Math.max(0, missingCargoAmount)));
+				const resourceCargoSize = Math.max(1, Number(cargoItems.find(r => r.token == entry.res).size || 1));
+				const resMax = Math.floor(Math.min(cargoSpace / resourceCargoSize, Math.max(0, missingCargoAmount)));
 				expectedCnt += resMax;
 				if (resMax > 0) {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} Attempting to load ${resMax} ${entry.res} from ${starbaseCoords}`);
@@ -18398,7 +18647,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						true
 					);
                     cLog(1,`${FleetTimeStamp(userFleets[i].label)} Loaded ${resp.amount} ${entry.res}: `, resp);
-                    cargoSpace -= resp && resp.amount ? cargoItems.find(r => r.token == entry.res).size * resp.amount : 0;
+					const loadedAmount = Math.max(0, Number(resp && resp.amount || 0));
+					cargoSpace -= loadedAmount > 0 ? resourceCargoSize * loadedAmount : 0;
 					if(resp && resp.amount) {
 						loadedCargo[entryIndex] = (loadedCargo[entryIndex] || 0) + resp.amount;
 						projectedCargoAmounts[entry.res] = (projectedCargoAmounts[entry.res] || 0) + Number(resp.amount || 0);
@@ -18412,20 +18662,14 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					else if(returnTx && resp && resp.transactions) {
 						transactions.push(...(resp.transactions || []));
 					}
+					if(isTransportPriorityFull(missingCargoAmount, resMax, loadedAmount, resourceCargoSize, cargoSpace)) priorityFull = true;
 				}
-
-				requiredLoadWait = getTransportRequiredLoadWait(
-					transportManifest.slice(0, entryIndex + 1),
-					projectedCargoAmounts,
-					cargoSpace,
-					cargoSizes,
-					extraFreeByResource
-				);
-				if(requiredLoadWait) break;
+				if(priorityFull) break;
 			}
 		}
-		requiredLoadWait = requiredLoadWait || getTransportRequiredLoadWait(transportManifest, projectedCargoAmounts, cargoSpace, cargoSizes, extraFreeByResource);
-		const loadThresholds = buildTransportRequiredLoadThresholds(transportManifest, projectedCargoAmounts, cargoSpace, cargoSizes, extraFreeByResource);
+		const departureCargoSpace = priorityFull ? 0 : cargoSpace;
+		requiredLoadWait = getTransportRequiredLoadWait(transportManifest, projectedCargoAmounts, departureCargoSpace, cargoSizes, extraFreeByResource);
+		const loadThresholds = buildTransportRequiredLoadThresholds(transportManifest, projectedCargoAmounts, departureCargoSpace, cargoSizes, extraFreeByResource);
 		recordTransportLoadDiagnostic(userFleets[i], {
 			phase: requiredLoadWait ? 'threshold-blocked' : 'thresholds-met',
 			cargoSpace: Math.max(0, Number(cargoSpace || 0)),
@@ -18454,7 +18698,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	            cLog(2,`${FleetTimeStamp(userFleets[i].label)} ERROR: No cargo, ammo, or fuel loaded`);
 	            if(globalSettings.emailNoCargoLoaded) await sendEMail(userFleets[i].label + ' no cargo loaded', notEnoughInfo);
 	        }
-		const waitingResource = requiredLoadWait ? (cargoItems.find(item => item.token === requiredLoadWait.res)?.name || requiredLoadWait.res) : '';
+		const waitingResource = requiredLoadWait
+			? requiredLoadWait.resources.map(resource => cargoItems.find(item => item.token === resource)?.name || resource).join(', ')
+			: '';
 		return { success: !userFleets[i].state.includes('ERROR'), transactions: transactions, loadedCargo: loadedCargo, waitingResource };
 	}
 

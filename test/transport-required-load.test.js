@@ -30,7 +30,7 @@ function readFunctionSource(name, sourcePath = path.join('SLY_Assistant.user.js'
 
 function loadFunction(name, sourcePath = path.join('SLY_Assistant.user.js')) {
   const context = vm.createContext({});
-  vm.runInContext(`${readFunctionSource(name, sourcePath)}; this.result = ${name};`, context);
+  vm.runInContext(`${name === "simulateTransportRequiredLoad" ? readFunctionSource("getTransportRequiredLoadWait", sourcePath) + "\n" + readFunctionSource("isTransportPriorityFull", sourcePath) : ""}\n${readFunctionSource(name, sourcePath)}; this.result = ${name};`, context);
   return context.result;
 }
 
@@ -59,7 +59,60 @@ test('required cargo waits when the requested amount is missing and compatible r
     { food: 1 },
   );
 
-  assert.deepEqual(JSON.parse(JSON.stringify(result)), { entryIndex: 0, res: 'food', missing: 800 });
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { entryIndex: 0, res: 'food', missing: 800, resources: ['food'] });
+});
+
+test('multiple checked cargo entries are OR alternatives and report every waiting resource', () => {
+  const getTransportRequiredLoadWait = loadFunction('getTransportRequiredLoadWait');
+  const manifest = [
+    { res: 'electronics', amt: 30000, cargoTotal: true },
+    { res: 'framework', amt: 60000, cargoTotal: true },
+  ];
+
+  assert.deepEqual(JSON.parse(JSON.stringify(getTransportRequiredLoadWait(
+    manifest,
+    { electronics: 0, framework: 0 },
+    50715,
+    { electronics: 2, framework: 1 },
+  ))), { entryIndex: 0, res: 'electronics', missing: 30000, resources: ['electronics', 'framework'] });
+
+  assert.equal(getTransportRequiredLoadWait(
+    manifest,
+    { electronics: 30000, framework: 0 },
+    10000,
+    { electronics: 2, framework: 1 },
+  ), null, 'one satisfied checked alternative must release the whole OR gate');
+});
+
+test('capacity-limited higher-priority cargo makes the hold priority-full despite rounding residue', () => {
+  const isTransportPriorityFull = loadFunction('isTransportPriorityFull');
+  assert.equal(isTransportPriorityFull(30000, 25357, 25357, 2, 1), true);
+  assert.equal(isTransportPriorityFull(30000, 25357, 20000, 2, 10715), false);
+});
+
+test('read-only retry simulation waits on partial stock and proceeds only when the route can depart', () => {
+  const simulateTransportRequiredLoad = loadFunction('simulateTransportRequiredLoad');
+  const manifest = [
+    { res: 'survey', amt: 10000, cargoTotal: false },
+    { res: 'electronics', amt: 30000, cargoTotal: true },
+    { res: 'framework', amt: 60000, cargoTotal: true },
+  ];
+  const cargoSizes = { survey: 1, electronics: 2, framework: 1 };
+
+  const unavailable = simulateTransportRequiredLoad(manifest, {}, 50715, cargoSizes, { electronics: 0, framework: 0 });
+  assert.equal(unavailable.ready, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(unavailable.waitingResources)), ['electronics', 'framework']);
+  assert.equal(unavailable.plannedAmount, 0);
+
+  const partial = simulateTransportRequiredLoad(manifest, {}, 50715, cargoSizes, { electronics: 10000, framework: 0 });
+  assert.equal(partial.ready, false, 'partial stock must not trigger a paid retry that still ends waiting');
+  assert.equal(partial.plannedAmount, 10000);
+
+  const sufficient = simulateTransportRequiredLoad(manifest, {}, 50715, cargoSizes, { electronics: 30000, framework: 0 });
+  assert.equal(sufficient.ready, true);
+  assert.equal(sufficient.priorityFull, true);
+  assert.equal(sufficient.projectedCargoAmounts.electronics, 25357);
+  assert.equal(sufficient.cargoSpace, 1);
 });
 
 test('required cargo may depart below the requested amount when no compatible room remains', () => {
@@ -96,7 +149,7 @@ test('dedicated ammo room keeps a checked ammo load waiting even when cargo is f
     { ammo: 500 },
   );
 
-  assert.deepEqual(JSON.parse(JSON.stringify(result)), { entryIndex: 0, res: 'ammo', missing: 300 });
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { entryIndex: 0, res: 'ammo', missing: 300, resources: ['ammo'] });
 });
 
 test('required-load retry is one minute and uses the concise activity text', () => {
@@ -349,10 +402,10 @@ test('resource checkbox uses a light-brown background while unchecked and checke
   assert.match(checkbox.style.backgroundImage, /^url\("data:image\/svg\+xml,/);
 });
 
-test('resource checkbox has required-load tooltip and custom background in both source copies', () => {
+test('resource checkbox explains required-load alternatives and has custom background in both source copies', () => {
   for (const sourcePath of ['SLY_Assistant.user.js', path.join('electron-app', 'app', 'SLY_Assistant.user.js')]) {
     const source = readSource(sourcePath);
-    assert.match(source, /transportResourceTotal\.title = 'Require amount before departure\.';/);
+    assert.match(source, /transportResourceTotal\.title = 'Require this resource as a departure alternative\.';/);
     assert.match(source, /styleTransportRequiredLoadCheckbox\(transportResourceTotal\);/);
     assert.match(source, /transportResourceCrewTotal\.title = 'Treat this crew amount as a total to dispatch, not per roundtrip\.';/);
   }
@@ -411,6 +464,16 @@ test('timer diagnostics cannot make old balances or thresholds look newly observ
   context.record(fleet, { starbaseTotal: 158883 });
   assert.equal(rows.get(fleet.label).balancesObservedAt, 3000);
   assert.equal(rows.get(fleet.label).thresholdsObservedAt, 1000);
+});
+
+test('retry handlers run a read-only required-load preflight before transport transactions', () => {
+  const source = readSource();
+  const preflightSource = readFunctionSource('preflightTransportRequiredLoadRetry');
+  assert.doesNotMatch(preflightSource, /execDock|execUndock|txSliceAndSend|depositCargoToFleet/);
+  assert.match(source, /handleTransport[\s\S]*?preflightTransportRequiredLoadRetry[\s\S]*?execDock/);
+  assert.match(source, /handleTransportStop[\s\S]*?preflightTransportRequiredLoadRetry[\s\S]*?execDock/);
+  assert.match(source, /const hasRequiredLoadRetry = !!String\(userFleets\[i\]\.transportLoadRetryResource \|\| ''\);/);
+  assert.match(source, /const resumedRequiredLoadWait = configuredMoveType == 'warp-smart' && hasRequiredLoadRetry;/);
 });
 
 test('CF-05|06 fresh Copper balances permit topping up and departing at full capacity', () => {
