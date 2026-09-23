@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-292
+// @aephia-version 0.7.35-293
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -6387,6 +6387,21 @@
 		});
 	}
 
+	function getFleetTelemetryTrackedLoadAmounts(amounts, telemetryOptions = null) {
+		let skipAmount = Math.max(0, Number(telemetryOptions?.skipAmount || 0));
+		let maxAmount = telemetryOptions && telemetryOptions.maxAmount !== undefined
+			? Math.max(0, Number(telemetryOptions.maxAmount || 0))
+			: Number.POSITIVE_INFINITY;
+		return (amounts || []).map(value => {
+			const amount = Math.max(0, Number(value || 0));
+			const skipped = Math.min(skipAmount, amount);
+			skipAmount -= skipped;
+			const tracked = Math.min(maxAmount, amount - skipped);
+			maxAmount -= tracked;
+			return tracked;
+		});
+	}
+
 	function snapshotFleetTelemetryCargo(fleetCurrentCargo) {
 		const result = [];
 		for(const tokenAccount of (Array.isArray(fleetCurrentCargo?.value) ? fleetCurrentCargo.value : [])) {
@@ -6427,10 +6442,13 @@
 
 	async function addFleetTelemetryCargoLoad(fleet, fleetParsedData, load) {
 		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return null;
-		if(!load || load.loadType !== 'cargo_in' || !(Number(load.amount || 0) > 0)) return null;
+		const trackedAmount = load && Object.prototype.hasOwnProperty.call(load, 'trackedAmount')
+			? Number(load.trackedAmount || 0)
+			: Number(load?.amount || 0);
+		if(!load || !['cargo_in', 'ammo_in', 'fuel_in'].includes(load.loadType) || !(trackedAmount > 0)) return null;
 		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
 		const mint = String(load.mint || '');
-		let remaining = Math.max(0, Number(load.amount || 0));
+		let remaining = Math.max(0, trackedAmount);
 		const starbase = String(load.starbase || 'unknown');
 		// A Supply Chain stop may mechanically unload and immediately reload cargo. Restore
 		// those exact FIFO lot fragments, including their original provenance and leg costs.
@@ -6522,7 +6540,7 @@
 
 	async function addFleetTelemetryCargoDelivery(fleet, fleetParsedData, delivery) {
 		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return null;
-		if(!delivery || !(Number(delivery.amount || 0) > 0) || delivery.loadType !== 'cargo_out') return null;
+		if(!delivery || !(Number(delivery.amount || 0) > 0) || !['cargo_out', 'ammo_out', 'fuel_out'].includes(delivery.loadType)) return null;
 		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
 		const mint = String(delivery.mint || '');
 		let remaining = Math.max(0, Number(delivery.amount || 0));
@@ -11259,7 +11277,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return { requested, amount: requested - remaining, remaining, loads };
 	}
 
-	async function execCargoFromStarbaseToFleet(fleet, cargoPodTo, tokenTo, tokenMint, cargoType, dockCoords, amount, forceAmount, returnTx, alreadyLoadedInTransaction, loadAcrossCargoHolds = false) {
+	async function execCargoFromStarbaseToFleet(fleet, cargoPodTo, tokenTo, tokenMint, cargoType, dockCoords, amount, forceAmount, returnTx, alreadyLoadedInTransaction, loadAcrossCargoHolds = false, telemetryOptions = null) {
 		return new Promise(async resolve => {
 			let txResult = {};
 			let starbaseX = dockCoords.split(',')[0].trim();
@@ -11291,6 +11309,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const sortedSources = cargoSources.slice().sort((left, right) => Number(right.amount || 0) - Number(left.amount || 0));
 			const plannedSources = loadAcrossCargoHolds ? sortedSources : sortedSources.slice(0, 1);
 			const loadPlan = planStarbaseCargoLoads(plannedSources, orgAmount, globalSettings.starbaseKeep1, alreadyLoadedInTransaction);
+			const trackedLoadAmounts = getFleetTelemetryTrackedLoadAmounts(loadPlan.loads.map(load => load.amount), telemetryOptions);
+			const trackedLoadAmount = trackedLoadAmounts.reduce((sum, value) => sum + value, 0);
 			const starbaseUsableBeforeReservation = plannedSources.reduce((sum, source) => sum + Math.max(0, Math.floor(Number(source.amount || 0)) - (globalSettings.starbaseKeep1 ? 1 : 0)), 0);
 			amount = loadPlan.amount;
 			recordTransportLoadDiagnostic(fleet, {
@@ -11361,6 +11381,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						mint: tokenMint,
 						rssName: cargoItems.find(r => r.token == tokenMint)?.name,
 						amount: loadPlan.loads[transactionIndex].amount,
+						trackedAmount: trackedLoadAmounts[transactionIndex],
 						starbase: validTargets.find(target => (target.x + ',' + target.y) == (starbaseX + ',' + starbaseY))?.name,
 						sectorX: starbaseX,
 						sectorY: starbaseY
@@ -11393,7 +11414,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					if(cargoPodTo == fleet.fuelTank) loadType = 'fuel_in';
 					if(cargoPodTo == fleet.ammoBank) loadType = 'ammo_in';
 					await sendToInflux(`fleetrss,fleet=${influxEscape(fleet.label)},starbase=${influxEscape(starbaseName)},sectorX=${starbaseX},sectorY=${starbaseY},rss=${influxEscape(rssName)},assignment=${influxEscape(assignment || 'unknown')},type=${loadType} amount=${amount}${buildSlyaTxCostInfluxFields(txResult?.result || txResult)}`);
-					if(!returnTx) await addFleetTelemetryCargoLoad(fleet, fleetParsedData, { loadType, mint: tokenMint, rssName, amount, starbase: starbaseName, sectorX: starbaseX, sectorY: starbaseY });
+					if(!returnTx) await addFleetTelemetryCargoLoad(fleet, fleetParsedData, { loadType, mint: tokenMint, rssName, amount, trackedAmount: trackedLoadAmount, starbase: starbaseName, sectorX: starbaseX, sectorY: starbaseY });
 				}
 
 			});
@@ -16137,7 +16158,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-292', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-293', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -18268,7 +18289,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		}
 	}
 
-	async function fuelFleet(fleet, dockCoords, account, amount, returnTx) {
+	async function fuelFleet(fleet, dockCoords, account, amount, returnTx, telemetryOptions = null) {
 		cLog(1,`${FleetTimeStamp(fleet.label)} Filling fuel tank: ${amount}`);
 		let fuelCargoTypeAcct = cargoTypes.find(item => item.account.mint.toString() == sageGameAcct.account.mints.fuel);
 		const fuelResp = await execCargoFromStarbaseToFleet(
@@ -18280,7 +18301,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			dockCoords,
 			amount,
 			globalSettings.fleetForceConsumableAmount,
-			returnTx
+			returnTx,
+			undefined,
+			false,
+			telemetryOptions
 		);
 
 		return fuelResp;
@@ -18354,8 +18378,14 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
             fuelToAdd = fuelData.capacity - fuelData.amount;
         }
 
-		//Put in the fuel
-        let execResp = await fuelFleet(fleet, starbaseCoord, fuelData.account, fuelToAdd, returnTx);
+		// Put in the fuel. Only the part above propulsion requirements and within
+		// the manifest is cargo; transportFuel100 may deliberately load more.
+		const transportFuelAlreadyOnboard = Math.min(Math.max(0, Number(fuelEntry.amt || 0)), Math.max(0, fuelData.amount - fuelData.fuelNeeded));
+		const fuelTelemetryOptions = {
+			skipAmount: Math.max(0, fuelData.fuelNeeded - fuelData.amount),
+			maxAmount: Math.max(0, Number(fuelEntry.amt || 0) - transportFuelAlreadyOnboard)
+		};
+        let execResp = await fuelFleet(fleet, starbaseCoord, fuelData.account, fuelToAdd, returnTx, fuelTelemetryOptions);
 
         if (execResp && execResp.name == 'NotEnoughResource') {
 			cLog(1,`${FleetTimeStamp(fleet.label)} ERROR: Not enough fuel`);

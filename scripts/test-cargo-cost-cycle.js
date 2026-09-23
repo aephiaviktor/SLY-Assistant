@@ -103,6 +103,32 @@ assert.doesNotMatch(
   /cycle\.originStarbase\s*=\s*starbase/,
   'the first observed cargo load must not redefine the cost-cycle anchor'
 );
+assert.match(
+  loadFunction,
+  /\['cargo_in', 'ammo_in', 'fuel_in'\]/,
+  'transport loads from the cargo hold, ammo bank, and fuel tank must all enter the cost cycle'
+);
+
+const deliveryFunction = extractFunction('addFleetTelemetryCargoDelivery');
+assert.match(
+  deliveryFunction,
+  /\['cargo_out', 'ammo_out', 'fuel_out'\]/,
+  'transport deliveries from the cargo hold, ammo bank, and fuel tank must all leave the cost cycle'
+);
+
+const trackedLoadAmountsFunction = extractFunction('getFleetTelemetryTrackedLoadAmounts');
+const trackedLoadContext = vm.createContext({ Math, Number });
+vm.runInContext(`${trackedLoadAmountsFunction}\nthis.getTracked = getFleetTelemetryTrackedLoadAmounts;`, trackedLoadContext);
+assert.deepEqual(
+  Array.from(trackedLoadContext.getTracked([40, 50, 60], { skipAmount: 70, maxAmount: 55 })),
+  [0, 20, 35],
+  'fuel telemetry must skip propulsion fuel and cap the transported fuel recorded across split loads'
+);
+assert.deepEqual(
+  Array.from(trackedLoadContext.getTracked([25, 15])),
+  [25, 15],
+  'ordinary cargo and ammunition loads remain fully tracked'
+);
 
 const finalizeFunction = extractFunction('maybeFinalizeFleetTelemetryCostCycle');
 assert.match(
