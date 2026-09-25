@@ -55,6 +55,25 @@ for(const [name,aboard,stock,waiting] of [
   if(name==='newly loaded') assert.deepEqual(transfers,[['electronics',25357]]);
   if(name==='later checked alternative') assert.deepEqual(transfers,[['framework',50715]]);
 });
+test('dedicated fuel satisfies a checked alternative without a cargo-hold load', async()=>{
+  const fleet={label:'Phantom',cargoCapacity:20000,cargoHold:{toBuffer:()=>Buffer.alloc(0)},state:'Idle'};
+  const c=context({userFleets:[fleet],globalSettings:{},sageGameAcct:{account:{mints:{ammo:'ammo',fuel:'fuel'}}},
+    solanaReadConnection:{getParsedTokenAccountsByOwner:async()=>parsed({})},tokenProgramPK:{toBuffer:()=>Buffer.alloc(0)},programPK:{},
+    BrowserAnchor:{anchor:{web3:{PublicKey:{findProgramAddressSync:()=>['ata']}}}},solanaWeb3:{PublicKey:class { toBuffer(){return Buffer.alloc(0);} }},
+    cargoItems:[{token:'cargo',name:'Cargo',size:1},{token:'fuel',name:'Fuel',size:1}],cargoTypes:[],
+    cLog(){},FleetTimeStamp:()=>'',updateFleetState:(f,s)=>{f.state=s;},recordTransportLoadDiagnostic(){},
+    execCargoFromStarbaseToFleet:async()=>({name:'NotEnoughResource'}),
+    hasUsefulTransportCargoForManifest:(_manifest,amounts)=>Object.values(amounts).some(amount=>amount>1),
+  });
+  vm.runInContext(fn('buildTransportRequiredLoadThresholds'),c);
+  vm.runInContext(fn('handleTransportLoading'),c);
+  // The fuel amount is zero after refueling credited the transport portion to the tank.
+  const manifest=[{res:'cargo',amt:1000,cargoTotal:false},{res:'fuel',amt:0,cargoTotal:true}];
+  const result=await c.handleTransportLoading(0,'0,0',manifest,true,0,0,{fuel:100});
+  assert.equal(result.success,true,'a satisfied checked fuel alternative must not produce No cargo loaded');
+  assert.equal(fleet.state.includes('ERROR: No cargo loaded'),false);
+  assert.equal(result.waitingResource,'');
+});
 test('preflight subtracts inbound unload before deciding whether departure cargo fills the hold', async()=>{
  const fleet={cargoHold:'fleet',cargoCapacity:50715};
  const c=context({globalSettings:{transportKeep1:true},cargoItems:Object.entries(sizes).map(([token,size])=>({token,name:token,size})),
@@ -86,7 +105,7 @@ for(const mode of ['warp','warp-smart','subwarp']) test(`production stop retry: 
     persistFleetTransportRouteState:async(_i,effective)=>moves.push(effective),cLog(){},FleetTimeStamp:()=>'',
     execDock:async()=>{tx.push('dock');throw Error('Unexpected paid work');},
   });
-  for(const name of ['resolveWarpSmartTravelMode','planTransportCargoUnload','preflightTransportRequiredLoadRetry','handleTransportStop']) vm.runInContext(fn(name),c);
+  for(const name of ['resolveWarpSmartTravelMode','hasTransportFuelRequiredLoadRetry','planTransportCargoUnload','markTransportRequiredFuelAmounts','preflightTransportRequiredLoadRetry','handleTransportStop']) vm.runInContext(fn(name),c);
   for(let n=0;n<3;n++) {
     stocks={electronics:n?10000:0};
     assert.equal(await c.handleTransportStop(0,'0,0','1,1',[{res:'inbound',amt:50000}],manifest,mode,true),false);

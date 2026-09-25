@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-293
+// @aephia-version 0.7.35-294
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -12478,6 +12478,15 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return resumedRequiredLoadWait ? 'subwarp' : 'warp';
 	}
 
+	function hasTransportFuelRequiredLoadRetry(resourceName) {
+		const parts = String(resourceName || '').split(',').map(value => value.trim()).filter(Boolean);
+		if(parts.length < 1) return false;
+		const fuelNames = new Set((cargoItems || [])
+			.filter(item => item && item.token === sageGameAcct.account.mints.fuel.toString())
+			.map(item => String(item.name || item.token)));
+		return parts.some(part => fuelNames.has(part));
+	}
+
 	function calculateAutomatedTravelMode({ manifest = [], loadedCargo = [], cargoCapacity = 0, ammoCapacity = 0, fuelCapacity = 0, ammoMint = '', fuelMint = '', cargoSizes = {} }) {
 		let configuredCargoVolume = 0;
 		for(const entry of manifest) {
@@ -12586,39 +12595,41 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		});
 	}
 
-	function getTransportRequiredLoadWait(manifest, cargoAmounts, cargoSpace, cargoSizes, extraFreeByResource) {
+	function getTransportRequiredLoadWait(manifest, cargoAmounts, cargoSpace, cargoSizes, extraFreeByResource, dedicatedAmounts = null) {
 		extraFreeByResource = extraFreeByResource || {};
+		dedicatedAmounts = dedicatedAmounts || {};
 		const requiredEntries = (manifest || [])
 			.map((entry, entryIndex) => ({ entry: entry || {}, entryIndex }))
-			.filter(({entry}) => entry.cargoTotal && entry.res && Number(entry.amt || 0) > 0);
+			.filter(({entry}) => entry.cargoTotal && entry.res && Number(entry.requiredAmount !== undefined ? entry.requiredAmount : entry.amt || 0) > 0);
 		if(requiredEntries.length < 1) return null;
 
 		// Checked resources are alternatives. One fulfilled checked amount releases
 		// the complete OR gate; loading order remains the manifest's left-to-right order.
 		for(const {entry} of requiredEntries) {
-			const required = Math.max(0, Math.floor(Number(entry.amt || 0)));
-			const carried = Math.max(0, Math.floor(Number((cargoAmounts || {})[entry.res] || 0)));
+			const required = Math.max(0, Math.floor(Number(entry.requiredAmount !== undefined ? entry.requiredAmount : entry.amt || 0)));
+			const carried = Math.max(0, Math.floor(Number((cargoAmounts || {})[entry.res] || 0))) + Math.max(0, Math.floor(Number(dedicatedAmounts[entry.res] || 0)));
 			if(carried >= required) return null;
 		}
 
 		// Recognize saturation from the resulting hold, including cargo loaded on
 		// an earlier retry. A keep-one residue or unrelated inbound cargo is not
 		// evidence that this departure's prioritized cargo saturated the hold.
-		const routeMints = new Set((manifest || []).filter(entry => entry && entry.res && Number(entry.amt) > 0).map(entry => entry.res));
+		const routeMints = new Set((manifest || []).filter(entry => entry && entry.res && Number(entry.requiredAmount !== undefined ? entry.requiredAmount : entry.amt || 0) > 0).map(entry => entry.res));
 		const hasUnrelatedCargo = Object.entries(cargoAmounts || {}).some(([mint, amount]) => Number(amount) > 1 && !routeMints.has(mint));
 		const priorityFull = !hasUnrelatedCargo && (manifest || []).some(entry => {
 			if(!entry || !entry.res) return false;
 			const carried = Number((cargoAmounts || {})[entry.res] || 0);
+			const required = Math.max(0, Math.floor(Number(entry.requiredAmount !== undefined ? entry.requiredAmount : entry.amt || 0)));
 			const size = Math.max(1, Number((cargoSizes || {})[entry.res] || 1));
-			return carried > 1 && carried < Number(entry.amt || 0) && Number(cargoSpace || 0) < size
+			return carried > 1 && carried < required && Number(cargoSpace || 0) < size
 				&& !(Number(extraFreeByResource[entry.res] || 0) > 0);
 		});
 		if(priorityFull) cargoSpace = 0;
 
 		const resources = requiredEntries.map(({entry}) => entry.res);
 		for(const {entry, entryIndex} of requiredEntries) {
-			const required = Math.max(0, Math.floor(Number(entry.amt || 0)));
-			const carried = Math.max(0, Math.floor(Number((cargoAmounts || {})[entry.res] || 0)));
+			const required = Math.max(0, Math.floor(Number(entry.requiredAmount !== undefined ? entry.requiredAmount : entry.amt || 0)));
+			const carried = Math.max(0, Math.floor(Number((cargoAmounts || {})[entry.res] || 0))) + Math.max(0, Math.floor(Number(dedicatedAmounts[entry.res] || 0)));
 			const cargoSize = Math.max(1, Number((cargoSizes || {})[entry.res] || 1));
 			const cargoRoom = Math.max(0, Math.floor(Number(cargoSpace || 0) / cargoSize));
 			const dedicatedRoom = Math.max(0, Math.floor(Number((extraFreeByResource || {})[entry.res] || 0)));
@@ -12635,11 +12646,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return spaceLimitedAmount > 0 && missing > spaceLimitedAmount && loaded >= spaceLimitedAmount && Number(cargoSpaceAfter || 0) < size;
 	}
 
-	function simulateTransportRequiredLoad(manifest, cargoAmounts, cargoSpace, cargoSizes, usableStarbaseAmounts, extraFreeByResource) {
+	function simulateTransportRequiredLoad(manifest, cargoAmounts, cargoSpace, cargoSizes, usableStarbaseAmounts, extraFreeByResource, dedicatedAmounts = null) {
 		const entries = manifest || [];
 		const projectedCargoAmounts = {...(cargoAmounts || {})};
 		const usable = {...(usableStarbaseAmounts || {})};
 		const dedicatedFree = {...(extraFreeByResource || {})};
+		const dedicatedCargo = {...(dedicatedAmounts || {})};
 		let remainingCargoSpace = Math.max(0, Number(cargoSpace || 0));
 		let plannedAmount = 0;
 		let priorityFull = false;
@@ -12658,8 +12670,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 		for(const entry of entries) {
 			if(!entry || !entry.res || !(Number(entry.amt || 0) > 0)) continue;
-			const required = Math.max(0, Math.floor(Number(entry.amt || 0)));
 			const carried = Math.max(0, Math.floor(Number(projectedCargoAmounts[entry.res] || 0)));
+			const requiredTotal = Math.max(0, Math.floor(Number(entry.requiredAmount !== undefined ? entry.requiredAmount : entry.amt || 0)));
+			const dedicatedTotal = Math.max(0, Math.floor(Number(dedicatedCargo[entry.res] || 0)));
+			const required = Math.min(Math.max(0, Math.floor(Number(entry.amt || 0))), Math.max(0, requiredTotal - dedicatedTotal));
 			const missing = Math.max(0, required - carried);
 			if(missing < 1) continue;
 			const cargoSize = Math.max(1, Number((cargoSizes || {})[entry.res] || 1));
@@ -12683,7 +12697,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		}
 
 		const effectiveCargoSpace = priorityFull ? 0 : remainingCargoSpace;
-		const wait = getTransportRequiredLoadWait(entries, projectedCargoAmounts, effectiveCargoSpace, cargoSizes, dedicatedFree);
+		const wait = getTransportRequiredLoadWait(entries, projectedCargoAmounts, effectiveCargoSpace, cargoSizes, dedicatedFree, dedicatedCargo);
 
 		return {
 			ready: !wait,
@@ -12695,21 +12709,24 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		};
 	}
 
-	function buildTransportRequiredLoadThresholds(manifest, cargoAmounts, cargoSpace, cargoSizes, extraFreeByResource) {
+	function buildTransportRequiredLoadThresholds(manifest, cargoAmounts, cargoSpace, cargoSizes, extraFreeByResource, dedicatedAmounts = null) {
 		extraFreeByResource = extraFreeByResource || {};
+		dedicatedAmounts = dedicatedAmounts || {};
 		return (manifest || [])
 			.map((entry, entryIndex) => ({ entry, entryIndex }))
-			.filter(({entry}) => entry && entry.res && Number(entry.amt || 0) > 0)
+			.filter(({entry}) => entry && entry.res && Number(entry.requiredAmount !== undefined ? entry.requiredAmount : entry.amt || 0) > 0)
 			.map(({entry, entryIndex}) => {
-				const required = Math.max(0, Math.floor(Number(entry.amt || 0)));
+				const requiredTotal = Math.max(0, Math.floor(Number(entry.requiredAmount !== undefined ? entry.requiredAmount : entry.amt || 0)));
+				const dedicatedTotal = Math.max(0, Math.floor(Number(dedicatedAmounts[entry.res] || 0)));
+				const required = Math.min(Math.max(0, Math.floor(Number(entry.amt || 0))), Math.max(0, requiredTotal - dedicatedTotal));
 				const aboard = Math.max(0, Math.floor(Number((cargoAmounts || {})[entry.res] || 0)));
-				const missing = Math.max(0, required - aboard);
+				const missing = Math.max(0, Math.max(0, requiredTotal - dedicatedTotal - aboard));
 				const requiredLoad = !!entry.cargoTotal;
 				const cargoSize = Math.max(1, Number((cargoSizes || {})[entry.res] || 1));
 				const cargoRoom = Math.max(0, Math.floor(Number(cargoSpace || 0) / cargoSize));
 				const dedicatedFree = Math.max(0, Math.floor(Number(extraFreeByResource[entry.res] || 0)));
 				const compatibleFree = cargoRoom + dedicatedFree;
-				const thresholdMet = missing <= 0;
+				const thresholdMet = aboard + dedicatedTotal >= requiredTotal;
 				return { entryIndex, res: entry.res, required, aboard, missing, requiredLoad, cargoSize, cargoSpace: Math.max(0, Number(cargoSpace || 0)), dedicatedFree, compatibleFree, thresholdMet, departureBlocked: requiredLoad && !thresholdMet && compatibleFree > 0 };
 			});
 	}
@@ -14332,7 +14349,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 	function getTransportRequiredLoadResourceNames(manifest) {
 		return (manifest || [])
-			.filter(entry => entry && entry.cargoTotal && entry.res && Number(entry.amt || 0) > 0)
+			.filter(entry => entry && entry.cargoTotal && entry.res && Number(entry.requiredAmount !== undefined ? entry.requiredAmount : entry.amt || 0) > 0)
 			.map(entry => cargoItems.find(item => item.token === entry.res)?.name || entry.res);
 	}
 
@@ -14425,8 +14442,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			}
 		}
 		const loadManifest = manifest.map(entry => ({...entry}));
+		markTransportRequiredFuelAmounts(loadManifest);
+		const fuelMint = sageGameAcct.account.mints.fuel.toString();
+		let transportFuelSurplus = 0;
 		if(fuelContext) {
-			const fuelMint = sageGameAcct.account.mints.fuel.toString();
 			const fuelEntry = loadManifest.find(entry => entry.res === fuelMint);
 			const { fuelData, roundTrip } = fuelContext;
 			let requested = Math.max(0, Math.min(fuelData.capacity, fuelData.fuelNeeded + Number(fuelEntry?.amt || 0)) - fuelData.amount);
@@ -14434,7 +14453,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const added = Math.min(requested, Math.max(0, Number(usableStarbaseAmounts[fuelMint] || 0)));
 			usableStarbaseAmounts[fuelMint] = Math.max(0, Number(usableStarbaseAmounts[fuelMint] || 0) - added);
 			if(fuelEntry) fuelEntry.amt = Math.max(0, Number(fuelEntry.amt) - Math.max(0, fuelData.amount + added - fuelData.fuelNeeded));
+			transportFuelSurplus = Math.max(0, Math.floor(Number(fuelData.amount || 0)) + Math.max(0, Math.floor(Number(added || 0))) - Math.max(0, Math.floor(Number(fuelData.fuelNeeded || 0))));
 		}
+		const dedicatedAmounts = transportFuelSurplus > 0 ? { [fuelMint]: transportFuelSurplus } : null;
+		const dedicatedFreeByResource = fuelContext ? { [fuelMint]: Math.max(0, Math.floor(Number(fuelContext.fuelData.capacity || 0)) - Math.max(0, Math.floor(Number(fuelContext.fuelData.fuelNeeded || 0))) - transportFuelSurplus) } : null;
+		const combinedExtraFreeByResource = { ...(extraFreeByResource || {}), ...(dedicatedFreeByResource || {}) };
 
 		const result = simulateTransportRequiredLoad(
 			loadManifest,
@@ -14442,7 +14465,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			Math.max(0, Number(fleet.cargoCapacity || 0) - occupiedCargoSpace),
 			cargoSizes,
 			usableStarbaseAmounts,
-			extraFreeByResource
+			combinedExtraFreeByResource,
+			dedicatedAmounts
 		);
 		recordTransportLoadDiagnostic(fleet, {
 			phase: result.ready ? 'retry-preflight-ready' : 'retry-preflight-waiting',
@@ -16158,7 +16182,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-293', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-294', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -17224,12 +17248,27 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			});
 		}
 
-		function hasUsefulTransportCargoForManifest(manifest, cargoAmounts) {
+		function hasUsefulTransportCargoForManifest(manifest, cargoAmounts, dedicatedCargoAmounts = null) {
 			const keepAmount = globalSettings.transportKeep1 ? 1 : 0;
 			return (manifest || []).some(entry => {
-				if(!entry || !entry.res || !(Number(entry.amt || 0) > 0)) return false;
+				const requiredTotal = Math.max(0, Math.floor(Number(entry && entry.requiredAmount !== undefined ? entry.requiredAmount : entry && entry.amt || 0)));
+				if(!entry || !entry.res || !(requiredTotal > 0)) return false;
+				const dedicatedAmount = Number((dedicatedCargoAmounts || {})[entry.res] || 0);
+				if(entry.cargoTotal) {
+					if(dedicatedAmount > 0) return true;
+					if(Number(cargoAmounts[entry.res] || 0) >= requiredTotal) return true;
+				}
 				return Number(cargoAmounts[entry.res] || 0) > keepAmount;
 			});
+		}
+
+		function getTransportDedicatedCargoAmounts(refuelResp, fuelData = null) {
+			const amount = Math.max(0, Math.floor(Number(refuelResp && refuelResp.amount || 0)));
+			const amounts = amount > 0 ? { [sageGameAcct.account.mints.fuel.toString()]: amount } : null;
+			const tankAmount = Math.max(0, Math.floor(Number(refuelResp && refuelResp.fuelTankAmount !== undefined ? refuelResp.fuelTankAmount : (fuelData ? Number(fuelData.fuelNeeded || 0) + amount : 0))));
+			const capacity = Math.max(0, Math.floor(Number(refuelResp && refuelResp.fuelTankCapacity !== undefined ? refuelResp.fuelTankCapacity : (fuelData ? fuelData.capacity || 0 : 0))));
+			const freeByResource = capacity > 0 ? { [sageGameAcct.account.mints.fuel.toString()]: Math.max(0, capacity - tankAmount) } : null;
+			return { amounts, freeByResource };
 		}
 
 		async function resumeLoadedTransportDeparture(i, fleetState, fleetCoords, sourceCoord, destCoord, destinationManifest, arrivalManifest, moveType, roundTrip, routeIndex = null, logPrefix = 'Transporting', persistedMoveTarget = '') {
@@ -17426,6 +17465,16 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		});
 	}
 
+	function markTransportRequiredFuelAmounts(manifest) {
+		const fuelMint = sageGameAcct.account.mints.fuel.toString();
+		for(const entry of manifest || []) {
+			if(entry && entry.cargoTotal && entry.res === fuelMint && entry.requiredAmount === undefined) {
+				entry.requiredAmount = Math.max(0, Math.floor(Number(entry.amt || 0)));
+			}
+		}
+		return manifest;
+	}
+
 	function getLegacyTransportManifestEntry(fleetParsedData, prefix, includeCrew = false, totalContext = {}) {
 		const res = fleetParsedData[prefix] || '';
 		const amt = fleetParsedData[prefix + 'Perc'] || 0;
@@ -17471,8 +17520,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
         const fleetParsedData = JSON.parse(await GM.getValue(userFleets[i].publicKey.toString(), '{}'));
 		const configuredMoveType = transportSubwarpPrefToMoveType(fleetParsedData.subwarpPref || 0);
-		const hasRequiredLoadRetry = !!String(userFleets[i].transportLoadRetryResource || '');
-		const resumedRequiredLoadWait = configuredMoveType == 'warp-smart' && hasRequiredLoadRetry;
+		const transportLoadRetryResource = String(userFleets[i].transportLoadRetryResource || '');
+		const hasRequiredLoadRetry = !!transportLoadRetryResource;
+		const resumedRequiredLoadWait = configuredMoveType == 'warp-smart' && hasRequiredLoadRetry &&
+			!hasTransportFuelRequiredLoadRetry(transportLoadRetryResource);
 		if(configuredMoveType == 'automated') userFleets[i].moveType = 'warp';
 		else if(configuredMoveType == 'warp-smart') {
 			const persistedEffectiveMoveType = String(fleetParsedData.transportEffectiveMoveType || '');
@@ -17518,6 +17569,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 				const targetTotalManifest = cloneTransportManifest(targetCargoManifest);
 				let targetLoadManifest = applyTransportTotalRemaining(targetTotalManifest);
+                markTransportRequiredFuelAmounts(targetLoadManifest);
                 let checkCargoResult = await checkCargo(starbaseCargoManifest, targetLoadManifest, userFleets[i]);
                 starbaseCargoManifest = checkCargoResult.currentManifest;
                 targetLoadManifest = checkCargoResult.destinationManifest;
@@ -17651,7 +17703,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
                     //Loading at Starbase
                     if (hasTransportManifest(targetLoadManifest)) {
-                        const loadedCargoResult = await handleTransportLoading(i, userFleets[i].starbaseCoord, targetLoadManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0, fuelLoadedThisStop);
+                        const dedicatedCargo = getTransportDedicatedCargoAmounts(refuelResp, fuelData);
+                        const loadedCargoResult = await handleTransportLoading(i, userFleets[i].starbaseCoord, targetLoadManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0, fuelLoadedThisStop, dedicatedCargo.amounts, dedicatedCargo.freeByResource);
                         cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargoResult.success);
                         if(!loadedCargoResult.success) {
                             //const newFleetState = `ERROR: No more cargo to load`;
@@ -17711,6 +17764,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 				const starbaseTotalManifest = cloneTransportManifest(starbaseCargoManifest);
 				let starbaseLoadManifest = applyTransportTotalRemaining(starbaseTotalManifest);
+                markTransportRequiredFuelAmounts(starbaseLoadManifest);
                 let checkCargoResult = await checkCargo(targetCargoManifest, starbaseLoadManifest, userFleets[i]);
                 targetCargoManifest = checkCargoResult.currentManifest;
                 starbaseLoadManifest = checkCargoResult.destinationManifest;
@@ -17838,7 +17892,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
                     //Loading at Target
                     if(hasTransportManifest(starbaseLoadManifest)) {
-                        const loadedCargoResult = await handleTransportLoading(i, userFleets[i].destCoord, starbaseLoadManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0, fuelLoadedThisStop);
+                        const dedicatedCargo = getTransportDedicatedCargoAmounts(refuelResp, fuelData);
+                        const loadedCargoResult = await handleTransportLoading(i, userFleets[i].destCoord, starbaseLoadManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0, fuelLoadedThisStop, dedicatedCargo.amounts, dedicatedCargo.freeByResource);
                         cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargoResult.success);
                         if(!loadedCargoResult.success) {
                             //const newFleetState = `ERROR: No more cargo to load`;
@@ -17995,14 +18050,17 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const sourceCoords = ConvertCoords(sourceCoord);
 		const destCoords = ConvertCoords(destCoord);
 		const configuredMoveType = moveType;
-		const hasRequiredLoadRetry = !!String(userFleets[i].transportLoadRetryResource || '');
-		const resumedRequiredLoadWait = configuredMoveType == 'warp-smart' && hasRequiredLoadRetry;
+		const transportLoadRetryResource = String(userFleets[i].transportLoadRetryResource || '');
+		const hasRequiredLoadRetry = !!transportLoadRetryResource;
+		const resumedRequiredLoadWait = configuredMoveType == 'warp-smart' && hasRequiredLoadRetry &&
+			!hasTransportFuelRequiredLoadRetry(transportLoadRetryResource);
 		userFleets[i].moveType = configuredMoveType == 'automated' ? 'warp' : resolveWarpSmartTravelMode(configuredMoveType, false);
 		userFleets[i].resupplying = true;
 
 		let sourceCargoManifest = cloneTransportManifest(currentManifest);
 		const destinationTotalManifest = cloneTransportManifest(destinationManifest);
 		let destinationCargoManifest = applyTransportTotalRemaining(destinationTotalManifest);
+		markTransportRequiredFuelAmounts(destinationCargoManifest);
 		const hasSourceManifest = hasTransportManifest(sourceCargoManifest);
 		const hasDestinationManifest = hasTransportManifest(destinationCargoManifest);
 
@@ -18123,7 +18181,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			}
 
 			if(hasDestinationManifest) {
-				const loadedCargoResult = await handleTransportLoading(i, sourceCoord, destinationCargoManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0, fuelLoadedThisStop);
+				const dedicatedCargo = getTransportDedicatedCargoAmounts(refuelResp, fuelData);
+				const loadedCargoResult = await handleTransportLoading(i, sourceCoord, destinationCargoManifest, transportLoadUnloadSingleTx, transportLoadUnloadSingleTx ? unloadedAmountInTransaction : 0, fuelLoadedThisStop, dedicatedCargo.amounts, dedicatedCargo.freeByResource);
 				cLog(4,`${FleetTimeStamp(userFleets[i].label)} loadedCargo: `, loadedCargoResult.success);
 				if(!loadedCargoResult.success) {
 					cLog(1,`${FleetTimeStamp(userFleets[i].label)} ERROR: Unexpected error on cargo load.`);
@@ -18336,6 +18395,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		}
 
         const fuelEntry = transportManifest.find(e => e.res === sageGameAcct.account.mints.fuel.toString()) || {amt: 0};
+		const requiredFuelEntry = fuelEntry.cargoTotal && Number(fuelEntry.requiredAmount !== undefined ? fuelEntry.requiredAmount : fuelEntry.amt || 0) > 0 ? fuelEntry : null;
 
 		//Log fuel readouts
 		const extraFuel = Math.floor(fuelData.amount - fuelData.fuelNeeded);
@@ -18370,6 +18430,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		if (fuelToAdd <= 0) {
             fuelResp.status = 1;
             fuelResp.amount = fuelData.amount + fuelToAdd - fuelData.fuelNeeded;
+            fuelResp.fuelTankAmount = Math.max(0, Math.floor(Number(fuelData.amount || 0)));
+            fuelResp.fuelTankCapacity = Math.max(0, Math.floor(Number(fuelData.capacity || 0)));
             if(transactions.length > 0) fuelResp.transactions = transactions;
             return fuelResp;
         }
@@ -18388,19 +18450,43 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
         let execResp = await fuelFleet(fleet, starbaseCoord, fuelData.account, fuelToAdd, returnTx, fuelTelemetryOptions);
 
         if (execResp && execResp.name == 'NotEnoughResource') {
-			cLog(1,`${FleetTimeStamp(fleet.label)} ERROR: Not enough fuel`);
-			if(globalSettings.emailNotEnoughFFA) await sendEMail(fleet.label + ' not enough fuel', '');
-            fuelResp.detail = 'ERROR: Not enough fuel';
+			if(!requiredFuelEntry) {
+				cLog(1,`${FleetTimeStamp(fleet.label)} Waiting for Fuel`);
+				if(globalSettings.emailNotEnoughFFA) await sendEMail(fleet.label + ' not enough fuel', '');
+				fuelResp.detail = 'Waiting for Fuel';
+			} else {
+				// A checked required-fuel alternative keeps the departure gate
+				// alive even when propulsion cannot yet be topped up.
+				fuelResp.status = 1;
+				fuelResp.amount = Math.max(0, Math.floor(Number(fuelData.amount || 0)) - Math.max(0, Math.floor(Number(fuelData.fuelNeeded || 0))));
+				fuelResp.fuelTankAmount = Math.max(0, Math.floor(Number(fuelData.amount || 0)));
+				fuelResp.fuelTankCapacity = Math.max(0, Math.floor(Number(fuelData.capacity || 0)));
+				fuelResp.alreadyLoaded = alreadyLoaded;
+			}
 		} else {
 			const actualFuelAdded = Math.max(0, Number(execResp && execResp.amount || 0));
-			if(fuelData.amount + actualFuelAdded < fuelData.fuelNeeded) {
-				cLog(1,`${FleetTimeStamp(fleet.label)} ERROR: Not enough fuel`);
-				if(globalSettings.emailNotEnoughFFA) await sendEMail(fleet.label + ' not enough fuel', '');
-				fuelResp.detail = 'ERROR: Not enough fuel';
+			const finalTankAmount = Math.max(0, Math.floor(Number(fuelData.amount || 0)) + actualFuelAdded);
+			if(finalTankAmount < fuelData.fuelNeeded) {
+				if(!requiredFuelEntry) {
+					cLog(1,`${FleetTimeStamp(fleet.label)} Waiting for Fuel`);
+					if(globalSettings.emailNotEnoughFFA) await sendEMail(fleet.label + ' not enough fuel', '');
+					fuelResp.detail = 'Waiting for Fuel';
+				} else {
+					// Propulsion is short, but the checked required-fuel alternative still
+					// owns the departure decision and can wait for compatible stock.
+					fuelResp.status = 1;
+					fuelResp.amount = Math.max(0, finalTankAmount - fuelData.fuelNeeded);
+					alreadyLoaded += actualFuelAdded;
+					fuelResp.fuelTankAmount = finalTankAmount;
+					fuelResp.fuelTankCapacity = Math.max(0, Math.floor(Number(fuelData.capacity || 0)));
+					fuelResp.alreadyLoaded = alreadyLoaded;
+				}
 			} else {
 				fuelResp.status = 1;
-				fuelResp.amount = Math.max(0, fuelData.amount + actualFuelAdded - fuelData.fuelNeeded);
+				fuelResp.amount = Math.max(0, finalTankAmount - fuelData.fuelNeeded);
 				alreadyLoaded += actualFuelAdded;
+				fuelResp.fuelTankAmount = finalTankAmount;
+				fuelResp.fuelTankCapacity = Math.max(0, Math.floor(Number(fuelData.capacity || 0)));
 				fuelResp.alreadyLoaded = alreadyLoaded;
 				if(returnTx && execResp.tx) {
 					transactions.push(execResp.tx);
@@ -18581,7 +18667,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return { fuelUnloadDeficit, transactions, unloadedAmount, unloadedResources: Array.from(new Set(unloadedResources)), error };
 	}
 
-	async function handleTransportLoading(i, starbaseCoords, transportManifest, returnTx, alreadyUnloadedInTransaction, fuelLoadedThisStop = 0) {
+	async function handleTransportLoading(i, starbaseCoords, transportManifest, returnTx, alreadyUnloadedInTransaction, fuelLoadedThisStop = 0, dedicatedCargoAmounts = null, dedicatedFreeByResource = null) {
 		cLog(1,`${FleetTimeStamp(userFleets[i].label)} 📦 Loading Transport`);
 		updateFleetState(userFleets[i], 'Loading');
 
@@ -18633,6 +18719,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const cargoSizes = Object.fromEntries(cargoItems.map(item => [item.token, Number(item.size || 1)]));
 		const extraFreeByResource = {};
 		if(ammoEntry) extraFreeByResource[ammoMint] = Math.max(0, Number(userFleets[i].ammoCapacity || 0) - ammoAlreadyInAmmoBank - ammoLoadingIntoAmmoBank);
+		for(const [mint, free] of Object.entries(dedicatedFreeByResource || {})) {
+			extraFreeByResource[mint] = Math.max(Number(extraFreeByResource[mint] || 0), Math.max(0, Math.floor(Number(free || 0))));
+		}
+		const gateDedicatedCargoAmounts = { ...(dedicatedCargoAmounts || {}) };
+		const usefulDedicatedCargoAmounts = { ...(gateDedicatedCargoAmounts || {}) };
+		if(ammoEntry) usefulDedicatedCargoAmounts[ammoMint] = Math.max(0, Number(ammoAlreadyInAmmoBank || 0)) + Math.max(0, Number(ammoLoadingIntoAmmoBank || 0));
 		for (let entryIndex=0; entryIndex<transportManifest.length; entryIndex++) {
 			const entry = transportManifest[entryIndex];
 			if (entry.res && entry.amt > 0) {
@@ -18698,8 +18790,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			}
 		}
 		const departureCargoSpace = priorityFull ? 0 : cargoSpace;
-		requiredLoadWait = getTransportRequiredLoadWait(transportManifest, projectedCargoAmounts, departureCargoSpace, cargoSizes, extraFreeByResource);
-		const loadThresholds = buildTransportRequiredLoadThresholds(transportManifest, projectedCargoAmounts, departureCargoSpace, cargoSizes, extraFreeByResource);
+		requiredLoadWait = getTransportRequiredLoadWait(transportManifest, projectedCargoAmounts, departureCargoSpace, cargoSizes, extraFreeByResource, gateDedicatedCargoAmounts);
+		const loadThresholds = buildTransportRequiredLoadThresholds(transportManifest, projectedCargoAmounts, departureCargoSpace, cargoSizes, extraFreeByResource, gateDedicatedCargoAmounts);
 		recordTransportLoadDiagnostic(userFleets[i], {
 			phase: requiredLoadWait ? 'threshold-blocked' : 'thresholds-met',
 			cargoSpace: Math.max(0, Number(cargoSpace || 0)),
@@ -18722,8 +18814,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const mint = tokenAccount.account.data.parsed.info.mint;
 			cargoAlreadyOnboard[mint] = (cargoAlreadyOnboard[mint] || 0) + Number(tokenAccount.account.data.parsed.info.tokenAmount.uiAmount || 0);
 		}
-		if(ammoEntry) cargoAlreadyOnboard[ammoMint] = (cargoAlreadyOnboard[ammoMint] || 0) + ammoAlreadyInAmmoBank;
-	        if (!requiredLoadWait && totalLoadedThisStop <= 0 && expectedCnt > 0 && !hasUsefulTransportCargoForManifest(transportManifest, cargoAlreadyOnboard)) {
+		for(const [mint, amount] of Object.entries(dedicatedCargoAmounts || {})) {
+			const dedicatedAmount = Math.max(0, Number(amount || 0));
+			if(dedicatedAmount > 0) cargoAlreadyOnboard[mint] = (cargoAlreadyOnboard[mint] || 0) + dedicatedAmount;
+		}
+	        if (!requiredLoadWait && totalLoadedThisStop <= 0 && expectedCnt > 0 && !hasUsefulTransportCargoForManifest(transportManifest, cargoAlreadyOnboard, usefulDedicatedCargoAmounts)) {
 	            updateFleetState(userFleets[i], 'ERROR: No cargo loaded');
 	            cLog(2,`${FleetTimeStamp(userFleets[i].label)} ERROR: No cargo, ammo, or fuel loaded`);
 	            if(globalSettings.emailNoCargoLoaded) await sendEMail(userFleets[i].label + ' no cargo loaded', notEnoughInfo);

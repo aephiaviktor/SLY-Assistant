@@ -152,6 +152,79 @@ test('dedicated ammo room keeps a checked ammo load waiting even when cargo is f
   assert.deepEqual(JSON.parse(JSON.stringify(result)), { entryIndex: 0, res: 'ammo', missing: 300, resources: ['ammo'] });
 });
 
+test('fuel tank amounts count toward a checked fuel alternative', () => {
+  const getTransportRequiredLoadWait = loadFunction('getTransportRequiredLoadWait');
+  const manifest = [{ res: 'fuel', amt: 0, requiredAmount: 100, cargoTotal: true }];
+
+  assert.equal(getTransportRequiredLoadWait(
+    manifest, {}, 0, { fuel: 1 }, {}, { fuel: 100 },
+  ), null, 'a full required fuel alternative must release the gate');
+
+  const partial = getTransportRequiredLoadWait(
+    manifest, {}, 1000, { fuel: 1 }, {}, { fuel: 50 },
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(partial)), { entryIndex: 0, res: 'fuel', missing: 50, resources: ['fuel'] });
+});
+
+test('fuel waits resume as the normal cargo route rather than subwarp', () => {
+  const context = vm.createContext({
+    cargoItems: [
+      { token: 'fuel', name: 'Fuel' },
+      { token: 'copper', name: 'Copper Ore' },
+    ],
+    sageGameAcct: { account: { mints: { fuel: 'fuel' } } },
+  });
+  vm.runInContext(`${readFunctionSource('hasTransportFuelRequiredLoadRetry')}; this.has = hasTransportFuelRequiredLoadRetry;`, context);
+
+  assert.equal(context.has('Fuel'), true);
+  assert.equal(context.has('Fuel, Copper Ore'), true);
+  assert.equal(context.has('Copper Ore'), false);
+  assert.equal(context.has(''), false);
+});
+
+test('a checked fuel shortage becomes a departure wait instead of a refuel error', async () => {
+  const fleet = { label: 'Phantom', state: 'Idle' };
+  const context = vm.createContext({
+    userFleets: [fleet],
+    globalSettings: {},
+    sageGameAcct: { account: { mints: { ammo: 'ammo', fuel: 'fuel' } } },
+    cargoItems: [{ token: 'fuel', name: 'Fuel', size: 1 }],
+    cargoTypes: [],
+    getFleetFuelData: async () => ({ amount: 0, capacity: 5000, fuelNeeded: 1000, warpCost: 0, subwarpCost: 1000, account: 'fuel-account' }),
+    fuelFleet: async () => ({ name: 'NotEnoughResource' }),
+    execCargoFromFleetToStarbase: async () => ({}),
+    sendEMail: async () => {},
+    cLog() {}, FleetTimeStamp: () => '', updateFleetState: (target, state) => { target.state = state; },
+  });
+  vm.runInContext(`async ${readFunctionSource('handleTransportRefueling')}; this.refuel = handleTransportRefueling;`, context);
+  const manifest = [{ res: 'fuel', amt: 100, cargoTotal: true, requiredAmount: 100 }];
+  const result = await context.refuel(fleet, '0,0', [0, 0], [1, 0], true, 0, manifest, false);
+
+  assert.equal(result.status, 1);
+  assert.equal(result.detail, '');
+  assert.equal(fleet.state.includes('ERROR'), false);
+});
+
+test('an ordinary propulsion fuel shortage waits for stock instead of stopping the route', async () => {
+  const fleet = { label: 'Phantom', state: 'Idle' };
+  const context = vm.createContext({
+    globalSettings: {},
+    sageGameAcct: { account: { mints: { fuel: 'fuel' } } },
+    getFleetFuelData: async () => ({ amount: 0, capacity: 5000, fuelNeeded: 1000, warpCost: 1000, subwarpCost: 10000, account: 'fuel-account' }),
+    fuelFleet: async () => ({ name: 'NotEnoughResource' }),
+    execCargoFromFleetToStarbase: async () => ({}),
+    sendEMail: async () => {},
+    cLog() {}, FleetTimeStamp: () => '', updateFleetState: (target, state) => { target.state = state; },
+  });
+  vm.runInContext(`async ${readFunctionSource('handleTransportRefueling')}; this.refuel = handleTransportRefueling;`, context);
+  const result = await context.refuel(fleet, '0,0', [0, 0], [1, 0], false, 0, [], false);
+
+  assert.equal(result.status, 0);
+  assert.equal(result.detail, 'Waiting for Fuel');
+  assert.equal(fleet.state, 'Refueling');
+});
+
 test('required-load retry is one minute and uses the concise activity text', () => {
   const source = readSource();
   assert.match(source, /const TRANSPORT_LOAD_RETRY_DELAY_MS = 60000;/);
@@ -472,8 +545,9 @@ test('retry handlers run a read-only required-load preflight before transport tr
   assert.doesNotMatch(preflightSource, /execDock|execUndock|txSliceAndSend|depositCargoToFleet/);
   assert.match(source, /handleTransport[\s\S]*?preflightTransportRequiredLoadRetry[\s\S]*?execDock/);
   assert.match(source, /handleTransportStop[\s\S]*?preflightTransportRequiredLoadRetry[\s\S]*?execDock/);
-  assert.match(source, /const hasRequiredLoadRetry = !!String\(userFleets\[i\]\.transportLoadRetryResource \|\| ''\);/);
-  assert.match(source, /const resumedRequiredLoadWait = configuredMoveType == 'warp-smart' && hasRequiredLoadRetry;/);
+  assert.match(source, /const transportLoadRetryResource = String\(userFleets\[i\]\.transportLoadRetryResource \|\| ''\);/);
+  assert.match(source, /const resumedRequiredLoadWait = configuredMoveType == 'warp-smart' && hasRequiredLoadRetry &&\s*!hasTransportFuelRequiredLoadRetry\(transportLoadRetryResource\);/);
+  assert.match(source, /function hasTransportFuelRequiredLoadRetry\(resourceName\)/);
 });
 
 test('CF-05|06 fresh Copper balances permit topping up and departing at full capacity', () => {
