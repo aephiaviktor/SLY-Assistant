@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-296
+// @aephia-version 0.7.35-297
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -16384,7 +16384,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-296', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-297', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -17335,6 +17335,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return { coord: '', resource: '', location: '' };
 	}
 
+	async function getCargoMineDockedCoords(fleetState, fleetStateExtra) {
+		if(fleetState !== 'StarbaseLoadingBay' || !fleetStateExtra?.starbase) return [];
+		const starbase = await sageProgram.account.starbase.fetch(fleetStateExtra.starbase);
+		return [starbase.sector[0].toNumber(), starbase.sector[1].toNumber()];
+	}
+
 	async function runCargoMineMiningCycle(i, fleetParsedData, fleetState, fleetCoords, fleetMining, coord, resource, waitingResource) {
 		const fleet = userFleets[i];
 		const previous = { mineResource: fleet.mineResource, destCoord: fleet.destCoord, starbaseCoord: fleet.starbaseCoord, moveTarget: fleet.moveTarget };
@@ -17387,19 +17393,21 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return Array.from(entries, ([mint, amount]) => ({ mint, amount }));
 	}
 
-	async function unloadAllCargoMineCargo(i, coord, stateLabel) {
+	async function unloadAllCargoMineCargo(i, coord, stateLabel, fleetState = 'Idle', dockedCoords = []) {
 		const fleet = userFleets[i];
 		const cargo = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.cargoHold, {programId: tokenProgramPK});
 		const entries = getCargoMineUnloadEntries(cargo);
-		if(entries.length < 1) return true;
+		const alreadyDocked = fleetState === 'StarbaseLoadingBay';
+		const unloadCoord = alreadyDocked && dockedCoords.length > 1 ? dockedCoords.join(',') : coord;
+		if(entries.length < 1 && !alreadyDocked) return true;
 		updateFleetState(fleet, stateLabel, true);
-		await execDock(fleet, coord);
+		if(!alreadyDocked) await execDock(fleet, unloadCoord);
 		if(String(fleet.state || '').includes('ERROR')) return false;
 		for(const entry of entries) {
-			await execCargoFromFleetToStarbase(fleet, fleet.cargoHold, entry.mint, coord, entry.amount, false);
+			await execCargoFromFleetToStarbase(fleet, fleet.cargoHold, entry.mint, unloadCoord, entry.amount, false);
 			if(String(fleet.state || '').includes('ERROR')) return false;
 		}
-		await execUndock(fleet, coord);
+		await execUndock(fleet, unloadCoord);
 		return !String(fleet.state || '').includes('ERROR');
 	}
 
@@ -17410,20 +17418,22 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return unloaded;
 	}
 
-	async function handleCargoMine(i, fleetParsedData, fleetState, fleetCoords, fleetMining) {
+	async function handleCargoMine(i, fleetParsedData, fleetState, fleetCoords, fleetMining, fleetStateExtra) {
 		const fleet = userFleets[i];
 		const fallbackActive = !!fleetParsedData.cargoMineFallbackActive;
 		const fallbackStarted = !!fleetParsedData.cargoMineFallbackStarted;
 		const waitingResource = String(fleet.transportLoadRetryResource || fleetParsedData.cargoMineWaitingResource || '');
+		const dockedCoords = await getCargoMineDockedCoords(fleetState, fleetStateExtra);
+		const effectiveFleetCoords = dockedCoords.length > 1 ? dockedCoords : fleetCoords;
 		const locationConfig = fallbackActive
 			? { coord: String(fleetParsedData.cargoMineFallbackCoord || ''), resource: String(fleetParsedData.cargoMineFallbackResource || '') }
-			: getCargoMineLocationConfig(fleetParsedData, fleetCoords);
+			: getCargoMineLocationConfig(fleetParsedData, effectiveFleetCoords);
 
 		if(fallbackActive && fallbackStarted && fleetState === 'Idle') {
 			if(!await unloadCargoMineFallbackOutput(i, fleetParsedData)) return;
 			return await handleTransport(i, 'Idle', fleetCoords);
 		}
-		if(fallbackActive && fleetState !== 'Idle' && fleetState !== 'MineAsteroid') return await handleTransport(i, fleetState, fleetCoords);
+		if(fallbackActive && fleetState !== 'Idle' && fleetState !== 'MineAsteroid' && !(fleetState === 'StarbaseLoadingBay' && !fallbackStarted)) return await handleTransport(i, fleetState, fleetCoords);
 		if(!fallbackActive && !waitingResource) return await handleTransport(i, fleetState, fleetCoords);
 
 		let preflight = { ready: true, suppliesReady: true, hasCargoSpace: true, baselineAmount: fleetParsedData.cargoMineFallbackBaselineAmount || 0 };
@@ -17454,7 +17464,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					baselineAmount: 0, protectedFoodAmount: 0, waitingResource
 				});
 			}
-			if(!await unloadAllCargoMineCargo(i, locationConfig.coord, 'Cargo / Mine: clearing cargo for mining')) return;
+			if(!await unloadAllCargoMineCargo(i, locationConfig.coord, 'Cargo / Mine: clearing cargo for mining', fleetState, dockedCoords)) return;
 			preflight = await readCargoMinePreflight(fleet, locationConfig.coord, locationConfig.resource);
 			if(!preflight.suppliesReady || !preflight.hasCargoSpace) {
 				await persistCargoMineFallbackState(i, fleetParsedData, { active: false });
@@ -17462,7 +17472,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				return;
 			}
 		}
-		await runCargoMineMiningCycle(i, fleetParsedData, fleetState, fleetCoords, fleetMining, locationConfig.coord, locationConfig.resource, waitingResource);
+		const miningFleetState = fleetState === 'StarbaseLoadingBay' ? 'Idle' : fleetState;
+		await runCargoMineMiningCycle(i, fleetParsedData, miningFleetState, effectiveFleetCoords, fleetMining, locationConfig.coord, locationConfig.resource, waitingResource);
 	}
 
 	function hasTransportManifest(manifest) {
@@ -19561,7 +19572,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					await handleMining(i, userFleets[i].state, fleetCoords, fleetMining);
 				}
 				else if (fleetParsedData.assignment == 'Cargo / Mine') {
-					await handleCargoMine(i, fleetParsedData, fleetState, fleetCoords, fleetMining);
+					await handleCargoMine(i, fleetParsedData, fleetState, fleetCoords, fleetMining, extra);
 				}
 				else if (fleetParsedData.assignment == 'Transport') {
 					// A due required-load retry retains its Waiting UI label. Route loading

@@ -100,7 +100,7 @@ test('fallback mining unloads all ordinary cargo before mining and again before 
 
   const source = readSource();
   const handler = readFunctionSource('handleCargoMine');
-  assert.ok(source.includes("unloadAllCargoMineCargo(i, locationConfig.coord, 'Cargo / Mine: clearing cargo for mining')"));
+  assert.ok(source.includes("unloadAllCargoMineCargo(i, locationConfig.coord, 'Cargo / Mine: clearing cargo for mining', fleetState, dockedCoords)"));
   assert.ok(source.includes("unloadAllCargoMineCargo(i, coord, 'Cargo / Mine: unloading after mining')"));
   assert.ok(source.includes('await unloadAllCargoMineCargo(i, locationConfig.coord'));
   assert.ok(handler.indexOf('await unloadAllCargoMineCargo(i, locationConfig.coord') < handler.indexOf('await runCargoMineMiningCycle('));
@@ -108,9 +108,23 @@ test('fallback mining unloads all ordinary cargo before mining and again before 
   assert.ok(!source.includes('const minedAmount = Math.max(0, currentAmount - baseline)'));
 });
 
+test('already-docked fallback clears cargo at the actual Starbase without docking twice', () => {
+  const source = readSource();
+  const handler = readFunctionSource('handleCargoMine');
+  const clearance = readFunctionSource('unloadAllCargoMineCargo');
+
+  assert.match(handler, /fleetStateExtra/);
+  assert.ok(handler.includes('getCargoMineDockedCoords(fleetState, fleetStateExtra)'));
+  assert.ok(handler.includes('getCargoMineLocationConfig(fleetParsedData, effectiveFleetCoords)'));
+  assert.ok(clearance.includes("fleetState === 'StarbaseLoadingBay'"));
+  assert.ok(clearance.includes('if(!alreadyDocked) await execDock'));
+  assert.ok(clearance.includes('await execUndock(fleet, unloadCoord)'));
+  assert.ok(source.includes('handleCargoMine(i, fleetParsedData, fleetState, fleetCoords, fleetMining, extra)'));
+});
+
 test('runtime dispatch uses Cargo / Mine orchestration and both source copies match', () => {
   const source = readSource();
   assert.ok(source.includes("fleetParsedData.assignment == 'Cargo / Mine'"));
-  assert.ok(source.includes('handleCargoMine(i, fleetParsedData, fleetState, fleetCoords, fleetMining)'));
+  assert.ok(source.includes('handleCargoMine(i, fleetParsedData, fleetState, fleetCoords, fleetMining, extra)'));
   assert.equal(source, readSource(path.join('electron-app', 'app', 'SLY_Assistant.user.js')));
 });
