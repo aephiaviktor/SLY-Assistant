@@ -37,7 +37,7 @@ function loadPlanner(sourcePath = 'SLY_Assistant.user.js') {
 
 test('Cargo / Mine starts one fallback cycle only after a required-load wait passes mining preflight', () => {
   const plan = loadPlanner();
-  assert.equal(plan({ assignment: 'Cargo / Mine', fleetState: 'Idle', waitingResource: 'Electronics', mineResource: 'carbon', suppliesReady: true, hasCargoSpace: true, atConfiguredLocation: true }).action, 'start-mining');
+  assert.equal(plan({ assignment: 'Cargo / Mine', fleetState: 'Idle', waitingResource: 'Electronics', mineResource: 'carbon', suppliesReady: true, hasCargoSpace: true, atConfiguredLocation: true }).action, 'clear-cargo');
 });
 
 test('missing mining supplies retains the cargo wait instead of producing an error', () => {
@@ -58,6 +58,51 @@ test('completed fallback cycle unloads before transport is rechecked', () => {
 test('active on-chain mining continues through the mining handler', () => {
   const plan = loadPlanner();
   assert.equal(plan({ assignment: 'Cargo / Mine', fleetState: 'MineAsteroid', waitingResource: 'Electronics', mineResource: 'carbon', fallbackActive: true, suppliesReady: true, hasCargoSpace: true, atConfiguredLocation: true }).action, 'continue-mining');
+});
+
+test('fallback phases clear cargo once and preserve loaded mining supplies', () => {
+  const plan = loadPlanner();
+  assert.equal(plan({ assignment: 'Cargo / Mine', fleetState: 'Idle', waitingResource: 'Electronics', mineResource: 'carbon', fallbackPhase: 'clear-cargo', suppliesReady: true, hasCargoSpace: true, atConfiguredLocation: true }).action, 'clear-cargo');
+  assert.equal(plan({ assignment: 'Cargo / Mine', fleetState: 'Idle', waitingResource: 'Electronics', mineResource: 'carbon', fallbackPhase: 'resupply', suppliesReady: true, hasCargoSpace: true, atConfiguredLocation: true }).action, 'resupply');
+  assert.equal(plan({ assignment: 'Cargo / Mine', fleetState: 'Idle', waitingResource: 'Electronics', mineResource: 'carbon', fallbackPhase: 'ready-to-mine', suppliesReady: true, hasCargoSpace: true, atConfiguredLocation: true }).action, 'start-mining');
+});
+
+test('chain mining state overrides stale Waiting or ERROR labels', () => {
+  const source = readSource();
+  const handler = readFunctionSource('handleCargoMine');
+  assert.ok(source.includes("fleetState === 'MineAsteroid' && fleetMining"));
+  assert.ok(!source.includes("userFleets[i].state.slice(0, 4) === 'Mine' && fleetMining"));
+  assert.ok(handler.includes("fleetState === 'MineAsteroid'"));
+  assert.ok(source.includes('cargoMineStateRecoveryError'));
+  assert.ok(source.includes('InvalidCurrentStarbaseState|InvalidFleetState'));
+});
+
+test('durable fallback phases survive resupply and route recheck boundaries', () => {
+  const source = readSource();
+  assert.ok(source.includes("cargoMineFallbackPhase: String(state.phase || '')"));
+  for (const phase of ['clear-cargo', 'resupply', 'ready-to-mine', 'mining', 'unload-output', 'recheck-route']) {
+    assert.ok(source.includes("'" + phase + "'"), 'missing phase ' + phase);
+  }
+  const handler = readFunctionSource('handleCargoMine');
+  assert.ok(handler.indexOf("phase: 'resupply'") > handler.indexOf('await unloadAllCargoMineCargo(i, locationConfig.coord'));
+  assert.ok(handler.includes("fallbackPhase !== 'clear-cargo'"));
+});
+
+test('Cargo / Mine ignores a stale wait for unchecked Fuel at the current endpoint', () => {
+  const context = vm.createContext({
+    ConvertCoords: value => String(value || '').split(',').map(Number),
+    CoordsEqual: (left, right) => left.length === right.length && left.every((value, index) => value === right[index]),
+    cargoItems: [{ token: 'fuel', name: 'Fuel' }, { token: 'electronics', name: 'Electronics' }],
+  });
+  vm.runInContext(`${readFunctionSource('getCargoMineRequiredLoadLabelAtLocation')}; this.getLabel = getCargoMineRequiredLoadLabelAtLocation;`, context);
+  const config = {
+    dest: '5,6', starbase: '1,2',
+    transportResource1: 'electronics', transportResource1Perc: 60000, transportResource1Total: true,
+    transportSBResource4: 'fuel', transportSBResource4Perc: 200000, transportSBResource4Total: false,
+  };
+  assert.equal(context.getLabel(config, [1, 2]), 'Electronics');
+  assert.equal(context.getLabel(config, [5, 6]), '');
+  assert.ok(readFunctionSource('handleCargoMine').includes('clearTransportLoadRetry(fleet)'));
 });
 
 test('first fallback row maps to Target and second row maps to Starbase', () => {
@@ -103,7 +148,7 @@ test('fallback mining unloads all ordinary cargo before mining and again before 
   assert.ok(source.includes("unloadAllCargoMineCargo(i, locationConfig.coord, 'Cargo / Mine: clearing cargo for mining', fleetState, dockedCoords)"));
   assert.ok(source.includes("unloadAllCargoMineCargo(i, coord, 'Cargo / Mine: unloading after mining')"));
   assert.ok(source.includes('await unloadAllCargoMineCargo(i, locationConfig.coord'));
-  assert.ok(handler.indexOf('await unloadAllCargoMineCargo(i, locationConfig.coord') < handler.indexOf('await runCargoMineMiningCycle('));
+  assert.ok(handler.lastIndexOf('await unloadAllCargoMineCargo(i, locationConfig.coord') < handler.lastIndexOf('await runCargoMineMiningCycle('));
   assert.ok(!source.includes('preserveCargo: true'));
   assert.ok(!source.includes('const minedAmount = Math.max(0, currentAmount - baseline)'));
 });

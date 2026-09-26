@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-297
+// @aephia-version 0.7.35-298
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -14414,15 +14414,21 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		input = input || {};
 		const waitingResource = String(input.waitingResource || '');
 		const waitingStatus = waitingResource ? `Waiting for ${waitingResource}` : 'Idle';
+		const fallbackPhase = String(input.fallbackPhase || '');
 		if(input.assignment !== 'Cargo / Mine') return { action: 'transport', status: waitingStatus };
-		if(input.fallbackActive && input.fleetState === 'MineAsteroid') return { action: 'continue-mining', status: waitingStatus };
-		if(input.fallbackActive && input.fallbackStarted === false) return { action: 'start-mining', status: waitingStatus };
+		if(input.fleetState === 'MineAsteroid') return { action: 'continue-mining', status: waitingStatus };
+		if(fallbackPhase === 'clear-cargo') return { action: 'clear-cargo', status: waitingStatus };
+		if(fallbackPhase === 'resupply') return { action: 'resupply', status: waitingStatus };
+		if(fallbackPhase === 'ready-to-mine') return { action: 'start-mining', status: waitingStatus };
+		if(fallbackPhase === 'mining' || fallbackPhase === 'unload-output') return { action: 'unload-recheck', status: waitingStatus };
+		if(fallbackPhase === 'recheck-route') return { action: 'transport', status: waitingStatus };
+		if(input.fallbackActive && input.fallbackStarted === false) return { action: 'clear-cargo', status: waitingStatus };
 		if(input.fallbackActive) return { action: 'unload-recheck', status: waitingStatus };
 		if(!waitingResource) return { action: 'transport', status: waitingStatus };
 		if(!input.mineResource || !input.atConfiguredLocation) return { action: 'wait', status: waitingStatus, reason: input.mineResource ? 'Fallback location mismatch' : 'No fallback mining resource' };
 		if(!input.suppliesReady) return { action: 'wait', status: waitingStatus, reason: 'Missing mining supplies' };
 		if(!input.hasCargoSpace) return { action: 'wait', status: waitingStatus, reason: 'No mining cargo space' };
-		return { action: 'start-mining', status: waitingStatus };
+		return { action: 'clear-cargo', status: waitingStatus };
 	}
 
 	function openTransportLoadRetryGate(fleet) {
@@ -15064,6 +15070,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					cargoMineTargetResource: fleetAssignment === 'Cargo / Mine' ? cargoMineTargetResource : '',
 					cargoMineStarbaseResource: fleetAssignment === 'Cargo / Mine' ? cargoMineStarbaseResource : '',
 					cargoMineFallbackActive: fleetAssignment === 'Cargo / Mine' && !assignmentChanged ? !!fleetParsedData.cargoMineFallbackActive : false,
+					cargoMineFallbackPhase: fleetAssignment === 'Cargo / Mine' && !assignmentChanged ? String(fleetParsedData.cargoMineFallbackPhase || '') : '',
 					cargoMineFallbackCoord: fleetAssignment === 'Cargo / Mine' && !assignmentChanged ? String(fleetParsedData.cargoMineFallbackCoord || '') : '',
 					cargoMineFallbackResource: fleetAssignment === 'Cargo / Mine' && !assignmentChanged ? String(fleetParsedData.cargoMineFallbackResource || '') : '',
 					cargoMineFallbackBaselineAmount: fleetAssignment === 'Cargo / Mine' && !assignmentChanged ? Math.max(0, Number(fleetParsedData.cargoMineFallbackBaselineAmount || 0)) : 0,
@@ -15170,6 +15177,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				userFleets[userFleetIndex].cargoMineTargetResource = fleet.cargoMineTargetResource;
 				userFleets[userFleetIndex].cargoMineStarbaseResource = fleet.cargoMineStarbaseResource;
 				userFleets[userFleetIndex].cargoMineFallbackActive = fleet.cargoMineFallbackActive;
+				userFleets[userFleetIndex].cargoMineFallbackPhase = fleet.cargoMineFallbackPhase;
 				userFleets[userFleetIndex].cargoMineFallbackCoord = fleet.cargoMineFallbackCoord;
 				userFleets[userFleetIndex].cargoMineFallbackResource = fleet.cargoMineFallbackResource;
 				userFleets[userFleetIndex].cargoMineFallbackBaselineAmount = fleet.cargoMineFallbackBaselineAmount;
@@ -16384,7 +16392,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-297', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-298', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -17282,7 +17290,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		if(userFleets[i].stopping) return;
 
 		//Already mining?
-		if (userFleets[i].state.slice(0, 4) === 'Mine' && fleetMining) {
+		if (fleetState === 'MineAsteroid' && fleetMining) {
             let maxMiningDuration = calculateMiningDuration(userFleets[i].cargoCapacity, userFleets[i].miningRate, resourceHardness, systemRichness);
             let mineTimePassed = (Date.now() / 1000) - fleetMining.start.toNumber();
             let foodConsumed = Math.ceil(mineTimePassed * (userFleets[i].foodConsumptionRate / 10000));
@@ -17316,6 +17324,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const next = {
 			cargoMineFallbackActive: !!state.active,
 			cargoMineFallbackStarted: !!state.started,
+			cargoMineFallbackPhase: String(state.phase || ''),
 			cargoMineFallbackCoord: String(state.coord || ''),
 			cargoMineFallbackResource: String(state.resource || ''),
 			cargoMineFallbackBaselineAmount: Math.max(0, Number(state.baselineAmount || 0)),
@@ -17335,6 +17344,22 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return { coord: '', resource: '', location: '' };
 	}
 
+	function getCargoMineRequiredLoadLabelAtLocation(fleetParsedData, fleetCoords) {
+		const atStarbase = CoordsEqual(fleetCoords, ConvertCoords(fleetParsedData.starbase || ''));
+		const atTarget = CoordsEqual(fleetCoords, ConvertCoords(fleetParsedData.dest || ''));
+		const prefix = atStarbase ? 'transportResource' : (atTarget ? 'transportSBResource' : '');
+		if(!prefix) return '';
+		const names = [];
+		for(let index = 1; index <= 4; index++) {
+			const key = prefix + index;
+			const mint = String(fleetParsedData[key] || '');
+			const amount = Math.max(0, Number(fleetParsedData[key + 'Perc'] || 0));
+			if(!fleetParsedData[key + 'Total'] || !mint || amount <= 0) continue;
+			names.push(cargoItems.find(item => item.token === mint)?.name || mint);
+		}
+		return names.join(', ');
+	}
+
 	async function getCargoMineDockedCoords(fleetState, fleetStateExtra) {
 		if(fleetState !== 'StarbaseLoadingBay' || !fleetStateExtra?.starbase) return [];
 		const starbase = await sageProgram.account.starbase.fetch(fleetStateExtra.starbase);
@@ -17343,13 +17368,14 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 	async function runCargoMineMiningCycle(i, fleetParsedData, fleetState, fleetCoords, fleetMining, coord, resource, waitingResource) {
 		const fleet = userFleets[i];
+		const fallbackPhase = String(fleetParsedData.cargoMineFallbackPhase || '');
 		const previous = { mineResource: fleet.mineResource, destCoord: fleet.destCoord, starbaseCoord: fleet.starbaseCoord, moveTarget: fleet.moveTarget };
 		fleet.mineResource = resource;
 		fleet.destCoord = coord;
 		fleet.starbaseCoord = coord;
-		if(fleetState === 'MineAsteroid' && !fleetParsedData.cargoMineFallbackStarted) {
+		if(fleetState === 'MineAsteroid' && (fallbackPhase !== 'mining' || !fleetParsedData.cargoMineFallbackStarted)) {
 			await persistCargoMineFallbackState(i, fleetParsedData, {
-				active: true, started: true, coord, resource,
+				active: true, started: true, phase: 'mining', coord, resource,
 				baselineAmount: fleetParsedData.cargoMineFallbackBaselineAmount,
 				protectedFoodAmount: fleetParsedData.cargoMineProtectedFoodAmount,
 				waitingResource
@@ -17360,7 +17386,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			if(String(fleet.state || '').startsWith('Mine')) {
 				if(!fleetParsedData.cargoMineFallbackStarted) {
 					await persistCargoMineFallbackState(i, fleetParsedData, {
-						active: true, started: true, coord, resource,
+						active: true, started: true, phase: 'mining', coord, resource,
 						baselineAmount: fleetParsedData.cargoMineFallbackBaselineAmount,
 						protectedFoodAmount: fleetParsedData.cargoMineProtectedFoodAmount,
 						waitingResource
@@ -17370,8 +17396,16 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				const eta = String(fleet.state).match(/\[[^\]]+\]/)?.[0] || '';
 				updateFleetState(fleet, ('Mine ' + resourceName + ' while waiting for ' + waitingResource + ' ' + eta).trim(), true);
 			}
+			else if(fallbackPhase === 'resupply' && fleet.justResupplied) {
+				await persistCargoMineFallbackState(i, fleetParsedData, {
+					active: true, started: false, phase: 'ready-to-mine', coord, resource,
+					baselineAmount: fleetParsedData.cargoMineFallbackBaselineAmount,
+					protectedFoodAmount: fleetParsedData.cargoMineProtectedFoodAmount,
+					waitingResource
+				});
+			}
 			if(String(fleet.state || '').startsWith('ERROR: Not enough')) {
-				await persistCargoMineFallbackState(i, fleetParsedData, { active: false });
+				await persistCargoMineFallbackState(i, fleetParsedData, { active: false, phase: '' });
 				scheduleTransportLoadRetry(fleet, waitingResource);
 			}
 		} finally {
@@ -17414,7 +17448,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	async function unloadCargoMineFallbackOutput(i, fleetParsedData) {
 		const coord = String(fleetParsedData.cargoMineFallbackCoord || '');
 		const unloaded = await unloadAllCargoMineCargo(i, coord, 'Cargo / Mine: unloading after mining');
-		if(unloaded) await persistCargoMineFallbackState(i, fleetParsedData, { active: false });
+		if(unloaded) await persistCargoMineFallbackState(i, fleetParsedData, {
+			active: true, started: false, phase: 'recheck-route', coord,
+			resource: fleetParsedData.cargoMineFallbackResource,
+			baselineAmount: 0, protectedFoodAmount: 0,
+			waitingResource: fleetParsedData.cargoMineWaitingResource
+		});
 		return unloaded;
 	}
 
@@ -17422,19 +17461,43 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const fallbackActive = !!fleetParsedData.cargoMineFallbackActive;
 		const fallbackStarted = !!fleetParsedData.cargoMineFallbackStarted;
-		const waitingResource = String(fleet.transportLoadRetryResource || fleetParsedData.cargoMineWaitingResource || '');
+		let fallbackPhase = String(fleetParsedData.cargoMineFallbackPhase || '');
+		if(!fallbackPhase && fallbackActive) fallbackPhase = fallbackStarted ? 'mining' : 'clear-cargo';
+		let waitingResource = String(fleet.transportLoadRetryResource || fleetParsedData.cargoMineWaitingResource || '');
 		const dockedCoords = await getCargoMineDockedCoords(fleetState, fleetStateExtra);
 		const effectiveFleetCoords = dockedCoords.length > 1 ? dockedCoords : fleetCoords;
+		const requiredLoadLabel = getCargoMineRequiredLoadLabelAtLocation(fleetParsedData, effectiveFleetCoords);
+		if(!fallbackActive && waitingResource && waitingResource !== requiredLoadLabel) {
+			clearTransportLoadRetry(fleet);
+			waitingResource = '';
+			fleetParsedData.cargoMineWaitingResource = '';
+			await saveFleetConfig(fleet.publicKey.toString(), fleetParsedData, 'cargo-mine-clear-stale-wait');
+		}
 		const locationConfig = fallbackActive
 			? { coord: String(fleetParsedData.cargoMineFallbackCoord || ''), resource: String(fleetParsedData.cargoMineFallbackResource || '') }
 			: getCargoMineLocationConfig(fleetParsedData, effectiveFleetCoords);
 
-		if(fallbackActive && fallbackStarted && fleetState === 'Idle') {
-			if(!await unloadCargoMineFallbackOutput(i, fleetParsedData)) return;
-			return await handleTransport(i, 'Idle', fleetCoords);
+		if(fleetState === 'MineAsteroid') {
+			if(fallbackPhase !== 'mining') await persistCargoMineFallbackState(i, fleetParsedData, {
+				active: true, started: true, phase: 'mining', coord: locationConfig.coord,
+				resource: locationConfig.resource, baselineAmount: 0, protectedFoodAmount: 0, waitingResource
+			});
+			return await runCargoMineMiningCycle(i, fleetParsedData, fleetState, effectiveFleetCoords, fleetMining, locationConfig.coord, locationConfig.resource, waitingResource);
 		}
-		if(fallbackActive && fleetState !== 'Idle' && fleetState !== 'MineAsteroid' && !(fleetState === 'StarbaseLoadingBay' && !fallbackStarted)) return await handleTransport(i, fleetState, fleetCoords);
-		if(!fallbackActive && !waitingResource) return await handleTransport(i, fleetState, fleetCoords);
+		if((fallbackPhase === 'mining' || fallbackPhase === 'unload-output') && fleetState === 'Idle') {
+			if(fallbackPhase !== 'unload-output') await persistCargoMineFallbackState(i, fleetParsedData, {
+				active: true, started: true, phase: 'unload-output', coord: locationConfig.coord,
+				resource: locationConfig.resource, baselineAmount: 0, protectedFoodAmount: 0, waitingResource
+			});
+			if(!await unloadCargoMineFallbackOutput(i, fleetParsedData)) return;
+			fallbackPhase = 'recheck-route';
+		}
+		if(fallbackPhase === 'recheck-route') {
+			await persistCargoMineFallbackState(i, fleetParsedData, { active: false, started: false, phase: '' });
+			return await handleTransport(i, 'Idle', effectiveFleetCoords);
+		}
+		if(fallbackActive && !['Idle', 'StarbaseLoadingBay'].includes(fleetState)) return await handleTransport(i, fleetState, effectiveFleetCoords);
+		if(!fallbackActive && !waitingResource) return await handleTransport(i, fleetState, effectiveFleetCoords);
 
 		let preflight = { ready: true, suppliesReady: true, hasCargoSpace: true, baselineAmount: fleetParsedData.cargoMineFallbackBaselineAmount || 0 };
 		if(fleetState !== 'MineAsteroid') preflight = await readCargoMinePreflight(
@@ -17447,6 +17510,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			mineResource: locationConfig.resource,
 			fallbackActive,
 			fallbackStarted,
+			fallbackPhase,
 			suppliesReady: preflight.suppliesReady,
 			hasCargoSpace: preflight.hasCargoSpace,
 			atConfiguredLocation: !!locationConfig.coord
@@ -17455,22 +17519,30 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			scheduleTransportLoadRetry(fleet, waitingResource);
 			return;
 		}
-		if(decision.action === 'transport') return await handleTransport(i, fleetState, fleetCoords);
-		if(decision.action === 'start-mining') {
+		if(decision.action === 'transport') return await handleTransport(i, fleetState, effectiveFleetCoords);
+		if(decision.action === 'clear-cargo') {
 			if(!fallbackActive) {
 				clearTransportLoadRetryTimer(fleet);
 				await persistCargoMineFallbackState(i, fleetParsedData, {
-					active: true, started: false, coord: locationConfig.coord, resource: locationConfig.resource,
+					active: true, started: false, phase: 'clear-cargo', coord: locationConfig.coord, resource: locationConfig.resource,
 					baselineAmount: 0, protectedFoodAmount: 0, waitingResource
 				});
 			}
 			if(!await unloadAllCargoMineCargo(i, locationConfig.coord, 'Cargo / Mine: clearing cargo for mining', fleetState, dockedCoords)) return;
+			fallbackPhase = 'resupply';
+			await persistCargoMineFallbackState(i, fleetParsedData, {
+				active: true, started: false, phase: 'resupply', coord: locationConfig.coord, resource: locationConfig.resource,
+				baselineAmount: 0, protectedFoodAmount: 0, waitingResource
+			});
 			preflight = await readCargoMinePreflight(fleet, locationConfig.coord, locationConfig.resource);
 			if(!preflight.suppliesReady || !preflight.hasCargoSpace) {
-				await persistCargoMineFallbackState(i, fleetParsedData, { active: false });
 				scheduleTransportLoadRetry(fleet, waitingResource);
 				return;
 			}
+		}
+		if(fleetState === 'StarbaseLoadingBay' && fallbackPhase !== 'clear-cargo') {
+			await execUndock(fleet, dockedCoords.join(','));
+			return;
 		}
 		const miningFleetState = fleetState === 'StarbaseLoadingBay' ? 'Idle' : fleetState;
 		await runCargoMineMiningCycle(i, fleetParsedData, miningFleetState, effectiveFleetCoords, fleetMining, locationConfig.coord, locationConfig.resource, waitingResource);
@@ -19449,12 +19521,14 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			});
 		}
 
+		const cargoMineStateRecoveryError = userFleets[i].assignment === 'Cargo / Mine'
+			&& /InvalidCurrentStarbaseState|InvalidFleetState/.test(String(userFleets[i].state || ''));
 		const transportUnloadRetry = getTransportUnloadRetry(userFleets[i]);
 		if(transportUnloadRetry) {
 			if(!transportUnloadRetry.retryAt || Date.now() < transportUnloadRetry.retryAt) return;
 		}
 		//Don't run fleets in an error state
-		else if (userFleets[i].state.includes('ERROR')) return;
+		else if (userFleets[i].state.includes('ERROR') && !cargoMineStateRecoveryError) return;
 
 		userFleets[i].lastOp = Date.now();
 
@@ -19474,7 +19548,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const onTarget = userFleets[i].lastScanCoord == userFleets[i].destCoord;
 		const waitingForScan = userFleets[i].scanEnd && (Date.now() <= userFleets[i].scanEnd);
 		if(moving) cLog(2, `${FleetTimeStamp(userFleets[i].label)} Operating moving fleet`);
-		if(userFleets[i].resupplying || mining) return;
+		if(userFleets[i].resupplying || (mining && userFleets[i].assignment !== 'Cargo / Mine')) return;
 		if(!onTarget && waitingForWarpCD) return;
 		let forceNewAutoMoveTarget = false;
 		if(scanning && onTarget && waitingForScan) {
@@ -20955,6 +21029,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				let cargoMineTargetResource = String(fleetParsedData?.cargoMineTargetResource || '');
 				let cargoMineStarbaseResource = String(fleetParsedData?.cargoMineStarbaseResource || '');
 				let cargoMineFallbackActive = !!fleetParsedData?.cargoMineFallbackActive;
+				let cargoMineFallbackPhase = String(fleetParsedData?.cargoMineFallbackPhase || '');
 				let cargoMineFallbackCoord = String(fleetParsedData?.cargoMineFallbackCoord || '');
 				let cargoMineFallbackResource = String(fleetParsedData?.cargoMineFallbackResource || '');
 				let cargoMineFallbackBaselineAmount = Math.max(0, Number(fleetParsedData?.cargoMineFallbackBaselineAmount || 0));
@@ -21095,6 +21170,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					cargoMineTargetResource,
 					cargoMineStarbaseResource,
 					cargoMineFallbackActive,
+					cargoMineFallbackPhase,
 					cargoMineFallbackCoord,
 					cargoMineFallbackResource,
 					cargoMineFallbackBaselineAmount,
