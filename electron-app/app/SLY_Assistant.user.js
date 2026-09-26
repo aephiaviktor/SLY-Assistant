@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-295
+// @aephia-version 0.7.35-296
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -6441,7 +6441,7 @@
 	}
 
 	async function addFleetTelemetryCargoLoad(fleet, fleetParsedData, load) {
-		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return null;
+		if(!fleet || !fleetParsedData || !['Transport', 'Cargo / Mine', 'Supply Chain'].includes(fleetParsedData.assignment)) return null;
 		const trackedAmount = load && Object.prototype.hasOwnProperty.call(load, 'trackedAmount')
 			? Number(load.trackedAmount || 0)
 			: Number(load?.amount || 0);
@@ -6497,7 +6497,7 @@
 	}
 
 	async function addFleetTelemetryMovementCost(fleet, fleetParsedData, movementCost, fleetCurrentCargo) {
-		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return null;
+		if(!fleet || !fleetParsedData || !['Transport', 'Cargo / Mine', 'Supply Chain'].includes(fleetParsedData.assignment)) return null;
 		let cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
 		const eventContext = movementCost?.eventContext;
 		const fuel = Math.max(0, Number(movementCost?.burnedFuel || 0));
@@ -6539,7 +6539,7 @@
 	}
 
 	async function addFleetTelemetryCargoDelivery(fleet, fleetParsedData, delivery) {
-		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return null;
+		if(!fleet || !fleetParsedData || !['Transport', 'Cargo / Mine', 'Supply Chain'].includes(fleetParsedData.assignment)) return null;
 		if(!delivery || !(Number(delivery.amount || 0) > 0) || !['cargo_out', 'ammo_out', 'fuel_out'].includes(delivery.loadType)) return null;
 		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
 		const mint = String(delivery.mint || '');
@@ -6591,7 +6591,7 @@
 	}
 
 	async function maybeFinalizeFleetTelemetryCostCycle(fleet, fleetParsedData, starbaseName, legCount) {
-		if(!fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return false;
+		if(!fleet || !fleetParsedData || !['Transport', 'Cargo / Mine', 'Supply Chain'].includes(fleetParsedData.assignment)) return false;
 		const cycle = await getFleetTelemetryCostCycle(fleet, fleetParsedData);
 		const homeStarbase = cycle.homeStarbase || getFleetTelemetryHomeStarbaseName(fleet, fleetParsedData);
 		const [homeX, homeY] = ConvertCoords(cycle.homeCoord || getFleetTelemetryHomeCoord(fleet, fleetParsedData));
@@ -6639,7 +6639,7 @@
 	}
 
 	async function sendFleetMovementCargoTelemetry(fleet, fleetParsedData, fleetCurrentCargo, movementTags, movementType = '') {
-		if(!globalSettings.influxURL.length || !fleet || !fleetParsedData || !['Transport', 'Supply Chain'].includes(fleetParsedData.assignment)) return;
+		if(!globalSettings.influxURL.length || !fleet || !fleetParsedData || !['Transport', 'Cargo / Mine', 'Supply Chain'].includes(fleetParsedData.assignment)) return;
 		const cargoTokens = Array.isArray(fleetCurrentCargo?.value) ? fleetCurrentCargo.value : [];
 		const lines = [];
 		for(const tokenAccount of cargoTokens) {
@@ -8824,6 +8824,29 @@ window.addEventListener('beforeunload', () => toolkitCollector.stop(), {once:tru
         return mineableResource;
     }
 
+	async function getMineableCargoItemsAtCoords(coords) {
+		const [x, y] = ConvertCoords(coords);
+		if(!Number.isFinite(Number(x)) || !Number.isFinite(Number(y))) return [];
+		const planets = await getPlanetsFromCoords(x, y);
+		if(!planets.length || !mineItems.length) return [];
+		await getMineableResourceFromPlanet(planets[0].publicKey.toString(), mineItems[0].publicKey.toString());
+		const planetKeys = new Set(planets.map(planet => planet.publicKey.toString()));
+		const mineItemByKey = new Map(mineItems.map(item => [item.publicKey.toString(), item]));
+		const seen = new Set();
+		const result = [];
+		for(const resource of minableResourceData?.mineableResources || []) {
+			if(!planetKeys.has(resource.account.location.toString())) continue;
+			const mineItem = mineItemByKey.get(resource.account.mineItem.toString());
+			const mint = mineItem?.account?.mint?.toString();
+			const cargoItem = mint ? cargoItems.find(item => item.token === mint) : null;
+			if(cargoItem && !seen.has(cargoItem.token)) {
+				seen.add(cargoItem.token);
+				result.push(cargoItem);
+			}
+		}
+		return result.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
     async function getStarbasePlayer(userProfile, starbase) {
         return new Promise(async resolve => {
             //starbasePlayerData
@@ -9543,7 +9566,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	}
 
 	function getSlyaFleetAssignmentFromConfig(rawConfig, explicitAssignment = '') {
-		const operationalAssignments = ['Mine', 'Scan', 'Transport', 'Supply Chain'];
+		const operationalAssignments = ['Mine', 'Scan', 'Transport', 'Cargo / Mine', 'Supply Chain'];
 		const explicit = String(explicitAssignment || '').trim();
 		if (operationalAssignments.includes(explicit)) return explicit;
 		try {
@@ -11046,7 +11069,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		cLog(1,`${FleetTimeStamp(fleet.label)} Undock ${assignment} Startup`);
 
-		if(assignment == 'Transport' || assignment == 'Supply Chain' || assignment == 'Mine') {
+		if(assignment == 'Transport' || assignment == 'Cargo / Mine' || assignment == 'Supply Chain' || assignment == 'Mine') {
 			const fleetAcctInfo = await solanaReadConnection.getAccountInfo(fleet.publicKey);
 			const [fleetState, extra] = getFleetState(fleetAcctInfo, fleet);
 			if (fleetState === 'StarbaseLoadingBay') {
@@ -13098,7 +13121,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			scanOptimizationDiv.appendChild(scanOptimizationStatus);
 			fleetLabelTd.appendChild(scanOptimizationDiv);
 
-			let assistAssignments = ['','Scan','Mine','Transport','Supply Chain'];
+			let assistAssignments = ['', 'Scan', 'Mine', 'Transport', 'Cargo / Mine', 'Supply Chain'];
 			let assignmentOptionsStr = '';
 			let fleetAssignment = document.createElement('select');
 			assistAssignments.forEach( function(assignment) {assignmentOptionsStr += '<option value="' + assignment + '">' + assignment + '</option>';});
@@ -13486,8 +13509,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 			let transportRow = document.createElement('tr');
 			transportRow.classList.add('assist-transport-row');
-			transportRow.style.display = fleetParsedData && fleetParsedData.assignment == 'Transport' ? 'table-row' : 'none';
-			fleetParsedData && fleetParsedData.assignment == 'Transport' && fleetRow.classList.add('show-top-border');
+			transportRow.style.display = fleetParsedData && (fleetParsedData.assignment == 'Transport' || fleetParsedData.assignment == 'Cargo / Mine') ? 'table-row' : 'none';
+			fleetParsedData && (fleetParsedData.assignment == 'Transport' || fleetParsedData.assignment == 'Cargo / Mine') && fleetRow.classList.add('show-top-border');
 			targetElem.appendChild(transportRow);
 
 			let transportLabel1 = document.createElement('div');
@@ -13521,14 +13544,14 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				let transportResource = document.createElement('select');
 				transportResource.classList.add('transport-resource-select');
 				transportResource.innerHTML = transportOptStr;
-				transportResource.style.width = '74px';
+				transportResource.style.width = '64px';
 				let transportResourceToken = savedEntry && savedEntry.res ? cargoItems.find(r => r.token == savedEntry.res) : '';
 				transportResource.value = transportResourceToken && transportResourceToken.name ? transportResourceToken.name : '';
 				let transportResourcePerc = document.createElement('input');
 				transportResourcePerc.classList.add('transport-resource-amount');
 				transportResourcePerc.setAttribute('type', 'text');
 				transportResourcePerc.placeholder = '0';
-				transportResourcePerc.style.width = '64px';
+				transportResourcePerc.style.width = '52px';
 				transportResourcePerc.value = savedEntry && savedEntry.amt ? savedEntry.amt : '';
 				let transportResourceTotal = document.createElement('input');
 				transportResourceTotal.classList.add('transport-resource-total');
@@ -13548,7 +13571,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					transportResourceCrew.classList.add('transport-crew-amount');
 					transportResourceCrew.setAttribute('type', 'text');
 					transportResourceCrew.placeholder = '0';
-					transportResourceCrew.style.width = '46px';
+					transportResourceCrew.style.width = '34px';
 					transportResourceCrew.value = savedEntry && savedEntry.crew ? savedEntry.crew : '';
 					let transportResourceCrewTotal = document.createElement('input');
 					transportResourceCrewTotal.classList.add('transport-crew-total');
@@ -13566,6 +13589,68 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				transportResourceDiv.appendChild(transportResourceTotal);
 				return transportResourceDiv;
 			};
+			const createCargoMineResourceSelect = (className, savedToken, locationLabel) => {
+				const wrapper = document.createElement('div');
+				wrapper.classList.add('cargo-mine-resource-wrapper');
+				wrapper.style.display = fleetParsedData?.assignment === 'Cargo / Mine' ? 'inline-block' : 'none';
+				const select = document.createElement('select');
+				select.classList.add(className);
+				select.style.width = '78px';
+				select.title = 'Fallback resource to mine while cargo is unavailable at ' + locationLabel;
+				select.dataset.savedToken = String(savedToken || '');
+				select.innerHTML = '<option value="">Loading...</option>';
+				wrapper.appendChild(select);
+				return { wrapper, select };
+			};
+			const cargoMineTarget = createCargoMineResourceSelect('cargo-mine-target-resource', fleetParsedData?.cargoMineTargetResource, 'Target');
+			const cargoMineStarbase = createCargoMineResourceSelect('cargo-mine-starbase-resource', fleetParsedData?.cargoMineStarbaseResource, 'Starbase');
+			const refreshCargoMineResourceSelect = async (select, coords) => {
+				const loadId = String(Number(select.dataset.loadId || 0) + 1);
+				select.dataset.loadId = loadId;
+				select.disabled = true;
+				select.innerHTML = '<option value="">Loading...</option>';
+				try {
+					const [resources, supplies] = await Promise.all([
+						getMineableCargoItemsAtCoords(coords),
+						readCargoMineSupplyAvailability(fleet, coords, 60)
+					]);
+					if(select.dataset.loadId !== loadId) return;
+					select.replaceChildren();
+					if(!supplies.ready) {
+						const option = new Option('Missing mining supplies', '');
+						option.disabled = true; option.selected = true; select.add(option);
+						select.title = 'Mining fallback is unavailable: Missing mining supplies';
+						return;
+					}
+					select.add(new Option('', ''));
+					for(const resource of resources) select.add(new Option(resource.name, resource.token));
+					if(resources.some(resource => resource.token === select.dataset.savedToken)) select.value = select.dataset.savedToken;
+					if(resources.length < 1) {
+						select.options[0].text = 'No mineable resources';
+						select.options[0].disabled = true;
+					}
+					select.disabled = resources.length < 1;
+				} catch(error) {
+					if(select.dataset.loadId !== loadId) return;
+					select.innerHTML = '<option value="">Mining availability unavailable</option>';
+					select.disabled = true;
+					cLog(2, FleetTimeStamp(fleet.label) + ' Cargo / Mine dropdown unavailable', error);
+				}
+			};
+			const refreshCargoMineSelectors = async () => {
+				if(fleetAssignment.value !== 'Cargo / Mine') return;
+				await Promise.all([
+					refreshCargoMineResourceSelect(cargoMineTarget.select, fleetDestCoordSelect.value),
+					refreshCargoMineResourceSelect(cargoMineStarbase.select, fleetStarbaseCoordSelect.value)
+				]);
+			};
+			const setCargoMineEditorVisibility = () => {
+				const visible = fleetAssignment.value === 'Cargo / Mine';
+				cargoMineTarget.wrapper.style.display = visible ? 'inline-block' : 'none';
+				cargoMineStarbase.wrapper.style.display = visible ? 'inline-block' : 'none';
+				if(visible) refreshCargoMineSelectors();
+			};
+
 			const padTransportPlusIndex = (index) => String(index).padStart(2, '0');
 			const getTransportPlusRouteLabel = (routeIndex, targetCount) => {
 				if(routeIndex === 0) return `Starbase -> Target ${padTransportPlusIndex(1)}`;
@@ -13680,6 +13765,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			transportTargettWrapper.appendChild(transportResource2Div);
 			transportTargettWrapper.appendChild(transportResource3Div);
 			transportTargettWrapper.appendChild(transportResource4Div);
+			transportTargettWrapper.appendChild(cargoMineTarget.wrapper);
 			let transportStarbaseWrapper = document.createElement('div');
 			transportStarbaseWrapper.classList.add('transport-to-starbase');
 			transportStarbaseWrapper.style.display = 'flex'
@@ -13690,6 +13776,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			transportStarbaseWrapper.appendChild(transportSBResource2Div);
 			transportStarbaseWrapper.appendChild(transportSBResource3Div);
 			transportStarbaseWrapper.appendChild(transportSBResource4Div);
+			transportStarbaseWrapper.appendChild(cargoMineStarbase.wrapper);
 			transportTd.appendChild(transportTargettWrapper);
 			transportTd.appendChild(transportStarbaseWrapper);
 			transportRow.appendChild(transportTd);
@@ -13808,6 +13895,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				selectElem.dispatchEvent(new Event("change"));
 			});
 
+			fleetDestCoordSelect.addEventListener('change', () => { cargoMineTarget.select.dataset.savedToken = ''; refreshCargoMineSelectors(); });
+			fleetStarbaseCoordSelect.addEventListener('change', () => { cargoMineStarbase.select.dataset.savedToken = ''; refreshCargoMineSelectors(); });
+
 			fleetAssignment.onchange = function() {
 					if (fleetAssignment.value == 'Scan') {
 							scanOptimizationDiv.style.display = 'block';
@@ -13833,7 +13923,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 							fleetDestCoord.style.display = 'none';
 							fleetDestCoordSelect.style.display = 'inline-block';
 							fleetSubwarpPref.style.display = 'inline-block';
-					} else if (fleetAssignment.value == 'Transport') {
+					} else if (fleetAssignment.value == 'Transport' || fleetAssignment.value == 'Cargo / Mine') {
 							scanOptimizationDiv.style.display = 'none';
 							transportRow.style.display = 'table-row';
 							scanRow.style.display = 'none';
@@ -13870,7 +13960,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 							fleetDestCoordSelect.style.display = 'inline-block';
 							fleetSubwarpPref.style.display = 'inline-block';
 					}
+					setCargoMineEditorVisibility();
 			};
+			setCargoMineEditorVisibility();
 
 			scanPattern.onchange = function() {
 					if (scanPattern.value.includes('auto')) {
@@ -14318,6 +14410,21 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return true;
 	}
 
+	function planCargoMineFallback(input) {
+		input = input || {};
+		const waitingResource = String(input.waitingResource || '');
+		const waitingStatus = waitingResource ? `Waiting for ${waitingResource}` : 'Idle';
+		if(input.assignment !== 'Cargo / Mine') return { action: 'transport', status: waitingStatus };
+		if(input.fallbackActive && input.fleetState === 'MineAsteroid') return { action: 'continue-mining', status: waitingStatus };
+		if(input.fallbackActive && input.fallbackStarted === false) return { action: 'start-mining', status: waitingStatus };
+		if(input.fallbackActive) return { action: 'unload-recheck', status: waitingStatus };
+		if(!waitingResource) return { action: 'transport', status: waitingStatus };
+		if(!input.mineResource || !input.atConfiguredLocation) return { action: 'wait', status: waitingStatus, reason: input.mineResource ? 'Fallback location mismatch' : 'No fallback mining resource' };
+		if(!input.suppliesReady) return { action: 'wait', status: waitingStatus, reason: 'Missing mining supplies' };
+		if(!input.hasCargoSpace) return { action: 'wait', status: waitingStatus, reason: 'No mining cargo space' };
+		return { action: 'start-mining', status: waitingStatus };
+	}
+
 	function openTransportLoadRetryGate(fleet) {
 		if(!fleet) return;
 		clearTransportLoadRetryTimer(fleet);
@@ -14357,7 +14464,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return getTransportRequiredLoadResourceNames(manifest).join(', ');
 	}
 
-	async function readTransportStarbaseUsableCargoAmounts(dockCoords, manifest) {
+	async function readTransportStarbaseUsableCargoAmounts(dockCoords, manifest, combineCargoHolds = true) {
 		const wantedMints = new Set((manifest || []).filter(entry => entry && entry.res && Number(entry.amt || 0) > 0).map(entry => entry.res));
 		const usableAmounts = {};
 		if(wantedMints.size < 1) return usableAmounts;
@@ -14374,10 +14481,69 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				if(!wantedMints.has(info.mint)) continue;
 				const rawAmount = Math.max(0, Math.floor(Number(info.tokenAmount.uiAmount || 0)));
 				const usableAmount = Math.max(0, rawAmount - (globalSettings.starbaseKeep1 ? 1 : 0));
-				usableAmounts[info.mint] = (usableAmounts[info.mint] || 0) + usableAmount;
+				usableAmounts[info.mint] = combineCargoHolds
+					? (usableAmounts[info.mint] || 0) + usableAmount
+					: Math.max(usableAmounts[info.mint] || 0, usableAmount);
 			}
 		}
 		return usableAmounts;
+	}
+
+	async function readCargoMineSupplyAvailability(fleet, coords, durationSeconds = 60, protectedFoodAmount = null) {
+		const fuelMint = sageGameAcct.account.mints.fuel.toString();
+		const ammoMint = sageGameAcct.account.mints.ammo.toString();
+		const foodMint = sageGameAcct.account.mints.food.toString();
+		const [cargo, fuel, ammo, starbaseAmounts] = await Promise.all([
+			solanaReadConnection.getParsedTokenAccountsByOwner(fleet.cargoHold, {programId: tokenProgramPK}),
+			solanaReadConnection.getParsedTokenAccountsByOwner(fleet.fuelTank, {programId: tokenProgramPK}),
+			solanaReadConnection.getParsedTokenAccountsByOwner(fleet.ammoBank, {programId: tokenProgramPK}),
+			readTransportStarbaseUsableCargoAmounts(coords, [
+				{res: fuelMint, amt: 1}, {res: ammoMint, amt: 1}, {res: foodMint, amt: 1}
+			], false)
+		]);
+		const required = {
+			[fuelMint]: Math.max(0, Math.ceil(Number(fleet.planetExitFuelAmount || 0))),
+			[ammoMint]: Math.min(Number(fleet.ammoCapacity || 0), Math.max(0, Math.ceil(durationSeconds * (Number(fleet.ammoConsumptionRate || 0) / 10000)))),
+			[foodMint]: Math.max(0, Math.ceil(durationSeconds * (Number(fleet.foodConsumptionRate || 0) / 10000))) + (globalSettings.minerKeep1 ? 1 : 0)
+		};
+		const protectedFood = protectedFoodAmount === null ? getParsedTokenAmount(cargo, foodMint) : Math.max(0, Number(protectedFoodAmount || 0));
+		const available = {
+			[fuelMint]: Math.max(0, getParsedTokenAmount(fuel, fuelMint) - Number(fleet.exitSubwarpWillBurnFuel || 0)) + Math.max(0, Number(starbaseAmounts[fuelMint] || 0)),
+			[ammoMint]: getParsedTokenAmount(ammo, ammoMint) + Math.max(0, Number(starbaseAmounts[ammoMint] || 0)),
+			[foodMint]: Math.max(0, getParsedTokenAmount(cargo, foodMint) - protectedFood) + Math.max(0, Number(starbaseAmounts[foodMint] || 0))
+		};
+		const missing = Object.keys(required).filter(mint => available[mint] < required[mint]);
+		if(Number(fleet.fuelCapacity || 0) < required[fuelMint] && !missing.includes(fuelMint)) missing.push(fuelMint);
+		return { ready: missing.length === 0, missing, required, available, cargo };
+	}
+
+	async function readCargoMinePreflight(fleet, coords, mineResource) {
+		const mineItem = mineItems.find(item => item.account.mint.toString() === mineResource);
+		if(!mineItem) return { ready: false, suppliesReady: false, hasCargoSpace: false, reason: 'Resource is not mineable here' };
+		const planets = await getPlanetsFromCoords(...ConvertCoords(coords));
+		let sageResource = null;
+		let planet = null;
+		for(const candidate of planets) {
+			const resource = await getMineableResourceFromPlanet(candidate.publicKey.toString(), mineItem.publicKey.toString());
+			if(resource) { sageResource = resource; planet = candidate; break; }
+		}
+		if(!sageResource || !planet) return { ready: false, suppliesReady: false, hasCargoSpace: false, reason: 'Resource is not mineable here' };
+		// Cargo / Mine clears the ordinary cargo pod before fallback mining.
+		// Model that empty pod here; onboard Food becomes available after unloading.
+		const freeCargoSpace = Math.max(0, Number(fleet.cargoCapacity || 0));
+		const durationSeconds = calculateMiningDuration(freeCargoSpace, fleet.miningRate, mineItem.account.resourceHardness, sageResource.account.systemRichness);
+		const hasCargoSpace = Number.isFinite(durationSeconds) && durationSeconds >= 60;
+		const supply = await readCargoMineSupplyAvailability(fleet, coords, hasCargoSpace ? durationSeconds : 60, 0);
+		return {
+			ready: hasCargoSpace && supply.ready,
+			suppliesReady: supply.ready,
+			hasCargoSpace,
+			durationSeconds,
+			mineItem, sageResource, planet,
+			baselineAmount: 0,
+			protectedFoodAmount: 0,
+			reason: !hasCargoSpace ? 'No mining cargo space' : (supply.ready ? '' : 'Missing mining supplies')
+		};
 	}
 
 	function planTransportCargoUnload(manifest, cargoAmounts, ammoAmount, ammoMint, keepOne) {
@@ -14715,7 +14881,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				}
 			}
 
-			if(fleetAssignment === 'Transport' && starbaseCoords[0]==destCoords[0] && starbaseCoords[1]==destCoords[1]) {
+			if((fleetAssignment === 'Transport' || fleetAssignment === 'Cargo / Mine') && starbaseCoords[0]==destCoords[0] && starbaseCoords[1]==destCoords[1]) {
 				inputError('ERROR: Starbase and target sectors are identical.', 'ERROR: Identical starbase/target sectors', 2);
 			}
 			if(fleetAssignment === 'Supply Chain') {
@@ -14835,6 +15001,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let transportSBResource2Entry = readTransportResourceEntry(transportToStarbase[2]);
 			let transportSBResource3Entry = readTransportResourceEntry(transportToStarbase[3]);
 			let transportSBResource4Entry = readTransportResourceEntry(transportToStarbase[4]);
+			const cargoMineTargetSelect = transportRows[i].querySelector('.cargo-mine-target-resource');
+			const cargoMineStarbaseSelect = transportRows[i].querySelector('.cargo-mine-starbase-resource');
+			const cargoMineTargetResource = cargoMineTargetSelect?.disabled ? String(cargoMineTargetSelect.dataset.savedToken || '') : String(cargoMineTargetSelect?.value || '');
+			const cargoMineStarbaseResource = cargoMineStarbaseSelect?.disabled ? String(cargoMineStarbaseSelect.dataset.savedToken || '') : String(cargoMineStarbaseSelect?.value || '');
 
 			if (rowErrBool === false) {
 				let fleetMoveTarget = fleetParsedData && fleetParsedData.moveTarget ? fleetParsedData.moveTarget : '';
@@ -14891,6 +15061,15 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					moveType: moveType,
 					subwarpPref: subwarpPref,
 					moveTarget: fleetMoveTarget,
+					cargoMineTargetResource: fleetAssignment === 'Cargo / Mine' ? cargoMineTargetResource : '',
+					cargoMineStarbaseResource: fleetAssignment === 'Cargo / Mine' ? cargoMineStarbaseResource : '',
+					cargoMineFallbackActive: fleetAssignment === 'Cargo / Mine' && !assignmentChanged ? !!fleetParsedData.cargoMineFallbackActive : false,
+					cargoMineFallbackCoord: fleetAssignment === 'Cargo / Mine' && !assignmentChanged ? String(fleetParsedData.cargoMineFallbackCoord || '') : '',
+					cargoMineFallbackResource: fleetAssignment === 'Cargo / Mine' && !assignmentChanged ? String(fleetParsedData.cargoMineFallbackResource || '') : '',
+					cargoMineFallbackBaselineAmount: fleetAssignment === 'Cargo / Mine' && !assignmentChanged ? Math.max(0, Number(fleetParsedData.cargoMineFallbackBaselineAmount || 0)) : 0,
+					cargoMineProtectedFoodAmount: fleetAssignment === 'Cargo / Mine' && !assignmentChanged ? Math.max(0, Number(fleetParsedData.cargoMineProtectedFoodAmount || 0)) : 0,
+					cargoMineFallbackStarted: fleetAssignment === 'Cargo / Mine' && !assignmentChanged ? !!fleetParsedData.cargoMineFallbackStarted : false,
+					cargoMineWaitingResource: fleetAssignment === 'Cargo / Mine' && !assignmentChanged ? String(fleetParsedData.cargoMineWaitingResource || '') : '',
 					transportResource1: transportResource1Entry.res,
 					transportResource1Perc: transportResource1Entry.amt,
 					transportResource1Total: transportResource1Entry.cargoTotal,
@@ -14987,6 +15166,16 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					userFleets[userFleetIndex][key] = fleet[key];
 				}
 				userFleets[userFleetIndex].mineResource = fleetMineResource;
+				userFleets[userFleetIndex].assignment = fleetAssignment;
+				userFleets[userFleetIndex].cargoMineTargetResource = fleet.cargoMineTargetResource;
+				userFleets[userFleetIndex].cargoMineStarbaseResource = fleet.cargoMineStarbaseResource;
+				userFleets[userFleetIndex].cargoMineFallbackActive = fleet.cargoMineFallbackActive;
+				userFleets[userFleetIndex].cargoMineFallbackCoord = fleet.cargoMineFallbackCoord;
+				userFleets[userFleetIndex].cargoMineFallbackResource = fleet.cargoMineFallbackResource;
+				userFleets[userFleetIndex].cargoMineFallbackBaselineAmount = fleet.cargoMineFallbackBaselineAmount;
+				userFleets[userFleetIndex].cargoMineProtectedFoodAmount = fleet.cargoMineProtectedFoodAmount;
+				userFleets[userFleetIndex].cargoMineFallbackStarted = fleet.cargoMineFallbackStarted;
+				userFleets[userFleetIndex].cargoMineWaitingResource = fleet.cargoMineWaitingResource;
 				userFleets[userFleetIndex].assignmentCleanupPending = fleet.assignmentCleanupPending;
 				userFleets[userFleetIndex].assignmentCleanupFrom = fleet.assignmentCleanupFrom;
 				if(assignmentChanged) {
@@ -16195,7 +16384,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-295', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-296', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -16721,7 +16910,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		userFleets[i].resupplying = false;
 	}
 
-	async function handleMining(i, fleetState, fleetCoords, fleetMining) {
+	async function handleMining(i, fleetState, fleetCoords, fleetMining, options = {}) {
+		const protectedFoodAmount = options.preserveCargo ? Math.max(0, Number(options.protectedFoodAmount || 0)) : 0;
 		let destX = userFleets[i].destCoord.split(',')[0].trim();
 		let destY = userFleets[i].destCoord.split(',')[1].trim();
 		let starbaseX = userFleets[i].starbaseCoord.split(',')[0].trim();
@@ -16817,7 +17007,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		let currentFuelCnt = currentFuel ? currentFuel.account.data.parsed.info.tokenAmount.uiAmount - userFleets[i].exitSubwarpWillBurnFuel : 0;
 		let fleetCurrentCargo = await solanaReadConnection.getParsedTokenAccountsByOwner(userFleets[i].cargoHold, {programId: tokenProgramPK});
 		//todo: cargoCnt currently assumes that 1 rss always takes 1 of the cargo room
-		let cargoCnt = fleetCurrentCargo.value.reduce((n, {account}) => n + account.data.parsed.info.tokenAmount.uiAmount, 0);
+		let cargoCnt = fleetCurrentCargo.value.reduce((n, {account}) => {
+			const amount = Number(account.data.parsed.info.tokenAmount.uiAmount || 0);
+			const size = options.preserveCargo ? Math.max(1, Number(cargoItems.find(item => item.token === account.data.parsed.info.mint)?.size || 1)) : 1;
+			return n + amount * size;
+		}, 0);
 		let currentFood = fleetCurrentCargo.value.find(item => item.account.data.parsed.info.mint === sageGameAcct.account.mints.food.toString());
 		let fleetFoodAcct = currentFood ? currentFood.pubkey : fleetFoodToken;
 		let currentFoodCnt = currentFood ? currentFood.account.data.parsed.info.tokenAmount.uiAmount : 0;
@@ -16881,7 +17075,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				cLog(1,`${FleetTimeStamp(userFleets[i].label)} Supplies low, only ${miningDuration} seconds left`);
 				needSupplies = true;
 			}
-			else if (currentFuelCnt < fuelNeeded || currentAmmoCnt < ammoForDuration || currentFoodCnt < foodForDuration) {
+			else if (currentFuelCnt < fuelNeeded || currentAmmoCnt < ammoForDuration || Math.max(0, currentFoodCnt - protectedFoodAmount) < foodForDuration) {
 				needSupplies = true;
 			}
 
@@ -16903,7 +17097,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				cLog(1,`${FleetTimeStamp(userFleets[i].label)} Need resupply`);
 
 				//Recalulate requirements based on total cargo cap
-				miningDuration = calculateMiningDuration(userFleets[i].cargoCapacity, userFleets[i].miningRate, resourceHardness, systemRichness);
+				const resupplyMiningSpace = options.preserveCargo ? Math.max(0, userFleets[i].cargoCapacity - cargoCnt + Math.max(0, currentFoodCnt - protectedFoodAmount)) : userFleets[i].cargoCapacity;
+				miningDuration = calculateMiningDuration(resupplyMiningSpace, userFleets[i].miningRate, resourceHardness, systemRichness);
 				foodForDuration = Math.ceil(miningDuration * (userFleets[i].foodConsumptionRate / 10000));
 				ammoForDuration = Math.ceil(miningDuration * (userFleets[i].ammoConsumptionRate / 10000));
 				ammoForDuration = Math.min(userFleets[i].ammoCapacity, ammoForDuration);
@@ -16925,7 +17120,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					updateFleetState(userFleets[i], `Unloading`);
 
 					let unloadAmount = 0;
-					if(globalSettings.minerUnloadsAll) {
+					if(options.preserveCargo) {
+						cLog(2, `${FleetTimeStamp(userFleets[i].label)} Cargo / Mine preserving transport cargo during mining resupply`);
+					}
+					else if(globalSettings.minerUnloadsAll) {
 						for(let currentRes of fleetCurrentCargo.value) {
 
 							// don't unload food
@@ -17003,13 +17201,14 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					currentFoodCnt = currentFood ? currentFood.account.data.parsed.info.tokenAmount.uiAmount : 0;
 					miningDuration = calculateMiningDuration(userFleets[i].cargoCapacity - cargoCnt + currentFoodCnt, userFleets[i].miningRate, resourceHardness, systemRichness);
      					*/
-					miningDuration = calculateMiningDuration(userFleets[i].cargoCapacity - cargoCnt + unloadAmount + currentFoodCnt, userFleets[i].miningRate, resourceHardness, systemRichness);
+					miningDuration = calculateMiningDuration(userFleets[i].cargoCapacity - cargoCnt + unloadAmount + Math.max(0, currentFoodCnt - protectedFoodAmount), userFleets[i].miningRate, resourceHardness, systemRichness);
 					foodForDuration = Math.ceil(miningDuration * (userFleets[i].foodConsumptionRate / 10000)) + (globalSettings.minerKeep1 ? 1 : 0);
-					if (currentFoodCnt < foodForDuration) {
+					const usableMiningFood = Math.max(0, currentFoodCnt - protectedFoodAmount);
+					if (usableMiningFood < foodForDuration) {
 						cLog(1,`${FleetTimeStamp(userFleets[i].label)} Loading food`);
 						updateFleetState(userFleets[i], `Loading`);
 						let foodCargoTypeAcct = cargoTypes.find(item => item.account.mint.toString() == sageGameAcct.account.mints.food);
-						let foodResp = await execCargoFromStarbaseToFleet(userFleets[i], userFleets[i].cargoHold, fleetFoodAcct, sageGameAcct.account.mints.food.toString(), foodCargoTypeAcct, userFleets[i].starbaseCoord, foodForDuration - currentFoodCnt, globalSettings.fleetForceConsumableAmount, minerSupplySingleTx);
+						let foodResp = await execCargoFromStarbaseToFleet(userFleets[i], userFleets[i].cargoHold, fleetFoodAcct, sageGameAcct.account.mints.food.toString(), foodCargoTypeAcct, userFleets[i].starbaseCoord, foodForDuration - usableMiningFood, globalSettings.fleetForceConsumableAmount, minerSupplySingleTx);
 						if (foodResp && foodResp.name == 'NotEnoughResource') {
 							cLog(1,`${FleetTimeStamp(userFleets[i].label)} ERROR: Not enough food`);
 							errorResource.push('food');
@@ -17050,11 +17249,15 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			else if (fleetCoords[0] == destX && fleetCoords[1] == destY) {
 		if(userFleets[i].stopping) return;
                 fleetCurrentCargo = await solanaReadConnection.getParsedTokenAccountsByOwner(userFleets[i].cargoHold, {programId: tokenProgramPK});
-                cargoCnt = fleetCurrentCargo.value.reduce((n, {account}) => n + account.data.parsed.info.tokenAmount.uiAmount, 0);
+                cargoCnt = fleetCurrentCargo.value.reduce((n, {account}) => {
+                    const amount = Number(account.data.parsed.info.tokenAmount.uiAmount || 0);
+                    const size = options.preserveCargo ? Math.max(1, Number(cargoItems.find(item => item.token === account.data.parsed.info.mint)?.size || 1)) : 1;
+                    return n + amount * size;
+                }, 0);
                 currentFood = fleetCurrentCargo.value.find(item => item.account.data.parsed.info.mint === sageGameAcct.account.mints.food.toString());
                 fleetFoodAcct = currentFood ? currentFood.pubkey : fleetFoodToken;
                 currentFoodCnt = currentFood ? currentFood.account.data.parsed.info.tokenAmount.uiAmount : 0;
-                miningDuration = calculateMiningDuration(userFleets[i].cargoCapacity - cargoCnt + currentFoodCnt, userFleets[i].miningRate, resourceHardness, systemRichness);
+                miningDuration = calculateMiningDuration(userFleets[i].cargoCapacity - cargoCnt + Math.max(0, currentFoodCnt - protectedFoodAmount), userFleets[i].miningRate, resourceHardness, systemRichness);
 				await execStartMining(userFleets[i], mineItem, sageResource, planet);
 				if (userFleets[i].state.slice(0, 5) !== 'ERROR') updateFleetState(userFleets[i], 'Mine [' + TimeToStr(new Date(Date.now()+(miningDuration * 1000))) + ']')
 
@@ -17085,7 +17288,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
             let foodConsumed = Math.ceil(mineTimePassed * (userFleets[i].foodConsumptionRate / 10000));
             let ammoConsumed = Math.ceil(mineTimePassed * (userFleets[i].ammoConsumptionRate / 10000));
             let resourceMined = Math.ceil(mineTimePassed * ((userFleets[i].miningRate/10000) * (systemRichness/100)) / (resourceHardness/100));
-            let timeFoodRemaining = Math.ceil((currentFoodCnt - foodConsumed) / (userFleets[i].foodConsumptionRate / 10000));
+            let timeFoodRemaining = Math.ceil((Math.max(0, currentFoodCnt - protectedFoodAmount) - foodConsumed) / (userFleets[i].foodConsumptionRate / 10000));
             let timeAmmoRemaining = userFleets[i].ammoConsumptionRate > 0 ? Math.ceil((currentAmmoCnt - ammoConsumed) / (userFleets[i].ammoConsumptionRate / 10000)) : maxMiningDuration;
 
             //wrong calculation, fixed: we must not subtract the foodConsumed from the simulated cargo space, because the food doesn't exist anymore
@@ -17106,6 +17309,160 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				await execStopMining(userFleets[i], fleetMining.resource, sageResourceAcctInfo, sageResourceAcctInfo.mineItem, mineItem.mint);
             }
 		}
+	}
+
+	async function persistCargoMineFallbackState(i, fleetParsedData, state) {
+		const fleet = userFleets[i];
+		const next = {
+			cargoMineFallbackActive: !!state.active,
+			cargoMineFallbackStarted: !!state.started,
+			cargoMineFallbackCoord: String(state.coord || ''),
+			cargoMineFallbackResource: String(state.resource || ''),
+			cargoMineFallbackBaselineAmount: Math.max(0, Number(state.baselineAmount || 0)),
+			cargoMineProtectedFoodAmount: Math.max(0, Number(state.protectedFoodAmount || 0)),
+			cargoMineWaitingResource: String(state.waitingResource || '')
+		};
+		Object.assign(fleetParsedData, next);
+		Object.assign(fleet, next);
+		await saveFleetConfig(fleet.publicKey.toString(), fleetParsedData, 'cargo-mine-fallback-state');
+	}
+
+	function getCargoMineLocationConfig(fleetParsedData, fleetCoords) {
+		const targetCoords = ConvertCoords(fleetParsedData.dest || '');
+		const starbaseCoords = ConvertCoords(fleetParsedData.starbase || '');
+		if(CoordsEqual(fleetCoords, targetCoords)) return { coord: String(fleetParsedData.dest || ''), resource: String(fleetParsedData.cargoMineTargetResource || ''), location: 'Target' };
+		if(CoordsEqual(fleetCoords, starbaseCoords)) return { coord: String(fleetParsedData.starbase || ''), resource: String(fleetParsedData.cargoMineStarbaseResource || ''), location: 'Starbase' };
+		return { coord: '', resource: '', location: '' };
+	}
+
+	async function runCargoMineMiningCycle(i, fleetParsedData, fleetState, fleetCoords, fleetMining, coord, resource, waitingResource) {
+		const fleet = userFleets[i];
+		const previous = { mineResource: fleet.mineResource, destCoord: fleet.destCoord, starbaseCoord: fleet.starbaseCoord, moveTarget: fleet.moveTarget };
+		fleet.mineResource = resource;
+		fleet.destCoord = coord;
+		fleet.starbaseCoord = coord;
+		if(fleetState === 'MineAsteroid' && !fleetParsedData.cargoMineFallbackStarted) {
+			await persistCargoMineFallbackState(i, fleetParsedData, {
+				active: true, started: true, coord, resource,
+				baselineAmount: fleetParsedData.cargoMineFallbackBaselineAmount,
+				protectedFoodAmount: fleetParsedData.cargoMineProtectedFoodAmount,
+				waitingResource
+			});
+		}
+		try {
+			await handleMining(i, fleetState, fleetCoords, fleetMining);
+			if(String(fleet.state || '').startsWith('Mine')) {
+				if(!fleetParsedData.cargoMineFallbackStarted) {
+					await persistCargoMineFallbackState(i, fleetParsedData, {
+						active: true, started: true, coord, resource,
+						baselineAmount: fleetParsedData.cargoMineFallbackBaselineAmount,
+						protectedFoodAmount: fleetParsedData.cargoMineProtectedFoodAmount,
+						waitingResource
+					});
+				}
+				const resourceName = cargoItems.find(item => item.token === resource)?.name || resource;
+				const eta = String(fleet.state).match(/\[[^\]]+\]/)?.[0] || '';
+				updateFleetState(fleet, ('Mine ' + resourceName + ' while waiting for ' + waitingResource + ' ' + eta).trim(), true);
+			}
+			if(String(fleet.state || '').startsWith('ERROR: Not enough')) {
+				await persistCargoMineFallbackState(i, fleetParsedData, { active: false });
+				scheduleTransportLoadRetry(fleet, waitingResource);
+			}
+		} finally {
+			fleet.mineResource = previous.mineResource;
+			fleet.destCoord = previous.destCoord;
+			fleet.starbaseCoord = previous.starbaseCoord;
+			fleet.moveTarget = previous.moveTarget;
+		}
+	}
+
+	function getCargoMineUnloadEntries(cargoResponse) {
+		const entries = new Map();
+		for(const tokenAccount of ((cargoResponse && cargoResponse.value) || [])) {
+			const info = tokenAccount?.account?.data?.parsed?.info;
+			const mint = String(info?.mint || '');
+			const amount = Math.max(0, Number(info?.tokenAmount?.uiAmount || 0));
+			if(mint && amount > 0) entries.set(mint, (entries.get(mint) || 0) + amount);
+		}
+		return Array.from(entries, ([mint, amount]) => ({ mint, amount }));
+	}
+
+	async function unloadAllCargoMineCargo(i, coord, stateLabel) {
+		const fleet = userFleets[i];
+		const cargo = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.cargoHold, {programId: tokenProgramPK});
+		const entries = getCargoMineUnloadEntries(cargo);
+		if(entries.length < 1) return true;
+		updateFleetState(fleet, stateLabel, true);
+		await execDock(fleet, coord);
+		if(String(fleet.state || '').includes('ERROR')) return false;
+		for(const entry of entries) {
+			await execCargoFromFleetToStarbase(fleet, fleet.cargoHold, entry.mint, coord, entry.amount, false);
+			if(String(fleet.state || '').includes('ERROR')) return false;
+		}
+		await execUndock(fleet, coord);
+		return !String(fleet.state || '').includes('ERROR');
+	}
+
+	async function unloadCargoMineFallbackOutput(i, fleetParsedData) {
+		const coord = String(fleetParsedData.cargoMineFallbackCoord || '');
+		const unloaded = await unloadAllCargoMineCargo(i, coord, 'Cargo / Mine: unloading after mining');
+		if(unloaded) await persistCargoMineFallbackState(i, fleetParsedData, { active: false });
+		return unloaded;
+	}
+
+	async function handleCargoMine(i, fleetParsedData, fleetState, fleetCoords, fleetMining) {
+		const fleet = userFleets[i];
+		const fallbackActive = !!fleetParsedData.cargoMineFallbackActive;
+		const fallbackStarted = !!fleetParsedData.cargoMineFallbackStarted;
+		const waitingResource = String(fleet.transportLoadRetryResource || fleetParsedData.cargoMineWaitingResource || '');
+		const locationConfig = fallbackActive
+			? { coord: String(fleetParsedData.cargoMineFallbackCoord || ''), resource: String(fleetParsedData.cargoMineFallbackResource || '') }
+			: getCargoMineLocationConfig(fleetParsedData, fleetCoords);
+
+		if(fallbackActive && fallbackStarted && fleetState === 'Idle') {
+			if(!await unloadCargoMineFallbackOutput(i, fleetParsedData)) return;
+			return await handleTransport(i, 'Idle', fleetCoords);
+		}
+		if(fallbackActive && fleetState !== 'Idle' && fleetState !== 'MineAsteroid') return await handleTransport(i, fleetState, fleetCoords);
+		if(!fallbackActive && !waitingResource) return await handleTransport(i, fleetState, fleetCoords);
+
+		let preflight = { ready: true, suppliesReady: true, hasCargoSpace: true, baselineAmount: fleetParsedData.cargoMineFallbackBaselineAmount || 0 };
+		if(fleetState !== 'MineAsteroid') preflight = await readCargoMinePreflight(
+			fleet, locationConfig.coord, locationConfig.resource
+		);
+		const decision = planCargoMineFallback({
+			assignment: fleetParsedData.assignment,
+			fleetState,
+			waitingResource,
+			mineResource: locationConfig.resource,
+			fallbackActive,
+			fallbackStarted,
+			suppliesReady: preflight.suppliesReady,
+			hasCargoSpace: preflight.hasCargoSpace,
+			atConfiguredLocation: !!locationConfig.coord
+		});
+		if(decision.action === 'wait') {
+			scheduleTransportLoadRetry(fleet, waitingResource);
+			return;
+		}
+		if(decision.action === 'transport') return await handleTransport(i, fleetState, fleetCoords);
+		if(decision.action === 'start-mining') {
+			if(!fallbackActive) {
+				clearTransportLoadRetryTimer(fleet);
+				await persistCargoMineFallbackState(i, fleetParsedData, {
+					active: true, started: false, coord: locationConfig.coord, resource: locationConfig.resource,
+					baselineAmount: 0, protectedFoodAmount: 0, waitingResource
+				});
+			}
+			if(!await unloadAllCargoMineCargo(i, locationConfig.coord, 'Cargo / Mine: clearing cargo for mining')) return;
+			preflight = await readCargoMinePreflight(fleet, locationConfig.coord, locationConfig.resource);
+			if(!preflight.suppliesReady || !preflight.hasCargoSpace) {
+				await persistCargoMineFallbackState(i, fleetParsedData, { active: false });
+				scheduleTransportLoadRetry(fleet, waitingResource);
+				return;
+			}
+		}
+		await runCargoMineMiningCycle(i, fleetParsedData, fleetState, fleetCoords, fleetMining, locationConfig.coord, locationConfig.resource, waitingResource);
 	}
 
 	function hasTransportManifest(manifest) {
@@ -19059,7 +19416,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		}
 
 		const transportLoadRetry = getTransportLoadRetry(userFleets[i]);
-		if(transportLoadRetry && Date.now() < transportLoadRetry.retryAt) {
+		if(transportLoadRetry && Date.now() < transportLoadRetry.retryAt && userFleets[i].assignment !== 'Cargo / Mine') {
 			recordTransportLoadDiagnostic(userFleets[i], {
 				phase: 'retry-gate',
 				gate: 'cooldown',
@@ -19152,7 +19509,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				}
 
 				if ((userFleets[i].iterCnt < 2) && fleetState == 'StarbaseLoadingBay') {
-					if(fleetParsedData.assignment == 'Scan' || fleetParsedData.assignment == 'Mine' || fleetParsedData.assignment == 'Transport' || fleetParsedData.assignment == 'Supply Chain')
+					if(fleetParsedData.assignment == 'Scan' || fleetParsedData.assignment == 'Mine' || fleetParsedData.assignment == 'Transport' || fleetParsedData.assignment == 'Cargo / Mine' || fleetParsedData.assignment == 'Supply Chain')
 						await execStartupUndock(i, fleetParsedData.assignment);
 				}
 				else if (fleetState == 'MoveWarp' || fleetState == 'MoveSubwarp') {
@@ -19202,6 +19559,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						}
 					}
 					await handleMining(i, userFleets[i].state, fleetCoords, fleetMining);
+				}
+				else if (fleetParsedData.assignment == 'Cargo / Mine') {
+					await handleCargoMine(i, fleetParsedData, fleetState, fleetCoords, fleetMining);
 				}
 				else if (fleetParsedData.assignment == 'Transport') {
 					// A due required-load retry retains its Waiting UI label. Route loading
@@ -20581,6 +20941,15 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				let fleetScanOptimizationBlockScansCompleted = Math.max(0, Math.floor(Number(fleetParsedData.scanOptimizationBlockScansCompleted || 0)));
 				let fleetScanOptimizationResupplyStartedAt = Math.max(0, Number(fleetParsedData.scanOptimizationResupplyStartedAt || 0));
 				let fleetMineResource = fleetParsedData && fleetParsedData.mineResource ? fleetParsedData.mineResource : '';
+				let cargoMineTargetResource = String(fleetParsedData?.cargoMineTargetResource || '');
+				let cargoMineStarbaseResource = String(fleetParsedData?.cargoMineStarbaseResource || '');
+				let cargoMineFallbackActive = !!fleetParsedData?.cargoMineFallbackActive;
+				let cargoMineFallbackCoord = String(fleetParsedData?.cargoMineFallbackCoord || '');
+				let cargoMineFallbackResource = String(fleetParsedData?.cargoMineFallbackResource || '');
+				let cargoMineFallbackBaselineAmount = Math.max(0, Number(fleetParsedData?.cargoMineFallbackBaselineAmount || 0));
+				let cargoMineProtectedFoodAmount = Math.max(0, Number(fleetParsedData?.cargoMineProtectedFoodAmount || 0));
+				let cargoMineFallbackStarted = !!fleetParsedData?.cargoMineFallbackStarted;
+				let cargoMineWaitingResource = String(fleetParsedData?.cargoMineWaitingResource || '');
 				let fleetStarbase = fleetParsedData && fleetParsedData.starbase ? fleetParsedData.starbase : '';
 				let fleetMoveType = fleetParsedData && fleetParsedData.moveType ? fleetParsedData.moveType : 'warp';
 				let fleetMoveTarget = fleetParsedData && fleetParsedData.moveTarget ? fleetParsedData.moveTarget : '';
@@ -20712,6 +21081,15 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					fuelCnt: currentFuelCnt ? currentFuelCnt.account.data.parsed.info.tokenAmount.uiAmount : 0,
 					moveType: fleetMoveType,
 					mineResource: fleetMineResource,
+					cargoMineTargetResource,
+					cargoMineStarbaseResource,
+					cargoMineFallbackActive,
+					cargoMineFallbackCoord,
+					cargoMineFallbackResource,
+					cargoMineFallbackBaselineAmount,
+					cargoMineProtectedFoodAmount,
+					cargoMineFallbackStarted,
+					cargoMineWaitingResource,
 					minePlanet: null,
 					fontColor: 'white',
 				});
