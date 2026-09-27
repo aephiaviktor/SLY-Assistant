@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-298
+// @aephia-version 0.7.35-299
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -16392,7 +16392,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-298', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-299', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -19643,7 +19643,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 							updateFleetState(userFleets[i], 'Mine [' + TimeToStr(new Date(Date.now())) + ']');
 						}
 					}
-					await handleMining(i, userFleets[i].state, fleetCoords, fleetMining);
+					await handleMining(i, fleetState, fleetCoords, fleetMining);
 				}
 				else if (fleetParsedData.assignment == 'Cargo / Mine') {
 					await handleCargoMine(i, fleetParsedData, fleetState, fleetCoords, fleetMining, extra);

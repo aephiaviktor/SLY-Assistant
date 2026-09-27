@@ -77,6 +77,12 @@ test('chain mining state overrides stale Waiting or ERROR labels', () => {
   assert.ok(source.includes('InvalidCurrentStarbaseState|InvalidFleetState'));
 });
 
+test('normal Mine assignment passes authoritative chain state into mining handler', () => {
+  const source = readSource();
+  assert.ok(source.includes('await handleMining(i, fleetState, fleetCoords, fleetMining);'));
+  assert.ok(!source.includes('await handleMining(i, userFleets[i].state, fleetCoords, fleetMining);'));
+});
+
 test('durable fallback phases survive resupply and route recheck boundaries', () => {
   const source = readSource();
   assert.ok(source.includes("cargoMineFallbackPhase: String(state.phase || '')"));
