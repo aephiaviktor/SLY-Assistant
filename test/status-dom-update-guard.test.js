@@ -107,4 +107,25 @@ for (const file of USERSCRIPTS) {
     assert.match(source, /cachedStatus\?\.foodCnt/);
     assert.match(source, /cachedStatus\?\.sduCnt/);
   });
+
+  test(`status drag: ${file} releases edge anchors without resizing the panel`, () => {
+    const source = fs.readFileSync(path.join(ROOT, file), 'utf8');
+    const anchorAssistWindowForDrag = loadHelper(file, 'anchorAssistWindowForDrag');
+    const elem = {
+      offsetLeft: 884,
+      offsetTop: 82,
+      style: { width: '', right: '20px', bottom: '' },
+      getBoundingClientRect: () => ({ width: 300 }),
+    };
+
+    const anchored = anchorAssistWindowForDrag(elem);
+
+    assert.equal(JSON.stringify(anchored), JSON.stringify({ left: 884, top: 82, previousWidth: '' }));
+    assert.equal(elem.style.right, 'auto');
+    assert.equal(elem.style.bottom, 'auto');
+    assert.equal(elem.style.left, '884px');
+    assert.equal(elem.style.top, '82px');
+    assert.equal(elem.style.width, '300px');
+    assert.match(source, /resize:both; overflow:auto; min-width:280px; min-height:120px;/);
+  });
 }
