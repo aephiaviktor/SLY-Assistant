@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-299
+// @aephia-version 0.7.35-300
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -14126,30 +14126,48 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	}
 
 
-	function isScanningStatusFleet(fleet) {
-		return !!fleet && fleet.assignment === 'Scan';
+	function getAssistStatusRowModel(fleet, targets = []) {
+		if(fleet && fleet.publicKey) {
+			return { section: 'fleet', cells: [String(fleet.label || ''), String(fleet.state || '')] };
+		}
+
+		const coords = fleet && fleet.craftingId && fleet.craftingCoords ? fleet.craftingCoords : fleet && fleet.coordinates;
+		const target = (targets || []).find(item => (item.x + ',' + item.y) == coords);
+		return {
+			section: 'craft',
+			cells: [
+				String(fleet && fleet.label || ''),
+				String(target && target.name || ''),
+				String(fleet && fleet.crew || ''),
+				String(fleet && fleet.state || '')
+			]
+		};
+	}
+
+	function appendAssistStatusSectionHeader(table, section, showInfo) {
+		const className = 'assist-' + section + '-section-header';
+		if(table.querySelector('tr.' + className)) return;
+		const row = document.createElement('tr');
+		row.classList.add('assist-status-section-header', className);
+		if(section === 'craft') {
+			row.innerHTML = '<td>Slot</td><td>Starbase</td><td>Crew</td><td>Crafting Job (time)</td>';
+		} else {
+			row.innerHTML = '<td colspan="2">Fleet</td><td colspan="2">State' + (showInfo ? ' (<span class="tooltip">Info<div class="tooltiptext">You can click on a fleet state to stop this particular fleet (after some time "STOPPED" will be displayed).<br>Clicking on the fleet state again will reset the fleet and it will try to pick up the loop again (this also works for fleets that are in an ERROR state).</div></span>)' : '') + '</td>';
+		}
+		table.appendChild(row);
 	}
 
 
 	function updateAssistStatus(fleet) {
         let rowPK = fleet.publicKey ? fleet.publicKey.toString() : fleet.label;
+		const rowModel = getAssistStatusRowModel(fleet, validTargets);
 		let targetRow = document.querySelectorAll('#assistStatus .assist-fleet-row[pk="' + rowPK + '"]');
 
 		if (targetRow.length > 0) {
 			const statusRow = targetRow[0];
-
-			if(fleet.publicKey && isScanningStatusFleet(fleet)) {
-				setInnerHtmlIfChanged(statusRow.children[1].firstChild, fleet.foodCnt || 0);
-				setInnerHtmlIfChanged(statusRow.children[2].firstChild, fleet.sduCnt || 0);
-				setInnerHtmlIfChanged(statusRow.children[3].firstChild, fleet.state);
-			} else if(fleet.publicKey) {
-				setInnerHtmlIfChanged(statusRow.children[1].firstChild, fleet.state);
-			} else {
-				//targetRow[0].children[0].firstChild.innerHTML = fleet.label + " [" + fleet.coordinates + "]";
-				let target = fleet.craftingId ? validTargets.find(target => (target.x + ',' + target.y) == fleet.craftingCoords) : validTargets.find(target => (target.x + ',' + target.y) == fleet.coordinates);
-				setInnerHtmlIfChanged(statusRow.children[0].firstChild, fleet.label + " " + (target ? target.name : ''));
-				setInnerHtmlIfChanged(statusRow.children[1].firstChild, fleet.state);
-			}
+			rowModel.cells.forEach((value, index) => {
+				if(statusRow.children[index] && statusRow.children[index].firstChild) setInnerHtmlIfChanged(statusRow.children[index].firstChild, value);
+			});
 		} else {
 			if((globalSettings.fleetsPerColumn <= 0 && fleetStatusCount == 0) || (globalSettings.fleetsPerColumn > 0 && (fleetStatusCount % globalSettings.fleetsPerColumn) == 0)) {
 				fleetStatusCurColumn++;
@@ -14159,7 +14177,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				if(fleetStatusCurColumn > 1) fleetColumn.setAttribute('style','padding-left:10px; border-left:1px solid rgb(255, 190, 77)');
 
 				fleetColumn.classList.add('assist-fleet-column-'+fleetStatusCurColumn);
-				fleetColumn.innerHTML = '<table><tr><td>Fleet</td><td>Food</td><td>SDUs</td><td>State' + (fleetStatusCurColumn <= 1 ? ' (<span class="tooltip">Info<div class="tooltiptext">You can click on a fleet state to stop this particular fleet (after some time "STOPPED" will be displayed).<br>Clicking on the fleet state again will reset the fleet and it will try to pick up the loop again (this also works for fleets that are in an ERROR state).</div></span>)' : '') + '</td></tr></table>';
+				fleetColumn.innerHTML = '<table class="assist-status-table"><colgroup><col class="assist-status-slot"><col class="assist-status-starbase"><col class="assist-status-crew"><col class="assist-status-job"></colgroup></table>';
+				appendAssistStatusSectionHeader(fleetColumn.querySelector('table'), rowModel.section, fleetStatusCurColumn <= 1);
 
 				let targetTableElem = document.querySelector('#assistStatus .assist-modal-body table.main tr');
 				targetTableElem.appendChild(fleetColumn);
@@ -14168,51 +14187,31 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 			let fleetRow = document.createElement('tr');
 			fleetRow.classList.add('assist-fleet-row');
+			fleetRow.classList.add(rowModel.section === 'fleet' ? 'assist-fleet-status-row' : 'assist-craft-status-row');
 			fleetRow.setAttribute('pk', rowPK);
-			let fleetLabel = document.createElement('span');
-			fleetLabel.innerHTML = fleet.label;
-			let fleetLabelTd = document.createElement('td');
-			fleetLabelTd.appendChild(fleetLabel);
-			let fleetStatus = document.createElement('span');
-			fleetStatus.innerHTML = fleet.state;
-			let fleetStatusTd = document.createElement('td');
+			const rowCells = rowModel.cells.map(value => {
+				const span = document.createElement('span');
+				span.innerHTML = value;
+				const cell = document.createElement('td');
+				cell.appendChild(span);
+				return cell;
+			});
+			if(rowModel.section === 'fleet') {
+				rowCells[0].setAttribute('colspan', 2);
+				rowCells[1].setAttribute('colspan', 2);
+				rowCells[1].addEventListener('click', async() => { await resetFleetState(fleet); });
+			}
 			const lpAutomationEnabled = !!globalSettings.upgradeAutomationEnabled;
 			const lpAutomationStartCraftSlot = Math.max(1, parseIntDefault(globalSettings.upgradeAutomationStartCraftSlot, 1));
 			const lpAutomationManagedEndCraftSlot = lpAutomationStartCraftSlot + UPGRADE_AUTOMATION_MANAGED_CRAFT_SLOTS - 1;
 			const fleetCraftSlotNumber = parseIntDefault(String(fleet.label || '').replace(/^craft/i, ''), 0);
 			const lpAutomationManagedStatusSlot = lpAutomationEnabled && !fleet.publicKey && fleetCraftSlotNumber >= lpAutomationStartCraftSlot && fleetCraftSlotNumber <= lpAutomationManagedEndCraftSlot;
 			if (lpAutomationManagedStatusSlot) {
-				fleetLabelTd.style.cssText += 'background:rgba(80,200,120,0.16); box-shadow: inset 0 0 0 1px rgba(80,200,120,0.30);';
-				fleetStatusTd.style.cssText += 'background:rgba(80,200,120,0.16); box-shadow: inset 0 0 0 1px rgba(80,200,120,0.30);';
+				rowCells.forEach(cell => { cell.style.cssText += 'background:rgba(80,200,120,0.16); box-shadow: inset 0 0 0 1px rgba(80,200,120,0.30);'; });
 			}
-			if(fleet.publicKey) {
-				fleetStatusTd.addEventListener('click', async() => { await resetFleetState(fleet); });
-				fleetStatusTd.appendChild(fleetStatus);
-				fleetRow.appendChild(fleetLabelTd);
-				if(isScanningStatusFleet(fleet)) {
-					let fleetTool = document.createElement('span');
-					fleetTool.innerHTML = fleet.foodCnt || 0;
-					let fleetToolTd = document.createElement('td');
-					fleetToolTd.appendChild(fleetTool);
-					let fleetSdu = document.createElement('span');
-					fleetSdu.innerHTML = fleet.sduCnt || 0;
-					let fleetSduTd = document.createElement('td');
-					fleetSduTd.appendChild(fleetSdu);
-					fleetRow.appendChild(fleetToolTd);
-					fleetRow.appendChild(fleetSduTd);
-				} else {
-					fleetStatusTd.setAttribute('colspan', 3);
-				}
-				fleetRow.appendChild(fleetStatusTd);
-			} else {
-				fleetStatusTd.setAttribute('colspan', 3);
-				fleetStatusTd.appendChild(fleetStatus);
-				let target = fleet.craftingId && fleet.craftingCoords ? validTargets.find(target => (target.x + ',' + target.y) == fleet.craftingCoords) : validTargets.find(target => (target.x + ',' + target.y) == fleet.coordinates);
-				fleetLabel.innerHTML = fleetLabel.innerHTML + " " + (target ? target.name : '');
-				fleetRow.appendChild(fleetLabelTd);
-				fleetRow.appendChild(fleetStatusTd);
-			}
+			rowCells.forEach(cell => fleetRow.appendChild(cell));
 			let targetElem = document.querySelector('#assistStatus .assist-modal-body table.main td.assist-fleet-column-'+fleetStatusCurColumn+' table');
+			appendAssistStatusSectionHeader(targetElem, rowModel.section, fleetStatusCurColumn <= 1);
 			targetElem.appendChild(fleetRow);
 		}
 
@@ -14244,12 +14243,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 							if(!tds || tds.length < 2) return;
 							const pk = tr.getAttribute('pk') || '';
 							const label = (tds[0]?.innerText || '').trim();
-							let food = 0;
-							let sdu = 0;
+							const cachedStatus = window.__slyaStatusRows && window.__slyaStatusRows[pk];
+							let food = Number(cachedStatus?.foodCnt || 0);
+							let sdu = Number(cachedStatus?.sduCnt || 0);
 							let state = '';
-							if(tds.length >= 4) {
-								food = Number((tds[1]?.innerText || '0').trim()) || 0;
-								sdu = Number((tds[2]?.innerText || '0').trim()) || 0;
+							if(tr.classList.contains('assist-craft-status-row')) {
 								state = (tds[3]?.innerText || '').trim();
 							} else {
 								state = (tds[1]?.innerText || '').trim();
@@ -16392,7 +16390,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-299', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-300', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -21239,7 +21237,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			observer && observer.disconnect();
 			let assistCSS = document.createElement('style');
 			const statusPanelOpacity = globalSettings.statusPanelOpacity / 100;
-			let assistCSSString = `.assist-modal {display: none; position: fixed; z-index: 2; padding-top: 100px; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4); text-align:center; } .assist-modal-content {position: relative; display: inline-block; text-align:left; background-color: rgb(41, 41, 48); margin: auto; padding: 0; border: 1px solid #888; width: 667px; min-width: 450px; max-width: 95%; height: auto; min-height: 50px; max-height: 95%; overflow-y: auto; box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2),0 6px 20px 0 rgba(0,0,0,0.19); -webkit-animation-name: animatetop; -webkit-animation-duration: 0.4s; animation-name: animatetop; animation-duration: 0.4s;} .assist-modal-save { font-size:100%; font-weight:bold; vertical-align:top; margin-left:0.5em; } #assist-modal-error {color: red; margin-left: 5px; margin-right: 5px; font-size: 16px; display:block; } .assist-modal-header-right {color: rgb(255, 190, 77); margin-left: auto !important; font-size: 20px;} .assist-btn {background-color: rgb(41, 41, 48); color: rgb(255, 190, 77); margin-left: 2px; margin-right: 2px;} .assist-btn:hover {background-color: rgba(255, 190, 77, 0.2);} .assist-modal-close { font-size:130%; line-height:80%; vertical-align:middle; } .assist-modal-close:hover, .assist-modal-close:focus {font-weight: bold; text-decoration: none; cursor: pointer;} .assist-modal-btn {color: rgb(255, 190, 77); padding: 5px 5px; margin-right: 5px; text-decoration: none; background-color: rgb(41, 41, 48); border: none; cursor: pointer;} .assist-modal-save:hover { background-color: rgba(255, 190, 77, 0.2); } .assist-modal-header {display: flex; position:sticky; z-index:1000; top:0; left:0; align-items: center; padding: 2px 16px; background-color: #544735; border-bottom: 2px solid rgb(255, 190, 77); color: rgb(255, 190, 77);} .assist-modal-body {padding: 2px 16px; font-size: 12px;} .assist-modal-body > table, .assist-modal-body table.main table {width: 100%;border-collapse: collapse;} .assist-modal-body th, .assist-modal-body td {padding:0 7px 0 0; line-height:130%;} #assistStatus {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 82px; left: 10px; z-index: 1;} #assistStarbaseStatus {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 80px; right: 20px; z-index: 1;} #assistCheck {background-color: rgba(0,0,0,0.75); backdrop-filter: blur(10px); position: absolute; margin: auto; left: 0; right: 0; top: 100px; width: 650px; min-width: 450px; max-width: 75%; z-index: 1;} .dropdown { position: absolute; display: none; margin-top: 25px; margin-left: 152px; background-color: rgb(41, 41, 48); min-width: 120px; box-shadow: 0 8px 16px 0 rgba(0, 0, 0, 0.2); z-index: 2; } .dropdown.show { display: block; } .assist-btn-alt { color: rgb(255, 190, 77); padding: 12px 16px; text-decoration: none; display: block; background-color: rgb(41, 41, 48); border: none; cursor: pointer; } .assist-btn-alt:hover { background-color: rgba(255, 190, 77, 0.2); } #checkresults { padding: 5px; margin-top: 20px; border: 1px solid grey; border-radius: 8px;} .dropdown button {width: 100%; text-align: left;} #assistModal table {border-collapse: collapse;} .assist-scan-row, .assist-scan2-row, .assist-mine-row, .assist-transport-row, .assist-transport-plus-row {background-color: rgba(255, 190, 77, 0.1); border-left: 1px solid white; border-right: 1px solid white; border-bottom: 1px solid white} .show-top-border {background-color: rgba(255, 190, 77, 0.1); border-left: 1px solid white; border-right: 1px solid white; border-top: 1px solid white;} #fleetTable { margin-top: 8px } #assistModal .assist-modal-content { width:clamp(1120px, 74vw, 1420px); max-width:calc(100vw - 40px); } .transport-to-target select, .transport-to-starbase select, .transport-plus-route-manifest select { max-width: 11.5em; } .transport-plus-locations { display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap; } .transport-plus-targets { display:flex; flex-wrap:wrap; gap:6px 12px; margin-bottom:8px; } .transport-plus-target { display:flex; align-items:center; gap:6px; } .transport-plus-routes { display:flex; flex-direction:column; gap:8px; } .assist-transport-plus-route { padding-top:6px; border-top:1px solid rgba(255, 255, 255, 0.15); } .assist-transport-plus-route:first-child { padding-top:0; border-top:none; } .transport-plus-route-header { display:flex; align-items:center; gap:8px; margin-bottom:4px; flex-wrap:wrap; } .transport-plus-route-manifest { display:flex; flex-wrap:wrap; gap:6px 10px; } .transport-plus-route-manifest > div { display:flex; align-items:center; gap:4px; } .transport-resource-entry span { margin-right:4px; } #assistModal .assist-modal-body option { background-color:white } #assistModal .assist-modal-body > table { width: 100% } #fleetTable tbody:nth-child(1) td { position:sticky; top:62px; background-color: #292930; padding: 5px 0 2px 0; } `;
+			let assistCSSString = `.assist-modal {display: none; position: fixed; z-index: 2; padding-top: 100px; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4); text-align:center; } .assist-modal-content {position: relative; display: inline-block; text-align:left; background-color: rgb(41, 41, 48); margin: auto; padding: 0; border: 1px solid #888; width: 667px; min-width: 450px; max-width: 95%; height: auto; min-height: 50px; max-height: 95%; overflow-y: auto; box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2),0 6px 20px 0 rgba(0,0,0,0.19); -webkit-animation-name: animatetop; -webkit-animation-duration: 0.4s; animation-name: animatetop; animation-duration: 0.4s;} .assist-modal-save { font-size:100%; font-weight:bold; vertical-align:top; margin-left:0.5em; } #assist-modal-error {color: red; margin-left: 5px; margin-right: 5px; font-size: 16px; display:block; } .assist-modal-header-right {color: rgb(255, 190, 77); margin-left: auto !important; font-size: 20px;} .assist-btn {background-color: rgb(41, 41, 48); color: rgb(255, 190, 77); margin-left: 2px; margin-right: 2px;} .assist-btn:hover {background-color: rgba(255, 190, 77, 0.2);} .assist-modal-close { font-size:130%; line-height:80%; vertical-align:middle; } .assist-modal-close:hover, .assist-modal-close:focus {font-weight: bold; text-decoration: none; cursor: pointer;} .assist-modal-btn {color: rgb(255, 190, 77); padding: 5px 5px; margin-right: 5px; text-decoration: none; background-color: rgb(41, 41, 48); border: none; cursor: pointer;} .assist-modal-save:hover { background-color: rgba(255, 190, 77, 0.2); } .assist-modal-header {display: flex; position:sticky; z-index:1000; top:0; left:0; align-items: center; padding: 2px 16px; background-color: #544735; border-bottom: 2px solid rgb(255, 190, 77); color: rgb(255, 190, 77);} .assist-modal-body {padding: 2px 16px; font-size: 12px;} .assist-modal-body > table, .assist-modal-body table.main table {width: 100%;border-collapse: collapse;} .assist-modal-body th, .assist-modal-body td {padding:0 7px 0 0; line-height:130%;} #assistStatus .assist-status-table {table-layout:fixed;} #assistStatus .assist-status-slot {width:18%;} #assistStatus .assist-status-starbase {width:28%;} #assistStatus .assist-status-crew {width:14%;} #assistStatus .assist-status-job {width:40%;} #assistStatus .assist-status-section-header {background-color:rgba(255, 190, 77, 0.14); color:rgb(255, 190, 77); font-weight:bold;} #assistStatus .assist-status-section-header td {padding-top:2px; padding-bottom:2px;} #assistStatus .assist-craft-section-header td {border-top:1px solid rgba(255, 190, 77, 0.45);} #assistStatus {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 82px; left: 10px; z-index: 1;} #assistStarbaseStatus {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 80px; right: 20px; z-index: 1;} #assistCheck {background-color: rgba(0,0,0,0.75); backdrop-filter: blur(10px); position: absolute; margin: auto; left: 0; right: 0; top: 100px; width: 650px; min-width: 450px; max-width: 75%; z-index: 1;} .dropdown { position: absolute; display: none; margin-top: 25px; margin-left: 152px; background-color: rgb(41, 41, 48); min-width: 120px; box-shadow: 0 8px 16px 0 rgba(0, 0, 0, 0.2); z-index: 2; } .dropdown.show { display: block; } .assist-btn-alt { color: rgb(255, 190, 77); padding: 12px 16px; text-decoration: none; display: block; background-color: rgb(41, 41, 48); border: none; cursor: pointer; } .assist-btn-alt:hover { background-color: rgba(255, 190, 77, 0.2); } #checkresults { padding: 5px; margin-top: 20px; border: 1px solid grey; border-radius: 8px;} .dropdown button {width: 100%; text-align: left;} #assistModal table {border-collapse: collapse;} .assist-scan-row, .assist-scan2-row, .assist-mine-row, .assist-transport-row, .assist-transport-plus-row {background-color: rgba(255, 190, 77, 0.1); border-left: 1px solid white; border-right: 1px solid white; border-bottom: 1px solid white} .show-top-border {background-color: rgba(255, 190, 77, 0.1); border-left: 1px solid white; border-right: 1px solid white; border-top: 1px solid white;} #fleetTable { margin-top: 8px } #assistModal .assist-modal-content { width:clamp(1120px, 74vw, 1420px); max-width:calc(100vw - 40px); } .transport-to-target select, .transport-to-starbase select, .transport-plus-route-manifest select { max-width: 11.5em; } .transport-plus-locations { display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap; } .transport-plus-targets { display:flex; flex-wrap:wrap; gap:6px 12px; margin-bottom:8px; } .transport-plus-target { display:flex; align-items:center; gap:6px; } .transport-plus-routes { display:flex; flex-direction:column; gap:8px; } .assist-transport-plus-route { padding-top:6px; border-top:1px solid rgba(255, 255, 255, 0.15); } .assist-transport-plus-route:first-child { padding-top:0; border-top:none; } .transport-plus-route-header { display:flex; align-items:center; gap:8px; margin-bottom:4px; flex-wrap:wrap; } .transport-plus-route-manifest { display:flex; flex-wrap:wrap; gap:6px 10px; } .transport-plus-route-manifest > div { display:flex; align-items:center; gap:4px; } .transport-resource-entry span { margin-right:4px; } #assistModal .assist-modal-body option { background-color:white } #assistModal .assist-modal-body > table { width: 100% } #fleetTable tbody:nth-child(1) td { position:sticky; top:62px; background-color: #292930; padding: 5px 0 2px 0; } `;
 			assistCSSString += ` #assistModal .assist-modal-header, #settingsModal .assist-modal-header { cursor: move; } #assistModal .transport-to-target, #assistModal .transport-to-starbase { width:100%; align-items:center; } #assistModal .transport-to-target .transport-resource-entry, #assistModal .transport-to-starbase .transport-resource-entry { display:flex; align-items:center; gap:4px; flex:0 0 auto; min-width:0; margin-right:18px; } #assistModal .transport-to-target .transport-resource-entry:last-child, #assistModal .transport-to-starbase .transport-resource-entry:last-child { margin-right:0; } #assistModal .transport-to-target .transport-resource-entry > div, #assistModal .transport-to-starbase .transport-resource-entry > div { display:inline-flex !important; align-items:center; gap:4px; flex:0 0 auto; } #assistModal .transport-to-target .transport-resource-select, #assistModal .transport-to-starbase .transport-resource-select { width:clamp(84px, calc(6.6vw + 10px), 106px) !important; min-width:84px; max-width:106px; flex:0 1 clamp(84px, calc(6.6vw + 10px), 106px); } #assistModal .transport-to-target .transport-resource-amount, #assistModal .transport-to-starbase .transport-resource-amount { width:64px !important; min-width:64px; max-width:64px; flex:0 0 64px; } `;
 			assistCSSString += ` #assistStats {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 80px; right: 20px; z-index: 1; } #assistStats table { border-collapse: collapse; border-spacing:1px; } #assistStats td, #assistStats th { padding:0 7px 0 0; }`; // statsadd
 			assistCSSString += ` #assistLpAutomation {background-color: rgba(0,0,0,${statusPanelOpacity}); backdrop-filter: blur(10px); position: absolute; top: 70px; left: 40px; z-index: 1; width: calc((100vw - 80px) * 0.75); max-width: calc(100vw - 80px); max-height: calc(100vh - 60px); overflow: auto; } #assistLpAutomation table { border-collapse: collapse; border-spacing:1px; } #assistLpAutomation td, #assistLpAutomation th { padding:0 7px 0 0; } #assistLpAutomation .lp-auto-section { margin: 0 0 10px 0; } #assistLpAutomation .lp-auto-section-gap { height: 8px; } #assistLpAutomation .lp-auto-summary-table { table-layout: fixed; width: auto; } #assistLpAutomation .lp-auto-summary-table td:nth-child(1):not([colspan]), #assistLpAutomation .lp-auto-summary-table td:nth-child(3):not([colspan]), #assistLpAutomation .lp-auto-summary-table td:nth-child(5):not([colspan]) { min-width: 165px; padding-left: 18px; } #assistLpAutomation .lp-auto-summary-table tr:first-child td { padding-left: 0 !important; } #assistLpAutomation .lp-auto-summary-table td:nth-child(2), #assistLpAutomation .lp-auto-summary-table td:nth-child(4), #assistLpAutomation .lp-auto-summary-table td:nth-child(6) { min-width: 90px; } #assistLpAutomation .lp-auto-influx table, #assistLpAutomation .lp-auto-components table { width: 100%; table-layout: fixed; } #assistLpAutomation .lp-auto-influx td, #assistLpAutomation .lp-auto-influx th, #assistLpAutomation .lp-auto-components td, #assistLpAutomation .lp-auto-components th { overflow: hidden; text-overflow: ellipsis; } #assistLpAutomation .lp-auto-influx tr:first-child td:first-child, #assistLpAutomation .lp-auto-components tr:first-child td:first-child { padding-left: 0 !important; } #assistLpAutomation .lp-auto-influx td:first-child, #assistLpAutomation .lp-auto-influx th:first-child, #assistLpAutomation .lp-auto-components td:first-child, #assistLpAutomation .lp-auto-components th:first-child { width: 16%; overflow: visible; text-overflow: clip; white-space: nowrap; } #assistLpAutomation .lp-auto-influx td:nth-child(n+2), #assistLpAutomation .lp-auto-influx th:nth-child(n+2), #assistLpAutomation .lp-auto-components td:nth-child(n+2), #assistLpAutomation .lp-auto-components th:nth-child(n+2) { width: 12%; overflow: visible; text-overflow: clip; } #assistLpAutomation .lp-auto-influx tr:first-child td, #assistLpAutomation .lp-auto-components tr:first-child td { white-space: normal; line-height: 1.15; } #assistLpAutomation .lp-auto-influx tr:not(:first-child) td, #assistLpAutomation .lp-auto-components tr:not(:first-child) td { white-space: nowrap; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table { table-layout: fixed; width: 100%; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:first-child, #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:first-child { width: 160px !important; min-width: 160px !important; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(2), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(2) { width: 100px !important; min-width: 100px !important; } #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(3), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(3), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(4), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(4), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(5), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(5), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(6), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(6), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(7), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(7), #assistLpAutomation .lp-auto-components .lp-auto-summary-table td:nth-child(8), #assistLpAutomation .lp-auto-components .lp-auto-summary-table th:nth-child(8) { width: auto !important; min-width: 0 !important; } #assistLpAutomation .lp-auto-performance-metrics .lp-auto-summary-table { width: 100%; table-layout: fixed; } #assistLpAutomation .lp-auto-performance-metrics .lp-auto-summary-table td { min-width: 0 !important; padding-right: 4px; overflow: hidden; text-overflow: ellipsis; } #assistLpAutomation .lp-auto-performance-metrics .lp-auto-summary-table tr:first-child td { white-space: normal; line-height: 1.15; overflow-wrap: anywhere; } #assistLpAutomation .lp-auto-performance-metrics .lp-auto-summary-table tr:not(:first-child) td { white-space: nowrap; } #assistLpAutomation .lp-auto-performance-metrics .lp-auto-summary-table td:nth-child(1) { width: 16% !important; } #assistLpAutomation .lp-auto-performance-metrics .lp-auto-summary-table td:nth-child(2) { width: 10% !important; } #assistLpAutomation .lp-auto-performance-metrics .lp-auto-summary-table td:nth-child(3) { width: 11% !important; } #assistLpAutomation .lp-auto-performance-metrics .lp-auto-summary-table td:nth-child(4) { width: 10% !important; } #assistLpAutomation .lp-auto-performance-metrics .lp-auto-summary-table td:nth-child(5) { width: 11% !important; } #assistLpAutomation .lp-auto-performance-metrics .lp-auto-summary-table td:nth-child(6) { width: 10% !important; } #assistLpAutomation .lp-auto-performance-metrics .lp-auto-summary-table td:nth-child(7), #assistLpAutomation .lp-auto-performance-metrics .lp-auto-summary-table td:nth-child(8) { width: 16% !important; }`;

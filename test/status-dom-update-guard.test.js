@@ -86,14 +86,25 @@ for (const file of USERSCRIPTS) {
     }
   });
 
-  test(`status fleet columns: ${file} keeps Food/SDUs only for scanning fleets`, () => {
+  test(`status sections: ${file} render fleet and crafting columns independently`, () => {
     const source = fs.readFileSync(path.join(ROOT, file), 'utf8');
-    const isScanningStatusFleet = loadHelper(file, 'isScanningStatusFleet');
+    const getAssistStatusRowModel = loadHelper(file, 'getAssistStatusRowModel');
+    const targets = [{ x: 1, y: 2, name: 'MRZ-5' }];
 
-    assert.equal(isScanningStatusFleet({ assignment: 'Scan' }), true);
-    assert.equal(isScanningStatusFleet({ assignment: 'Transport' }), false);
-    assert.equal(isScanningStatusFleet({ assignment: 'Supply Chain' }), false);
-    assert.match(source, /fleet\.assignment === 'Scan'/);
-    assert.match(source, /fleetStatusTd\.setAttribute\('colspan', 3\)/);
+    assert.equal(
+      JSON.stringify(getAssistStatusRowModel({ publicKey: 'fleet-pk', label: 'Finch Fleet', state: 'Mine [07:19]', foodCnt: 99, sduCnt: 42 }, targets)),
+      JSON.stringify({ section: 'fleet', cells: ['Finch Fleet', 'Mine [07:19]'] }),
+    );
+    assert.equal(
+      JSON.stringify(getAssistStatusRowModel({ label: 'craft3', coordinates: '1,2', crew: 7, state: '⚒ Polymer [06:50]' }, targets)),
+      JSON.stringify({ section: 'craft', cells: ['craft3', 'MRZ-5', '7', '⚒ Polymer [06:50]'] }),
+    );
+
+    assert.match(source, /assist-status-section-header/);
+    assert.match(source, /Slot<\/td><td>Starbase<\/td><td>Crew<\/td><td>Crafting Job \(time\)<\/td>/);
+    assert.doesNotMatch(source, /<td>Fleet<\/td><td>Food<\/td><td>SDUs<\/td>/);
+    assert.match(source, /rgba\(255, 190, 77, 0\.14\)/);
+    assert.match(source, /cachedStatus\?\.foodCnt/);
+    assert.match(source, /cachedStatus\?\.sduCnt/);
   });
 }
