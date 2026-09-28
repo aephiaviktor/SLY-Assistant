@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-303
+// @aephia-version 0.7.35-304
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -12781,7 +12781,6 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const nowMs = Date.now();
 		const inventory = await readAutomatedRouteInventory(legs);
 		const productionEvents = (await collectAutomatedCraftingProductionEvents(legs, nowMs)).concat(await collectAutomatedMiningProductionEvents(legs, nowMs));
-		if(!productionEvents.length) return null;
 		const currentLeg = legs[Math.max(0, Number(currentLegIndex || 0)) % legs.length];
 		const loadedAmounts = Object.fromEntries((loadedCargo || []).map(entry => [String(entry.mint || ''), Math.max(0, Number(entry.amount || 0))]));
 		const observedCurrentManifest = (currentLeg.manifest || []).filter(entry => !entry?.cargoTotal || Number(loadedAmounts[entry.res] || 0) > 0);
@@ -12810,7 +12809,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			cargoSizes
 		});
 		let moveType = decision.moveType;
-		fleet.automatedTravelPlan = [];
+		fleet.automatedTravelPlan = [moveType];
+		fleet.automatedTravelForecastAt = Date.now();
 		if(forecastContext && Array.isArray(forecastContext.legs)) {
 			try {
 				const plan = await buildAutomatedTravelForecast(fleet, forecastContext.legs, forecastContext.currentLegIndex || 0, moveType, loadedCargo);
@@ -12820,14 +12820,13 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					moveType = plan.modes[0];
 					const eventSummary = (plan.productionEvents || []).slice(0, 3).map(event => event.source + ':' + event.res + '@' + TimeToStr(new Date(event.atMs))).join(',');
 					cLog(1, `${FleetTimeStamp(fleet.label)} Automated forecast -> ${moveType == 'warp' ? 'Warp' : 'Subwarp'} | ${plan.summary} | production ${eventSummary || 'none'}`);
-					updateAssistStatus(fleet);
 				}
 			} catch(error) {
-				fleet.automatedTravelPlan = [];
 				cLog(1, `${FleetTimeStamp(fleet.label)} Automated production forecast unavailable; using cargo-fill decision`, error);
 			}
 		}
 		cLog(1, `${FleetTimeStamp(fleet.label)} Automated Travel Mode -> ${moveType == 'warp' ? 'Warp' : 'Subwarp'} (loaded ${decision.loadedCargoVolume}/${decision.requiredVolume}, threshold ${decision.thresholdVolume})`);
+		updateAssistStatus(fleet);
 		return moveType;
 	}
 
@@ -16664,7 +16663,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-303', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-304', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),

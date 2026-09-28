@@ -10,9 +10,11 @@ const ROOT = path.resolve(__dirname, '..');
 
 function readFunctionSource(name, sourcePath = 'SLY_Assistant.user.js') {
   const source = fs.readFileSync(path.join(ROOT, sourcePath), 'utf8');
-  const start = source.indexOf(`function ${name}(`);
-  assert.notEqual(start, -1, `${name} must exist in ${sourcePath}`);
-  const bodyStart = source.indexOf('{', start);
+  const functionStart = source.indexOf(`function ${name}(`);
+  assert.notEqual(functionStart, -1, `${name} must exist in ${sourcePath}`);
+  const asyncStart = source.lastIndexOf('async ', functionStart);
+  const start = asyncStart >= 0 && source.slice(asyncStart, functionStart) === 'async ' ? asyncStart : functionStart;
+  const bodyStart = source.indexOf('{', functionStart);
   let depth = 0;
   for (let end = bodyStart; end < source.length; end += 1) {
     if (source[end] === '{') depth += 1;
@@ -24,8 +26,8 @@ function readFunctionSource(name, sourcePath = 'SLY_Assistant.user.js') {
   throw new Error(`unterminated ${name}`);
 }
 
-function loadFunctions(names) {
-  const context = vm.createContext({});
+function loadFunctions(names, globals = {}) {
+  const context = vm.createContext({ ...globals });
   vm.runInContext(`${names.map(name => readFunctionSource(name)).join('\n')}; this.out = { ${names.join(', ')} };`, context);
   return context.out;
 }
@@ -116,6 +118,60 @@ test('Automated forecast suffix is compact and appended only for valid Automated
     JSON.parse(JSON.stringify(getAssistStatusRowModel({ publicKey: 'fleet', label: 'Hauler', state: 'Warp [28,21] 14:32', automatedTravelPlan: ['warp', 'warp', 'subwarp'] }, []))),
     { section: 'fleet', cells: ['Hauler', 'Warp [28,21] 14:32 | 2w1sw'] },
   );
+});
+
+test('Automated forecast still builds from current stock when no production event is visible', async () => {
+  const { buildAutomatedTravelForecast } = loadFunctions(['buildAutomatedTravelForecast'], {
+    getAutomatedRouteLeg: (_fleet, leg) => leg,
+    getAutomatedRequiredManifest: manifest => manifest.filter(entry => entry.cargoTotal),
+    readAutomatedRouteInventory: async () => ({ A: { ore: 100 }, B: {} }),
+    collectAutomatedCraftingProductionEvents: async () => [],
+    collectAutomatedMiningProductionEvents: async () => [],
+    planAutomatedTravelModes: input => ({ modes: ['warp', 'warp'], productionEvents: input.productionEvents }),
+    Date,
+  });
+
+  const plan = await buildAutomatedTravelForecast(
+    {},
+    makeTwoLegRoute(),
+    0,
+    'warp',
+    [{ mint: 'ore', amount: 10 }],
+  );
+
+  assert.deepEqual(Array.from(plan.modes), ['warp', 'warp']);
+  assert.deepEqual(Array.from(plan.productionEvents), []);
+});
+
+test('Automated decision remains visible when the extended forecast fails', async () => {
+  let statusUpdates = 0;
+  const fleet = { cargoHold: 'cargo', label: 'Eagle Fleet' };
+  const { resolveAutomatedTravelMode } = loadFunctions(['resolveAutomatedTravelMode'], {
+    solanaReadConnection: {
+      getParsedTokenAccountsByOwner: async () => ({ value: [] }),
+    },
+    tokenProgramPK: 'token-program',
+    cargoItems: [],
+    calculateAutomatedTravelMode: () => ({
+      moveType: 'subwarp',
+      loadedCargoVolume: 0,
+      requiredVolume: 10,
+      thresholdVolume: 9.5,
+    }),
+    globalSettings: { transportUseAmmoBank: false },
+    sageGameAcct: { account: { mints: { ammo: { toString: () => 'ammo' }, fuel: { toString: () => 'fuel' } } } },
+    buildAutomatedTravelForecast: async () => { throw new Error('forecast unavailable'); },
+    updateAssistStatus: () => { statusUpdates += 1; },
+    cLog: () => {},
+    FleetTimeStamp: () => '',
+    Date,
+  });
+
+  const moveType = await resolveAutomatedTravelMode(fleet, [], { legs: [{}] });
+
+  assert.equal(moveType, 'subwarp');
+  assert.deepEqual(Array.from(fleet.automatedTravelPlan), ['subwarp']);
+  assert.equal(statusUpdates, 1);
 });
 
 test('both packaged userscripts contain profile-wide production forecast wiring', () => {
