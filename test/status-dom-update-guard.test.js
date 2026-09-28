@@ -126,6 +126,7 @@ for (const file of USERSCRIPTS) {
     assert.equal(elem.style.left, '884px');
     assert.equal(elem.style.top, '82px');
     assert.equal(elem.style.width, '300px');
-    assert.match(source, /resize:both; overflow:auto; min-width:280px; min-height:120px;/);
+    assert.match(source, /resize:both; overflow:hidden; min-width:280px; min-height:120px;/);
+    assert.doesNotMatch(source, /resize:both; overflow:auto;/);
   });
 }
