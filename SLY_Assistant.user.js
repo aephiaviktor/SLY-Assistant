@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-306
+// @aephia-version 0.7.35-307
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -12920,14 +12920,98 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return events;
 	}
 
-	function selectAutomatedEstimatedPlan(warpPlan, subwarpPlan) {
-		const plans = [warpPlan, subwarpPlan].filter(plan => plan && Array.isArray(plan.modes));
-		if(!plans.length) return null;
-		const completed = plan => Number(plan.completedLegs !== undefined ? plan.completedLegs : plan.modes.length);
-		const warps = plan => Number(plan.warpCount !== undefined ? plan.warpCount : plan.modes.filter(mode => mode === 'warp').length);
-		const slowEarly = plan => plan.modes.map(mode => mode === 'subwarp' ? '0' : '1').join('');
-		plans.sort((a, b) => completed(b) - completed(a) || warps(b) - warps(a) || slowEarly(a).localeCompare(slowEarly(b)) || Number(a.projectedEndMs || 0) - Number(b.projectedEndMs || 0));
-		return plans[0];
+	function planAutomatedStockRunway(input) {
+		input = input || {};
+		const legs = Array.isArray(input.legs) ? input.legs.filter(Boolean) : [];
+		if(!legs.length) return { modes: [], summary: '', completedLegs: 0, reason: 'no_legs' };
+		const nowMs = Math.max(0, Number(input.nowMs || 0));
+		const targetAtMs = Math.max(nowMs, Number(input.targetAtMs || nowMs));
+		const currentLegIndex = Math.max(0, Math.floor(Number(input.currentLegIndex || 0))) % legs.length;
+		const horizonLegs = Math.max(1, Math.min(192, Math.floor(Number(input.horizonLegs || 96))));
+		let states = [{
+			timeMs: nowMs,
+			inventory: cloneAutomatedInventory(input.inventory),
+			modes: [],
+			warpCount: 0,
+			lastCargoArrivalMs: 0,
+			lastCargoModeCount: 0,
+			stockFundedCargoLegs: 0
+		}];
+		const terminalStates = [];
+
+		for(let step = 0; step < horizonLegs && states.length; step++) {
+			const legIndex = (currentLegIndex + step) % legs.length;
+			const leg = legs[legIndex] || {};
+			const nextByKey = new Map();
+			for(const state of states) {
+				let departureInventory = state.inventory;
+				let carriedManifest = leg.manifest || [];
+				let stockFundedCargo = false;
+				if(step === 0 && input.currentLegLoaded !== false) {
+					if(Array.isArray(input.currentLoadedManifest)) carriedManifest = input.currentLoadedManifest;
+				} else {
+					const required = getAutomatedRequiredManifest(leg.manifest);
+					if(required.length > 0 && !canWithdrawAutomatedManifest(departureInventory, leg.source, leg.manifest)) {
+						terminalStates.push(state);
+						continue;
+					}
+					const balances = departureInventory[String(leg.source || '')] || {};
+					carriedManifest = (leg.manifest || []).filter(entry => !entry?.cargoTotal || Number(balances[entry.res] || 0) >= Number(entry.requiredAmount !== undefined ? entry.requiredAmount : entry.amt || 0));
+					stockFundedCargo = getAutomatedRequiredManifest(carriedManifest).length > 0;
+					departureInventory = adjustAutomatedInventoryForManifest(departureInventory, leg.source, carriedManifest, -1);
+				}
+				const cargoBearing = getAutomatedRequiredManifest(carriedManifest).length > 0;
+				for(const mode of ['warp', 'subwarp']) {
+					const durationMs = Math.max(1, Number(mode === 'warp' ? leg.warpMs : leg.subwarpMs) || 1);
+					const arrivalMs = state.timeMs + durationMs;
+					const modes = state.modes.concat(mode);
+					const arrivalInventory = adjustAutomatedInventoryForManifest(departureInventory, leg.destination, carriedManifest, 1);
+					const next = {
+						timeMs: arrivalMs,
+						inventory: arrivalInventory,
+						modes,
+						warpCount: state.warpCount + (mode === 'warp' ? 1 : 0),
+						lastCargoArrivalMs: cargoBearing ? arrivalMs : state.lastCargoArrivalMs,
+						lastCargoModeCount: cargoBearing ? modes.length : state.lastCargoModeCount,
+						stockFundedCargoLegs: state.stockFundedCargoLegs + (stockFundedCargo ? 1 : 0)
+					};
+					const inventoryKey = JSON.stringify(arrivalInventory);
+					const key = [arrivalMs, next.lastCargoArrivalMs, next.lastCargoModeCount, next.stockFundedCargoLegs, inventoryKey].join('|');
+					const previous = nextByKey.get(key);
+					const slowEarly = value => value.modes.map(item => item === 'subwarp' ? '0' : '1').join('');
+					if(!previous || next.warpCount > previous.warpCount || (next.warpCount === previous.warpCount && slowEarly(next) < slowEarly(previous))) nextByKey.set(key, next);
+				}
+			}
+			states = Array.from(nextByKey.values());
+		}
+		if(!terminalStates.length) terminalStates.push(...states);
+		const candidates = terminalStates.filter(state => state.lastCargoArrivalMs > 0 && state.lastCargoModeCount > 0);
+		if(!candidates.length) return { modes: [], summary: '', completedLegs: 0, reason: 'no_stock_funded_cargo' };
+		const afterTarget = candidates.some(state => state.lastCargoArrivalMs >= targetAtMs);
+		const cargoModes = state => state.modes.slice(0, state.lastCargoModeCount);
+		const cargoWarps = state => cargoModes(state).filter(mode => mode === 'warp').length;
+		const slowEarly = state => cargoModes(state).map(mode => mode === 'subwarp' ? '0' : '1').join('');
+		candidates.sort((a, b) => {
+			if(afterTarget) {
+				const aAfter = a.lastCargoArrivalMs >= targetAtMs;
+				const bAfter = b.lastCargoArrivalMs >= targetAtMs;
+				if(aAfter !== bAfter) return aAfter ? -1 : 1;
+				if(aAfter && a.lastCargoArrivalMs !== b.lastCargoArrivalMs) return a.lastCargoArrivalMs - b.lastCargoArrivalMs;
+			} else if(a.lastCargoArrivalMs !== b.lastCargoArrivalMs) return b.lastCargoArrivalMs - a.lastCargoArrivalMs;
+			return cargoWarps(b) - cargoWarps(a) || slowEarly(a).localeCompare(slowEarly(b));
+		});
+		const best = candidates[0];
+		const modes = best.modes.slice(0, best.lastCargoModeCount);
+		return {
+			modes,
+			summary: compressAutomatedTravelPlan(modes),
+			completedLegs: modes.length,
+			projectedEndMs: best.lastCargoArrivalMs,
+			lastCargoArrivalMs: best.lastCargoArrivalMs,
+			stockFundedCargoLegs: best.stockFundedCargoLegs,
+			warpCount: modes.filter(mode => mode === 'warp').length,
+			reason: best.lastCargoArrivalMs >= targetAtMs ? 'runway_aligned' : 'runway_shortfall'
+		};
 	}
 
 	async function buildAutomatedTravelForecast(fleet, routeLegs, currentLegIndex, baselineMode, loadedCargo = []) {
@@ -12946,10 +13030,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const currentLoadedManifest = observedCurrentManifest.some(entry => entry && entry.cargoTotal) ? observedCurrentManifest : currentLeg.manifest;
 		const plannerInput = { nowMs, legs, currentLegIndex, currentLegLoaded: true, currentLoadedManifest, inventory, productionEvents, horizonLegs: 48 };
 		const plan = estimatedEvents.length > 0
-			? selectAutomatedEstimatedPlan(
-				planAutomatedTravelModes({...plannerInput, forcedFirstMode: 'warp'}),
-				planAutomatedTravelModes({...plannerInput, forcedFirstMode: 'subwarp'})
-			)
+			? planAutomatedStockRunway({...plannerInput, targetAtMs: Math.min(...estimatedEvents.map(event => Number(event.atMs || nowMs))), horizonLegs: 96})
 			: planAutomatedTravelModes({...plannerInput, forcedFirstMode: baselineMode === 'subwarp' ? 'subwarp' : ''});
 		if(!plan || !plan.modes.length) return null;
 		plan.productionEvents = productionEvents;
@@ -16838,7 +16919,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-306', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-307', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
