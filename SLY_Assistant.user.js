@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-304
+// @aephia-version 0.7.35-305
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -12562,7 +12562,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 	function getAutomatedTravelPlanSuffix(fleet) {
 		const summary = compressAutomatedTravelPlan(fleet && fleet.automatedTravelPlan);
-		return summary ? ' | ' + summary : '';
+		if(summary) return ' | ' + summary;
+		return fleet && fleet.automatedTravelPlanPending ? ' | -' : '';
 	}
 
 	function planAutomatedTravelModes(input) {
@@ -12681,10 +12682,23 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const distance = calculateMovementDistance(ConvertCoords(source), ConvertCoords(destination));
 		const maxWarpDistance = Math.max(0.01, Number(fleet.maxWarpDistance || 0) / 100);
 		const warpJumps = Math.max(1, Math.ceil(distance / maxWarpDistance));
+		const manifest = cloneTransportManifest((leg && (leg.manifest || leg.destinationManifest)) || []);
+		const cargoCapacity = Math.max(0, Number(fleet.cargoCapacity || 0));
+		const cargoSizes = Object.fromEntries(cargoItems.map(item => [item.token, Math.max(1, Number(item.size || 1))]));
+		const fuelMint = sageGameAcct.account.mints.fuel.toString();
+		const ammoMint = sageGameAcct.account.mints.ammo.toString();
+		for(const entry of manifest) {
+			if(!entry || !entry.cargoTotal || !entry.res) continue;
+			const requested = Math.max(0, Math.floor(Number(entry.requiredAmount !== undefined ? entry.requiredAmount : entry.amt || 0)));
+			const cargoUnits = Math.max(0, Math.floor(cargoCapacity / Math.max(1, Number(cargoSizes[entry.res] || 1))));
+			const dedicatedUnits = entry.res === fuelMint ? Math.max(0, Math.floor(Number(fleet.fuelCapacity || 0)))
+				: (entry.res === ammoMint && globalSettings.transportUseAmmoBank ? Math.max(0, Math.floor(Number(fleet.ammoCapacity || 0))) : 0);
+			entry.requiredAmount = Math.min(requested, cargoUnits + dedicatedUnits);
+		}
 		return {
 			source,
 			destination,
-			manifest: cloneTransportManifest((leg && (leg.manifest || leg.destinationManifest)) || []),
+			manifest,
 			warpMs: Math.max(1000, Math.ceil((calculateWarpTime(fleet, distance) + Math.max(0, warpJumps - 1) * Number(fleet.warpCooldown || 0)) * 1000)),
 			subwarpMs: Math.max(1000, Math.ceil(calculateSubwarpTime(fleet, distance) * 1000))
 		};
@@ -12781,6 +12795,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const nowMs = Date.now();
 		const inventory = await readAutomatedRouteInventory(legs);
 		const productionEvents = (await collectAutomatedCraftingProductionEvents(legs, nowMs)).concat(await collectAutomatedMiningProductionEvents(legs, nowMs));
+		if(!productionEvents.length) return { modes: [], summary: '', completedLegs: 0, reason: 'awaiting_final_output', productionEvents: [] };
 		const currentLeg = legs[Math.max(0, Number(currentLegIndex || 0)) % legs.length];
 		const loadedAmounts = Object.fromEntries((loadedCargo || []).map(entry => [String(entry.mint || ''), Math.max(0, Number(entry.amount || 0))]));
 		const observedCurrentManifest = (currentLeg.manifest || []).filter(entry => !entry?.cargoTotal || Number(loadedAmounts[entry.res] || 0) > 0);
@@ -12809,17 +12824,21 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			cargoSizes
 		});
 		let moveType = decision.moveType;
-		fleet.automatedTravelPlan = [moveType];
+		fleet.automatedTravelPlan = [];
+		fleet.automatedTravelPlanPending = true;
 		fleet.automatedTravelForecastAt = Date.now();
 		if(forecastContext && Array.isArray(forecastContext.legs)) {
 			try {
 				const plan = await buildAutomatedTravelForecast(fleet, forecastContext.legs, forecastContext.currentLegIndex || 0, moveType, loadedCargo);
 				if(plan && plan.modes.length) {
 					fleet.automatedTravelPlan = plan.modes;
+					fleet.automatedTravelPlanPending = false;
 					fleet.automatedTravelForecastAt = Date.now();
 					moveType = plan.modes[0];
 					const eventSummary = (plan.productionEvents || []).slice(0, 3).map(event => event.source + ':' + event.res + '@' + TimeToStr(new Date(event.atMs))).join(',');
 					cLog(1, `${FleetTimeStamp(fleet.label)} Automated forecast -> ${moveType == 'warp' ? 'Warp' : 'Subwarp'} | ${plan.summary} | production ${eventSummary || 'none'}`);
+				} else if(plan && plan.reason === 'awaiting_final_output') {
+					moveType = 'warp';
 				}
 			} catch(error) {
 				cLog(1, `${FleetTimeStamp(fleet.label)} Automated production forecast unavailable; using cargo-fill decision`, error);
@@ -16663,7 +16682,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-304', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-305', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
