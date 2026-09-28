@@ -125,6 +125,121 @@ test('Automated forecast suffix is compact and shows a dash while no exact plan 
   );
 });
 
+test('visible crafting events credit recipe output per process quantity', () => {
+  const { getAutomatedCraftOutputAmount } = loadFunctions(['getAutomatedCraftOutputAmount']);
+  const process = { account: { quantity: { toNumber: () => 25 } } };
+  const recipe = { output: { amount: 4 } };
+  assert.equal(getAutomatedCraftOutputAmount(process, recipe), 100);
+});
+
+test('visible direct craft collector publishes the multiplied token output', async () => {
+  const recipe = {
+    publicKey: { toString: () => 'electronics-recipe' },
+    output: { mint: { toString: () => 'electronics' }, amount: 4 },
+  };
+  const process = {
+    publicKey: { toBase58: () => 'process-1' },
+    account: {
+      recipe: { toString: () => 'electronics-recipe' },
+      status: 1,
+      quantity: { toNumber: () => 25 },
+      endTime: { toNumber: () => 100 },
+    },
+  };
+  const { collectAutomatedCraftingProductionEvents } = loadFunctions([
+    'getAutomatedCraftOutputAmount',
+    'collectAutomatedCraftingProductionEvents',
+  ], {
+    getAutomatedRequiredManifest: manifest => manifest,
+    ConvertCoords: value => value,
+    getStarbaseFromCoords: async () => ({ publicKey: 'starbase', account: { level: 5 } }),
+    getStarbasePlayer: async () => ({ publicKey: { toBase58: () => 'player' } }),
+    getStarbaseTime: async () => ({ starbaseTime: 0, resRemaining: 1 }),
+    sageProgram: { account: { craftingInstance: { all: async () => [{ publicKey: { toBase58: () => 'instance' } }] } } },
+    craftingProgram: { account: { craftingProcess: { all: async () => [process] } } },
+    craftRecipes: [recipe],
+    maybeBnToNumber: value => Number(value),
+    userProfileAcct: 'profile',
+    Date,
+    Math,
+    Set,
+  });
+
+  const events = await collectAutomatedCraftingProductionEvents([{ source: 'A', manifest: [{ res: 'electronics', amount: 10 }] }], 0);
+  assert.equal(events[0].amount, 100);
+  assert.equal(events[0].source, 'craft');
+});
+
+test('craft-chain ETA uses recipe quantities, output amounts, crew, inventory, and sequential dependencies', () => {
+  const { estimateAutomatedCraftChain } = loadFunctions(['estimateAutomatedCraftChain']);
+  const recipes = [
+    { name: 'Polymer', duration: 60, input: [{ mint: 'ore', amount: 2 }], output: { mint: 'polymer', amount: 2 } },
+    { name: 'Electronics', duration: 100, input: [{ mint: 'polymer', amount: 3 }], output: { mint: 'electronics', amount: 1 } },
+  ];
+  const result = estimateAutomatedCraftChain({
+    targetRecipe: recipes[1],
+    targetRuns: 2,
+    crew: 10,
+    inventory: { ore: 100, polymer: 2 },
+    recipes,
+    speedMultiplier: 1,
+  });
+
+  // Two Electronics runs need six Polymer. Two are in stock, so one two-Polymer
+  // recipe run is not enough and two Polymer runs are required: 2*60/10 + 2*100/10.
+  assert.equal(result.durationSeconds, 32);
+  assert.equal(result.outputAmount, 2);
+  assert.equal(result.stages, 2);
+});
+
+test('estimated craft collector combines active intermediate remaining time with the configured chain', async () => {
+  const recipes = [
+    { name: 'Polymer', publicKey: { toString: () => 'polymer-recipe' }, duration: 60, input: [{ mint: 'ore', amount: 2 }], output: { mint: { toString: () => 'polymer' }, amount: 2 } },
+    { name: 'Electronics', publicKey: { toString: () => 'electronics-recipe' }, duration: 100, input: [{ mint: { toString: () => 'polymer' }, amount: 3 }], output: { mint: { toString: () => 'electronics' }, amount: 1 } },
+  ];
+  const activeProcess = {
+    account: {
+      craftingId: { toNumber: () => 7 },
+      recipe: { toString: () => 'polymer-recipe' },
+      quantity: { toNumber: () => 2 },
+      endTime: { toNumber: () => 100 },
+    },
+  };
+  const { collectAutomatedEstimatedCraftingProductionEvents } = loadFunctions([
+    'getAutomatedCraftOutputAmount',
+    'estimateAutomatedCraftChain',
+    'collectAutomatedEstimatedCraftingProductionEvents',
+  ], {
+    getAutomatedRequiredManifest: manifest => manifest,
+    globalSettings: { craftingJobs: 1 },
+    GM: { getValue: async () => JSON.stringify({ label: 'craft2', item: 'Electronics', coordinates: 'A', amount: 2, crew: 10, craftingId: 7 }) },
+    ConvertCoords: value => value,
+    getTransportCoordKey: value => String(value),
+    getStarbaseFromCoords: async () => ({ publicKey: 'starbase', account: { level: 5 } }),
+    getStarbasePlayer: async () => ({ publicKey: { toBase58: () => 'player' } }),
+    getStarbaseTime: async () => ({ starbaseTime: 0, resRemaining: 1 }),
+    sageProgram: { account: { craftingInstance: { all: async () => [{ publicKey: { toBase58: () => 'instance' } }] } } },
+    craftingProgram: { account: { craftingProcess: { all: async () => [activeProcess] } } },
+    craftRecipes: recipes,
+    userProfileAcct: 'profile',
+    Date,
+    Math,
+    Map,
+    Set,
+  });
+
+  const events = await collectAutomatedEstimatedCraftingProductionEvents(
+    [{ source: 'A', manifest: [{ res: 'electronics', amount: 10 }] }],
+    { A: { ore: 100 } },
+    0,
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].source, 'craft-estimate');
+  assert.equal(events[0].amount, 2);
+  assert.equal(events[0].atMs, 306000);
+});
+
 test('Automated forecast waits for a direct final-output event instead of extrapolating current stock', async () => {
   const { buildAutomatedTravelForecast } = loadFunctions(['buildAutomatedTravelForecast'], {
     getAutomatedRouteLeg: (_fleet, leg) => leg,
@@ -132,6 +247,7 @@ test('Automated forecast waits for a direct final-output event instead of extrap
     readAutomatedRouteInventory: async () => ({ A: { ore: 100 }, B: {} }),
     collectAutomatedCraftingProductionEvents: async () => [],
     collectAutomatedMiningProductionEvents: async () => [],
+    collectAutomatedEstimatedCraftingProductionEvents: async () => [],
     planAutomatedTravelModes: input => ({ modes: ['warp', 'warp'], productionEvents: input.productionEvents }),
     Date,
   });
@@ -149,6 +265,30 @@ test('Automated forecast waits for a direct final-output event instead of extrap
   assert.deepEqual(Array.from(plan.productionEvents), []);
 });
 
+test('estimated final-craft ETA chooses Subwarp internally but keeps the displayed plan pending', async () => {
+  const route = makeTwoLegRoute({ warpMs: 10, subwarpMs: 30, amount: 10 });
+  const { buildAutomatedTravelForecast } = loadFunctions(['selectAutomatedEstimatedPlan', 'buildAutomatedTravelForecast'], {
+    getAutomatedRouteLeg: (_fleet, leg) => leg,
+    getAutomatedRequiredManifest: manifest => manifest.filter(entry => entry.cargoTotal),
+    readAutomatedRouteInventory: async () => ({ A: { ore: 0 }, B: {} }),
+    collectAutomatedCraftingProductionEvents: async () => [],
+    collectAutomatedMiningProductionEvents: async () => [],
+    collectAutomatedEstimatedCraftingProductionEvents: async () => [{ id: 'estimate:craft2', atMs: 40, location: 'A', res: 'ore', amount: 100, source: 'craft-estimate' }],
+    planAutomatedTravelModes: input => {
+      assert.equal(input.productionEvents[0].source, 'craft-estimate');
+      return input.forcedFirstMode === 'subwarp'
+        ? { modes: ['subwarp', 'warp', 'warp'], summary: '1sw2w', warpCount: 2, completedLegs: 3 }
+        : { modes: ['warp'], summary: '1w', warpCount: 1, completedLegs: 1 };
+    },
+    Date,
+  });
+
+  const plan = await buildAutomatedTravelForecast({}, route, 0, 'warp', [{ mint: 'ore', amount: 10 }]);
+
+  assert.equal(plan.estimated, true);
+  assert.equal(plan.modes[0], 'subwarp');
+});
+
 test('Automated forecast starts when a direct final-output event is visible', async () => {
   const { buildAutomatedTravelForecast } = loadFunctions(['buildAutomatedTravelForecast'], {
     getAutomatedRouteLeg: (_fleet, leg) => leg,
@@ -156,6 +296,7 @@ test('Automated forecast starts when a direct final-output event is visible', as
     readAutomatedRouteInventory: async () => ({ A: { ore: 100 }, B: {} }),
     collectAutomatedCraftingProductionEvents: async () => [{ id: 'craft:1', atMs: 50, location: 'A', res: 'ore', amount: 100 }],
     collectAutomatedMiningProductionEvents: async () => [],
+    collectAutomatedEstimatedCraftingProductionEvents: async () => [],
     planAutomatedTravelModes: input => ({ modes: input.productionEvents.length ? ['warp', 'subwarp'] : [] }),
     Date,
   });
@@ -188,7 +329,22 @@ test('future Automated manifests convert cargo capacity to weighted token amount
   assert.equal(leg.manifest[0].requiredAmount, 50);
 });
 
-test('Automated decision remains visible as a dash when the extended forecast fails', async () => {
+test('estimated plan selection prefers more feasible legs, then more Warps, then earlier Subwarp', () => {
+  const { selectAutomatedEstimatedPlan } = loadFunctions(['selectAutomatedEstimatedPlan']);
+  const shorterWarp = { modes: ['warp'], completedLegs: 1, warpCount: 1 };
+  const longerSubwarp = { modes: ['subwarp', 'warp'], completedLegs: 2, warpCount: 1 };
+  assert.deepEqual(Array.from(selectAutomatedEstimatedPlan(shorterWarp, longerSubwarp).modes), ['subwarp', 'warp']);
+
+  const fewerWarps = { modes: ['subwarp', 'subwarp', 'warp'], completedLegs: 3, warpCount: 1 };
+  const moreWarps = { modes: ['warp', 'subwarp', 'warp'], completedLegs: 3, warpCount: 2 };
+  assert.deepEqual(Array.from(selectAutomatedEstimatedPlan(moreWarps, fewerWarps).modes), ['warp', 'subwarp', 'warp']);
+
+  const lateSubwarp = { modes: ['warp', 'subwarp', 'warp'], completedLegs: 3, warpCount: 2 };
+  const earlySubwarp = { modes: ['subwarp', 'warp', 'warp'], completedLegs: 3, warpCount: 2 };
+  assert.deepEqual(Array.from(selectAutomatedEstimatedPlan(lateSubwarp, earlySubwarp).modes), ['subwarp', 'warp', 'warp']);
+});
+
+test('Automated falls back to conservative Subwarp and a dash when the forecast fails', async () => {
   let statusUpdates = 0;
   const fleet = { cargoHold: 'cargo', label: 'Eagle Fleet' };
   const { resolveAutomatedTravelMode } = loadFunctions(['resolveAutomatedTravelMode'], {
@@ -198,8 +354,8 @@ test('Automated decision remains visible as a dash when the extended forecast fa
     tokenProgramPK: 'token-program',
     cargoItems: [],
     calculateAutomatedTravelMode: () => ({
-      moveType: 'subwarp',
-      loadedCargoVolume: 0,
+      moveType: 'warp',
+      loadedCargoVolume: 10,
       requiredVolume: 10,
       thresholdVolume: 9.5,
     }),
@@ -220,7 +376,7 @@ test('Automated decision remains visible as a dash when the extended forecast fa
   assert.equal(statusUpdates, 1);
 });
 
-test('Automated uses Warp and a dash while waiting for the direct final-output craft', async () => {
+test('Automated uses conservative Subwarp and a dash when no craft ETA is available', async () => {
   let statusUpdates = 0;
   const fleet = { cargoHold: 'cargo', label: 'Eagle Fleet' };
   const { resolveAutomatedTravelMode } = loadFunctions(['resolveAutomatedTravelMode'], {
@@ -239,7 +395,32 @@ test('Automated uses Warp and a dash while waiting for the direct final-output c
 
   const moveType = await resolveAutomatedTravelMode(fleet, [], { legs: [{}] });
 
-  assert.equal(moveType, 'warp');
+  assert.equal(moveType, 'subwarp');
+  assert.deepEqual(Array.from(fleet.automatedTravelPlan), []);
+  assert.equal(fleet.automatedTravelPlanPending, true);
+  assert.equal(statusUpdates, 1);
+});
+
+test('Automated uses an estimated plan first mode while keeping the dash', async () => {
+  let statusUpdates = 0;
+  const fleet = { cargoHold: 'cargo', label: 'Eagle Fleet' };
+  const { resolveAutomatedTravelMode } = loadFunctions(['resolveAutomatedTravelMode'], {
+    solanaReadConnection: { getParsedTokenAccountsByOwner: async () => ({ value: [] }) },
+    tokenProgramPK: 'token-program',
+    cargoItems: [],
+    calculateAutomatedTravelMode: () => ({ moveType: 'warp', loadedCargoVolume: 10, requiredVolume: 10, thresholdVolume: 9.5 }),
+    globalSettings: { transportUseAmmoBank: false },
+    sageGameAcct: { account: { mints: { ammo: { toString: () => 'ammo' }, fuel: { toString: () => 'fuel' } } } },
+    buildAutomatedTravelForecast: async () => ({ modes: ['subwarp', 'warp'], estimated: true, productionEvents: [] }),
+    updateAssistStatus: () => { statusUpdates += 1; },
+    cLog: () => {},
+    FleetTimeStamp: () => '',
+    Date,
+  });
+
+  const moveType = await resolveAutomatedTravelMode(fleet, [], { legs: [{}] });
+
+  assert.equal(moveType, 'subwarp');
   assert.deepEqual(Array.from(fleet.automatedTravelPlan), []);
   assert.equal(fleet.automatedTravelPlanPending, true);
   assert.equal(statusUpdates, 1);
