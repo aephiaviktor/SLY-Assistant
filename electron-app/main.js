@@ -379,9 +379,9 @@ function applyUpdateRelaunchZoom(win)
 	if (!UPDATE_RELAUNCH_ZOOM_PENDING) return
 	win.webContents.once('did-finish-load', () => {
 		setTimeout(() => {
-			// Update relaunches should restore the compact dashboard baseline.
+			// Two manual Chromium zoom-in steps from 100% reach 125%.
 			// Ordinary reloads still preserve any zoom the user chooses afterward.
-			win.webContents.setZoomFactor(1)
+			win.webContents.setZoomFactor(1.25)
 		}, 250)
 	})
 }

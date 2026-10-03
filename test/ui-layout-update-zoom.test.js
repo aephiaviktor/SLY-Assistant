@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const ROOT = path.resolve(__dirname, '..');
 const userscriptFiles = ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.user.js'];
@@ -28,13 +29,34 @@ for (const file of userscriptFiles) {
   });
 }
 
-test('Electron resets update-relaunch zoom to 100% without affecting ordinary reloads', () => {
+test('Electron applies two standard manual zoom-in steps on update relaunch only', () => {
   const source = fs.readFileSync(path.join(ROOT, 'electron-app/main.js'), 'utf8');
+  const functionSource = source.match(/function applyUpdateRelaunchZoom\(win\)\s*\{[\s\S]*?\n\}\n\nconst loadApp/)?.[0];
+  assert.ok(functionSource, 'update relaunch zoom hook must exist');
   assert.match(source, /--slya-update-zoom/);
-  assert.match(source, /setZoomFactor/);
-  assert.match(source, /if \(!UPDATE_RELAUNCH_ZOOM_PENDING\) return/);
-  assert.match(source, /setZoomFactor\(1\)/);
-  assert.doesNotMatch(source, /Math\.pow\(1\.1, 3\)/);
   assert.match(source, /update-zoom-pending/);
   assert.match(source, /win\.maximize\(\)/);
+
+  for (const updatePending of [true, false]) {
+    let onLoad;
+    const appliedZoom = [];
+    const win = { webContents: {
+      once: (event, callback) => { assert.equal(event, 'did-finish-load'); onLoad = callback; },
+      setZoomFactor: factor => appliedZoom.push(factor),
+    } };
+    const context = {
+      UPDATE_RELAUNCH_ZOOM_PENDING: updatePending,
+      setTimeout: callback => callback(),
+    };
+    vm.runInNewContext(functionSource.replace(/\n\nconst loadApp$/, ''), context);
+    context.applyUpdateRelaunchZoom(win);
+    if (updatePending) {
+      assert.equal(typeof onLoad, 'function');
+      onLoad();
+      assert.deepEqual(appliedZoom, [1.25], 'two manual zoom-in steps from 100% reach 125%');
+    } else {
+      assert.equal(onLoad, undefined, 'ordinary loads must not install the zoom hook');
+      assert.deepEqual(appliedZoom, []);
+    }
+  }
 });
