@@ -39,6 +39,20 @@ function makeTwoLegRoute({ warpMs = 10, subwarpMs = 30, amount = 10 } = {}) {
   ];
 }
 
+test('CSS Automated fallback uses only the configured required asset and only at CSS', () => {
+  const { getAutomatedCssTravelMode } = loadFunctions(['getAutomatedCssTravelMode']);
+  const base = {
+    sourceStarbaseName: 'MUD-1',
+    inventory: { electronics: 1000, polymer: 9_999_999 },
+    requiredAsset: { res: 'electronics' },
+    cargoCapacity: 100,
+  };
+  assert.equal(getAutomatedCssTravelMode(base), 'warp');
+  assert.equal(getAutomatedCssTravelMode({ ...base, inventory: { electronics: 999 }, cargoCapacity: 100 }), 'subwarp');
+  assert.equal(getAutomatedCssTravelMode({ ...base, sourceStarbaseName: 'MUD-2', inventory: { electronics: 0 } }), null);
+  assert.equal(getAutomatedCssTravelMode({ ...base, requiredAsset: { res: 'polymer' }, inventory: { electronics: 999, polymer: 999 } }), 'subwarp');
+});
+
 test('Automated planner warps while stock covers future pickups, then subwarps to bridge production', () => {
   const { planAutomatedTravelModes, compressAutomatedTravelPlan } = loadFunctions([
     'cloneAutomatedInventory',

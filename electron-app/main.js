@@ -357,6 +357,17 @@ app.setName(APP_NAME)
 app.setAppUserModelId(APP_ID)
 app.setPath('userData', path.join(APP_ROOT, 'data'))
 
+const UPDATE_RELAUNCH_ZOOM_ARG = '--slya-update-zoom'
+
+function applyUpdateRelaunchZoom(win)
+{
+	if (!process.argv.includes(UPDATE_RELAUNCH_ZOOM_ARG)) return
+	win.webContents.once('did-finish-load', () => {
+		const currentZoomLevel = win.webContents.getZoomLevel()
+		win.webContents.setZoomLevel(currentZoomLevel + 3)
+	})
+}
+
 const loadApp = (win, version, aephiaVersion) => {
 	win.loadFile(path.join(APP_ROOT, 'app', 'index.html'), { query: { version: version, aephiaVersion: aephiaVersion, appInstanceName: APP_INSTANCE_NAME } } )
 }
@@ -468,6 +479,7 @@ const createWindow = (version, aephiaVersion) => {
   //win.webContents.openDevTools()  
   win.setTitle(APP_NAME + (version ? ` v${version}` : ''))
   attachWindowCrashLogging(win)
+  applyUpdateRelaunchZoom(win)
   loadApp(win, version, aephiaVersion)
   return win
 }
@@ -667,7 +679,9 @@ async function updateAepFromGitHub()
 function restartApp()
 {
 	setTimeout(function() {
-		app.relaunch()
+		const relaunchArgs = process.argv.slice(1).filter(arg => arg !== UPDATE_RELAUNCH_ZOOM_ARG)
+		relaunchArgs.push(UPDATE_RELAUNCH_ZOOM_ARG)
+		app.relaunch({ args: relaunchArgs })
 		app.exit(0)
 	}, 2000)
 }
