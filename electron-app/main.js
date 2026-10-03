@@ -379,8 +379,9 @@ function applyUpdateRelaunchZoom(win)
 	if (!UPDATE_RELAUNCH_ZOOM_PENDING) return
 	win.webContents.once('did-finish-load', () => {
 		setTimeout(() => {
-			const currentZoomFactor = win.webContents.getZoomFactor()
-			win.webContents.setZoomFactor(Math.min(5, currentZoomFactor * Math.pow(1.1, 3)))
+			// Update relaunches should restore the compact dashboard baseline.
+			// Ordinary reloads still preserve any zoom the user chooses afterward.
+			win.webContents.setZoomFactor(1)
 		}, 250)
 	})
 }

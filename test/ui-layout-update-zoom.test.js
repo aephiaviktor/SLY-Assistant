@@ -15,7 +15,9 @@ for (const file of userscriptFiles) {
     assert.match(autoStart, /toggleAssistant\(/, 'auto-start branch must be present');
     assert.doesNotMatch(autoStart, /assistStatusToggle\(/, 'auto-start must not close Status');
     assert.match(source, /assistStatus\.style\.display = 'block'/);
-    assert.ok(source.includes('resize:both; overflow-y:auto; overflow-x:hidden; min-width:280px;'));
+    assert.ok(source.includes('resize:both; overflow-y:auto; overflow-x:hidden; min-width:320px;'));
+    assert.ok(source.includes('width:max(320px, calc((100vw - 24px) * 0.28))'));
+    assert.ok(source.includes('width:calc(100vw - 24px - max(320px, calc((100vw - 24px) * 0.28)))'));
     assert.match(source, /#assistStatus \.assist-modal-body table\.main \{[^}]*table-layout:fixed;/);
     assert.ok(source.includes('width:calc(84% / 9); min-width:0; overflow-wrap:anywhere;'));
     assert.ok(source.includes('#assistLpAutomation .lp-auto-summary-table { table-layout: fixed; width: 100%; }'));
@@ -26,11 +28,13 @@ for (const file of userscriptFiles) {
   });
 }
 
-test('Electron applies three zoom levels only on update relaunch', () => {
+test('Electron resets update-relaunch zoom to 100% without affecting ordinary reloads', () => {
   const source = fs.readFileSync(path.join(ROOT, 'electron-app/main.js'), 'utf8');
   assert.match(source, /--slya-update-zoom/);
   assert.match(source, /setZoomFactor/);
-  assert.match(source, /Math\.pow\(1\.1, 3\)/);
+  assert.match(source, /if \(!UPDATE_RELAUNCH_ZOOM_PENDING\) return/);
+  assert.match(source, /setZoomFactor\(1\)/);
+  assert.doesNotMatch(source, /Math\.pow\(1\.1, 3\)/);
   assert.match(source, /update-zoom-pending/);
   assert.match(source, /win\.maximize\(\)/);
 });
