@@ -9,13 +9,20 @@ const ROOT = path.resolve(__dirname, '..');
 const userscriptFiles = ['SLY_Assistant.user.js', 'electron-app/app/SLY_Assistant.user.js'];
 
 for (const file of userscriptFiles) {
-  test('automated panels use a bounded two-column layout with scrollable full-height content: ' + file, () => {
+  test('automated panels stay visible and fit their contents: ' + file, () => {
     const source = fs.readFileSync(path.join(ROOT, file), 'utf8');
-    for (const declaration of ['#assistStatus {', 'top: 36px;', 'left: 10px;', 'overflow:auto;', 'width:calc((100vw - 30px) * 0.30);', 'max-height:calc(100vh - 100px)']) assert.ok(source.includes(declaration), declaration);
-    for (const declaration of ['#assistLpAutomation {', 'top:36px; right:10px;', 'width:calc((100vw - 30px) * 0.68);', 'max-height:calc(100vh - 80px); overflow-y:auto; overflow-x:hidden;']) assert.ok(source.includes(declaration), declaration);
-    assert.ok(source.includes("document.body.append(assistStatus)"));
-    assert.ok(source.includes("assistStatus.style.display = 'block'"));
-    assert.ok(source.includes("assistLpAutomation.style.display = 'block'"));
+    const autoStart = source.match(/if\(globalSettings\.autoStartScript\) \{([^}]+)\}/)?.[1] || '';
+    assert.match(autoStart, /toggleAssistant\(/, 'auto-start branch must be present');
+    assert.doesNotMatch(autoStart, /assistStatusToggle\(/, 'auto-start must not close Status');
+    assert.match(source, /assistStatus\.style\.display = 'block'/);
+    assert.ok(source.includes('resize:both; overflow-y:auto; overflow-x:hidden; min-width:280px;'));
+    assert.match(source, /#assistStatus \.assist-modal-body table\.main \{[^}]*table-layout:fixed;/);
+    assert.ok(source.includes('width:calc(84% / 9); min-width:0; overflow-wrap:anywhere;'));
+    assert.ok(source.includes('#assistLpAutomation .lp-auto-summary-table { table-layout: fixed; width: 100%; }'));
+    assert.ok(source.includes('#assistLpAutomation .lp-auto-summary-table td, #assistLpAutomation .lp-auto-summary-table th { white-space:normal !important; overflow-wrap:anywhere; }'));
+    assert.ok(!source.includes('min-width: 165px; padding-left: 18px;'));
+    assert.match(source, /#assistLpAutomation \.lp-auto-optimizer-2 \.lp-auto-summary-table \{[^}]*table-layout:fixed;/);
+    assert.ok(!source.includes('width: 12%; overflow: visible; text-overflow: clip;'));
   });
 }
 
