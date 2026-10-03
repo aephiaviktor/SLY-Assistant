@@ -357,14 +357,31 @@ app.setName(APP_NAME)
 app.setAppUserModelId(APP_ID)
 app.setPath('userData', path.join(APP_ROOT, 'data'))
 
+const UPDATE_ZOOM_MARKER_PATH = path.join(APP_ROOT, 'data', 'update-zoom-pending.json')
 const UPDATE_RELAUNCH_ZOOM_ARG = '--slya-update-zoom'
+
+function consumeUpdateZoomMarker()
+{
+	try {
+		if (!fs.existsSync(UPDATE_ZOOM_MARKER_PATH)) return false
+		fs.unlinkSync(UPDATE_ZOOM_MARKER_PATH)
+		return true
+	} catch (error) {
+		console.error('[SLYA] failed to consume update zoom marker:', error)
+		return false
+	}
+}
+
+const UPDATE_RELAUNCH_ZOOM_PENDING = process.argv.includes(UPDATE_RELAUNCH_ZOOM_ARG) || consumeUpdateZoomMarker()
 
 function applyUpdateRelaunchZoom(win)
 {
-	if (!process.argv.includes(UPDATE_RELAUNCH_ZOOM_ARG)) return
+	if (!UPDATE_RELAUNCH_ZOOM_PENDING) return
 	win.webContents.once('did-finish-load', () => {
-		const currentZoomLevel = win.webContents.getZoomLevel()
-		win.webContents.setZoomLevel(currentZoomLevel + 3)
+		setTimeout(() => {
+			const currentZoomFactor = win.webContents.getZoomFactor()
+			win.webContents.setZoomFactor(Math.min(5, currentZoomFactor * Math.pow(1.1, 3)))
+		}, 250)
 	})
 }
 
@@ -476,6 +493,7 @@ const createWindow = (version, aephiaVersion) => {
       backgroundThrottling: false
     }    
   })
+  win.maximize()
   //win.webContents.openDevTools()  
   win.setTitle(APP_NAME + (version ? ` v${version}` : ''))
   attachWindowCrashLogging(win)
@@ -679,6 +697,8 @@ async function updateAepFromGitHub()
 function restartApp()
 {
 	setTimeout(function() {
+		fs.mkdirSync(path.dirname(UPDATE_ZOOM_MARKER_PATH), { recursive: true })
+		fs.writeFileSync(UPDATE_ZOOM_MARKER_PATH, JSON.stringify({ requestedAt: new Date().toISOString() }), 'utf8')
 		const relaunchArgs = process.argv.slice(1).filter(arg => arg !== UPDATE_RELAUNCH_ZOOM_ARG)
 		relaunchArgs.push(UPDATE_RELAUNCH_ZOOM_ARG)
 		app.relaunch({ args: relaunchArgs })
