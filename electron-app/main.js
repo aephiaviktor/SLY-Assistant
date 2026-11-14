@@ -1171,7 +1171,7 @@ try {
   fs.appendFileSync(startupLogPath, `[${new Date().toISOString()}] [ELECTRON] main startup\n`, 'utf8');
 } catch (e) {}
 const filter = {
-  urls: ['https://rpc.ironforge.network/*']
+  urls: ['https://rpc.ironforge.network/*', 'https://mainnet-rpc.staratlas.com/*']
 }
 session.defaultSession.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
   mainProcessDiagnostics.increment('ironforgeRequests')
