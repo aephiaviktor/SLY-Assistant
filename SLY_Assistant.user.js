@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-316
+// @aephia-version 0.7.35-317
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -101,6 +101,7 @@
 	let globalSettings;
 	let aephiaApiKeyValidation = { status: 'unknown', message: 'Aephia API key has not been checked yet.', checkedAt: 0, tokenKey: '' };
 	let upgradeAutomationAephiaSummaryCache = { fetchedAt: 0, tokenKey: '', data: null };
+	let upgradeAutomationAephiaSummaryInFlight = null;
 	let upgradeAutomationGmPriceCache = { fetchedAt: 0, prices: {} };
 	const recoveredCraftingProcessSlots = new Map();
 	let recoverAllCraftingProcessesInFlight = null;
@@ -309,11 +310,10 @@
 			return parseInt(val);
 	}
 
-	const UPGRADE_AUTOMATION_STATS_API = 'https://api.ryden.systems/api_stats_points.php';
 	const UPGRADE_AUTOMATION_AEPHIA_SUMMARY_API = 'https://store-sage-lp.aephia.workers.dev/summary';
 	const UPGRADE_AUTOMATION_AEPHIA_RESOURCE_API = 'https://get-ship-data.aephia.workers.dev/gm/resource';
-	const UPGRADE_AUTOMATION_POINTS_CATEGORY = LPCategory.toString();
-	const UPGRADE_AUTOMATION_ATLAS_POOL_OVERRIDES = Object.freeze({ MUD: 1991250 });
+	// Daily ATLAS pools confirmed by the operator on 2026-11-14.
+	const UPGRADE_AUTOMATION_ATLAS_POOL_OVERRIDES = Object.freeze({ MUD: 1991250, ONI: 2000000, UST: 2000000 });
 	const UPGRADE_AUTOMATION_FACTION_CONFIG = {
 		MUD: { lpInstance: 1, phantomCrewCoords: '0,-24', upgradeStarbaseCoords: ['0,-24'] /* TODO: add MUD-4 coord when known */ },
 		ONI: { lpInstance: 2, phantomCrewCoords: '-28,21', upgradeStarbaseCoords: ['-28,21'] },
@@ -1297,7 +1297,7 @@
 		const now = new Date();
 		const lpInstanceKey = normalizeUpgradeAutomationLpInstance(globalSettings?.upgradeAutomationLpInstance);
 		const instanceId = (UPGRADE_AUTOMATION_FACTION_CONFIG[lpInstanceKey] || UPGRADE_AUTOMATION_FACTION_CONFIG.MUD).lpInstance;
-		const series = await fetchUpgradeAutomationEpochSeries(instanceId);
+		const series = await fetchUpgradeAutomationEpochSeries(instanceId, now);
 		let influxTarget = { targetNowInflux: null, prevValue: null, nextValue: null, prevCount: 0, nextCount: 0, prevHour: null, nextHour: null, progress: 0 };
 		try {
 			influxTarget = await fetchUpgradeAutomationHourlyInfluxAverages(lpInstanceKey, now);
@@ -1369,7 +1369,8 @@
 	}
 
 	function normalizeUpgradeAutomationLpInstance(value) {
-		const key = String(value || '').toUpperCase();
+		const key = String(value || '').trim().toUpperCase();
+		if (key === 'USTUR') return 'UST';
 		return key === 'ONI' || key === 'UST' || key === 'MUD' ? key : 'MUD';
 	}
 
@@ -2986,7 +2987,7 @@
 			const factionCfg = UPGRADE_AUTOMATION_FACTION_CONFIG[normalizeUpgradeAutomationLpInstance(faction)];
 			if (!factionCfg?.lpInstance) return { sent: false, totalLp: null, error: 'lp_instance_missing' };
 			const dayIndex = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 86400000);
-			const row = (await fetchUpgradeAutomationEpochSeries(factionCfg.lpInstance)).find(item => Number(item.dayIndex) === dayIndex);
+			const row = (await fetchUpgradeAutomationEpochSeries(factionCfg.lpInstance, now)).find(item => Number(item.dayIndex) === dayIndex);
 			const totalLp = Number(row?.totalPoints);
 			if (!Number.isSafeInteger(totalLp) || totalLp < 0) return { sent: false, totalLp: null, error: 'current_epoch_total_missing' };
 			const tags = `faction=${influxEscape(faction)},instance=${influxEscape(String(getSlyaInfluxInstanceTag()))},source=authoritative`;
@@ -4301,7 +4302,7 @@
 		const lpInstanceKey = normalizeUpgradeAutomationLpInstance(globalSettings?.upgradeAutomationLpInstance);
 		const factionCfg = UPGRADE_AUTOMATION_FACTION_CONFIG[lpInstanceKey] || UPGRADE_AUTOMATION_FACTION_CONFIG.MUD;
 		const instanceId = factionCfg.lpInstance;
-		const series = await fetchUpgradeAutomationEpochSeries(instanceId);
+		const series = await fetchUpgradeAutomationEpochSeries(instanceId, now);
 		let influxTarget = { targetNowInflux: null };
 		try {
 			influxTarget = await fetchUpgradeAutomationHourlyInfluxAverages(lpInstanceKey, now);
@@ -4905,7 +4906,7 @@
 			const normalizedFaction = normalizeUpgradeAutomationLpInstance(globalSettings?.upgradeAutomationLpInstance);
 			const factionCfg = UPGRADE_AUTOMATION_FACTION_CONFIG[normalizedFaction] || UPGRADE_AUTOMATION_FACTION_CONFIG.MUD;
 			const instanceId = factionCfg.lpInstance;
-			const pointSeries = await fetchUpgradeAutomationEpochSeries(instanceId);
+			const pointSeries = await fetchUpgradeAutomationEpochSeries(instanceId, now);
 			const utcDayIndex = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 86400000);
 			const minDayIndex = utcDayIndex - Math.max(1, Number(daysBack || 8));
 			const rows = [];
@@ -4914,8 +4915,7 @@
 				if (!Number.isFinite(rowDayIndex) || rowDayIndex > utcDayIndex || rowDayIndex < minDayIndex) continue;
 				const day = new Date(rowDayIndex * 86400000).toISOString().slice(0, 10);
 				const lpRedemption = Number(row.totalPoints || 0);
-				const apiAtlasPool = Number(row.totalTokens || 0) / 100000000;
-				const atlasPool = UPGRADE_AUTOMATION_ATLAS_POOL_OVERRIDES[normalizedFaction] ?? apiAtlasPool;
+				const atlasPool = getUpgradeAutomationEpochAtlasPool(row, normalizedFaction);
 				rows.push({
 					day,
 					lpRedemption,
@@ -5129,7 +5129,7 @@
 				alphaFetchStage = 'queryInfluxFlux(frameworkCompFlux)';
 				frameworkCompCsv = await queryInfluxFlux(frameworkCompFlux);
 				alphaFetchStage = 'fetchUpgradeAutomationEpochSeries(instanceId)';
-				pointSeries = await fetchUpgradeAutomationEpochSeries(instanceId);
+				pointSeries = await fetchUpgradeAutomationEpochSeries(instanceId, now);
 				alphaFetchStage = 'parseInfluxCsv(target CSVs)';
 			} catch (fetchErr) {
 				throw new Error(`alpha_fetch_stage=${alphaFetchStage}; detail=${String(fetchErr?.stack || fetchErr?.message || JSON.stringify(fetchErr) || fetchErr || 'unknown_fetch_error')}`);
@@ -5166,7 +5166,7 @@
 				redemptionByDay[day] = {
 					time: day + 'T23:59:59Z',
 					value: Number(row.totalPoints || 0),
-					atlasPool: UPGRADE_AUTOMATION_ATLAS_POOL_OVERRIDES[normalizedFaction] ?? (Number(row.totalTokens || 0) / 100000000)
+					atlasPool: getUpgradeAutomationEpochAtlasPool(row, normalizedFaction)
 				};
 			}
 			const days = Object.keys(targetsByDay).sort();
@@ -5396,23 +5396,65 @@
 		}
 	}
 
-	async function fetchUpgradeAutomationEpochSeries(instanceId) {
-		const resp = await fetch(UPGRADE_AUTOMATION_STATS_API, { method: 'GET' });
-		const data = await resp.json();
-		const root = data?.[UPGRADE_AUTOMATION_POINTS_CATEGORY];
-		if (!root) throw new Error('points_category_not_found');
-		const rows = root?.[String(instanceId)] || [];
-		if (!Array.isArray(rows) || !rows.length) throw new Error('instance_series_not_found');
-		const parsed = [];
-		for (const row of rows) {
-			const di = parseInt(row?.dayIndex || '0', 16);
-			const total = parseInt(row?.totalPoints || '0', 16);
-			const totalTokens = parseInt(row?.totalTokens || '0', 16);
-			if (!Number.isFinite(di) || !Number.isFinite(total)) continue;
-			parsed.push({ dayIndex: di, totalPoints: total, totalTokens: Number.isFinite(totalTokens) ? totalTokens : 0 });
+	function parseUpgradeAutomationAephiaInteger(value) {
+		if (typeof value !== 'number' && (typeof value !== 'string' || !/^\d+$/.test(value.trim()))) return null;
+		const number = Number(value);
+		return Number.isSafeInteger(number) && number >= 0 ? number : null;
+	}
+
+	function buildUpgradeAutomationAephiaEpochSeries(data, faction, now = new Date()) {
+		const { normalizedFaction, factionKeys } = getUpgradeAutomationAephiaFactionKeys(faction);
+		const today = Math.floor(now.getTime() / 86400000);
+		const byDay = new Map();
+		// Interval rows are cumulative snapshots, never additive deltas. Completed
+		// days prefer finalized totals, then interval-derived finals, then snapshots.
+		for (const source of ['interval', 'dailyFinalFromIntervals', 'dailyFinal']) {
+			const key = factionKeys.find(key => Array.isArray(data?.[source]?.factions?.[key]) && data[source].factions[key].length);
+			if (!key) continue;
+			const latestByDay = new Map();
+			for (const row of data[source].factions[key]) {
+				const timestamp = parseUpgradeAutomationAephiaRowTimeMs(row);
+				let dayIndex;
+				if (source !== 'interval' && row?.date != null) {
+					const date = String(row.date);
+					const dateMs = /^\d{4}-\d{2}-\d{2}$/.test(date) ? Date.parse(date + 'T00:00:00Z') : NaN;
+					if (Number.isFinite(dateMs) && new Date(dateMs).toISOString().slice(0, 10) === date) dayIndex = dateMs / 86400000;
+				} else if (timestamp) {
+					dayIndex = Math.floor(timestamp / 86400000);
+				} else {
+					dayIndex = parseUpgradeAutomationAephiaInteger(row?.dayIndex);
+				}
+				if (!Number.isSafeInteger(dayIndex) || dayIndex < 0 || dayIndex > 100000000) {
+					throw new Error(`aephia_summary_invalid_epoch_day faction=${normalizedFaction} source=${source}`);
+				}
+				if (dayIndex > today || (source !== 'interval' && dayIndex === today)) continue;
+				const previous = latestByDay.get(dayIndex);
+				if (!previous || timestamp >= previous.timestamp) latestByDay.set(dayIndex, { row, timestamp });
+			}
+			for (const [dayIndex, { row }] of latestByDay) {
+				const totalPoints = parseUpgradeAutomationAephiaInteger(row?.redeemedLp);
+				if (totalPoints == null) throw new Error(`aephia_summary_invalid_redeemed_lp faction=${normalizedFaction} dayIndex=${dayIndex}`);
+				// Optional decimal base-unit reward total. Absence is not a zero pool.
+				const totalTokens = parseUpgradeAutomationAephiaInteger(row?.totalTokens) ?? byDay.get(dayIndex)?.totalTokens ?? null;
+				byDay.set(dayIndex, { dayIndex, totalPoints, totalTokens });
+			}
 		}
-		parsed.sort((a, b) => a.dayIndex - b.dayIndex);
-		return parsed;
+		if (!byDay.size) throw new Error(`aephia_summary_faction_series_missing faction=${normalizedFaction}`);
+		return [...byDay.values()].sort((a, b) => a.dayIndex - b.dayIndex);
+	}
+
+	async function fetchUpgradeAutomationEpochSeries(instanceId, now = new Date()) {
+		const faction = Object.keys(UPGRADE_AUTOMATION_FACTION_CONFIG).find(key => String(UPGRADE_AUTOMATION_FACTION_CONFIG[key].lpInstance) === String(instanceId));
+		if (!faction) throw new Error('aephia_summary_unknown_lp_instance');
+		return buildUpgradeAutomationAephiaEpochSeries(await fetchUpgradeAutomationAephiaSummary(), faction, now);
+	}
+
+	function getUpgradeAutomationEpochAtlasPool(row, faction) {
+		const override = UPGRADE_AUTOMATION_ATLAS_POOL_OVERRIDES[faction];
+		if (Number.isFinite(override) && override > 0) return override;
+		const totalTokens = parseUpgradeAutomationAephiaInteger(row?.totalTokens);
+		if (totalTokens == null || totalTokens === 0) throw new Error(`aephia_summary_atlas_pool_missing faction=${faction} dayIndex=${row?.dayIndex}`);
+		return totalTokens / 100000000;
 	}
 
 	async function fetchUpgradeAutomationAephiaSummary() {
@@ -5423,24 +5465,50 @@
 		if (upgradeAutomationAephiaSummaryCache.tokenKey === tokenKey && upgradeAutomationAephiaSummaryCache.data && (now - Number(upgradeAutomationAephiaSummaryCache.fetchedAt || 0)) < 30000) {
 			return upgradeAutomationAephiaSummaryCache.data;
 		}
+		if (upgradeAutomationAephiaSummaryInFlight?.tokenKey === tokenKey) return upgradeAutomationAephiaSummaryInFlight.promise;
+		const request = { tokenKey, promise: null };
+		request.promise = requestUpgradeAutomationAephiaSummary(token).then(data => {
+			if (getAephiaTokenCacheKey(getAephiaApiKey()) === tokenKey) {
+				upgradeAutomationAephiaSummaryCache = { fetchedAt: Date.now(), tokenKey, data };
+			}
+			return data;
+		}).finally(() => {
+			if (upgradeAutomationAephiaSummaryInFlight === request) upgradeAutomationAephiaSummaryInFlight = null;
+		});
+		upgradeAutomationAephiaSummaryInFlight = request;
+		return request.promise;
+	}
+
+	async function requestUpgradeAutomationAephiaSummary(token) {
 		let response;
+		let body;
+		const timeoutMs = 60000;
 		if (typeof GM_xmlhttpRequest === 'function') {
 			response = await new Promise((resolve, reject) => {
 				GM_xmlhttpRequest({
 					method: 'GET',
 					url: UPGRADE_AUTOMATION_AEPHIA_SUMMARY_API,
 					headers: { Authorization: 'Bearer ' + token },
-					timeout: 15000,
+					timeout: timeoutMs,
 					onload: resolve,
 					onerror: () => reject(new Error('aephia_summary_network_error')),
 					ontimeout: () => reject(new Error('aephia_summary_timeout'))
 				});
 			});
+			body = response.responseText;
 		} else {
-			response = await fetch(UPGRADE_AUTOMATION_AEPHIA_SUMMARY_API, { method: 'GET', headers: { Authorization: 'Bearer ' + token } });
+			const controller = new AbortController();
+			const timer = setTimeout(() => controller.abort(), timeoutMs);
+			try {
+				response = await fetch(UPGRADE_AUTOMATION_AEPHIA_SUMMARY_API, { method: 'GET', headers: { Authorization: 'Bearer ' + token }, signal: controller.signal });
+				body = await response.text();
+			} catch (e) {
+				throw new Error(controller.signal.aborted ? 'aephia_summary_timeout' : 'aephia_summary_network_error');
+			} finally {
+				clearTimeout(timer);
+			}
 		}
 		const status = Number(response.status || 0);
-		const body = response.responseText != null ? response.responseText : await response.text();
 		if (status !== 200) throw new Error('aephia_summary_http_' + status);
 		const trimmed = String(body || '').trim();
 		if (!trimmed || trimmed[0] !== '{') {
@@ -5452,7 +5520,6 @@
 		} catch (e) {
 			throw new Error('aephia_summary_invalid_json');
 		}
-		upgradeAutomationAephiaSummaryCache = { fetchedAt: Date.now(), tokenKey, data };
 		return data;
 	}
 
@@ -5504,7 +5571,7 @@
 
 	function parseUpgradeAutomationAephiaRowTimeMs(row) {
 		const rawTime = row?.timestamp ?? row?.dateTime;
-		const parsed = typeof rawTime === 'number' ? rawTime : Date.parse(String(rawTime || ''));
+		const parsed = typeof rawTime === 'number' || (typeof rawTime === 'string' && /^\d+$/.test(rawTime)) ? Number(rawTime) : Date.parse(String(rawTime || ''));
 		if (!Number.isFinite(parsed) || parsed <= 0) return 0;
 		return parsed < 1000000000000 ? parsed * 1000 : parsed;
 	}
@@ -5562,29 +5629,12 @@
 
 	async function fetchUpgradeAutomationAephiaLpToday(faction, now = new Date()) {
 		const data = await fetchUpgradeAutomationAephiaSummary();
-		const { rows, matchedFactionKey, normalizedFaction } = getUpgradeAutomationAephiaFactionRows(data, faction);
+		const { normalizedFaction } = getUpgradeAutomationAephiaFactionKeys(faction);
+		const series = buildUpgradeAutomationAephiaEpochSeries(data, normalizedFaction, now);
 		const utcDayIndex = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 86400000);
-		const todayKey = now.toISOString().slice(0, 10);
-		if (!Array.isArray(rows) || !rows.length) throw new Error('aephia_summary_faction_series_missing');
-		const todayRows = rows
-			.map((row, index) => {
-				const timestamp = parseUpgradeAutomationAephiaRowTimeMs(row);
-				const timestampDay = timestamp ? new Date(timestamp).toISOString().slice(0, 10) : '';
-				const dayIndexes = parseUpgradeAutomationAephiaDayIndexes(row?.dayIndex);
-				const isToday = timestampDay === todayKey || dayIndexes.includes(utcDayIndex);
-				return { row, index, timestamp, timestampDay, dayIndexes, isToday };
-			})
-			.filter(entry => entry.isToday)
-			.sort((a, b) => (a.timestamp - b.timestamp) || (a.index - b.index));
-		const latest = todayRows.at(-1)?.row;
-		const total = Number(latest?.redeemedLp);
-		if (!latest || !Number.isFinite(total)) {
-			const latestAny = rows.at(-1) || {};
-			const latestAnyTimeMs = parseUpgradeAutomationAephiaRowTimeMs(latestAny);
-			const latestAnyDay = latestAnyTimeMs ? new Date(latestAnyTimeMs).toISOString().slice(0, 10) : '';
-			throw new Error(`aephia_summary_lp_today_missing faction=${matchedFactionKey || normalizedFaction} rows=${rows.length} today=${todayKey} dayIndex=${utcDayIndex}/${utcDayIndex.toString(16)} latestDay=${latestAnyDay || '-'} latestDayIndex=${String(latestAny?.dayIndex ?? '-')}`);
-		}
-		return total;
+		const today = series.find(row => row.dayIndex === utcDayIndex);
+		if (!today) throw new Error(`aephia_summary_lp_today_missing faction=${normalizedFaction} dayIndex=${utcDayIndex}`);
+		return today.totalPoints;
 	}
 
 	function computeUpgradeAutomationControl(series, now = new Date(), preferredTargetNow = null, preferredTodayTotal = null) {
@@ -5600,6 +5650,7 @@
 		const trend2 = ((yesterday + dayBefore) / 2 - avg7Weighted) / Math.max(avg7Weighted, 1);
 		const p = utcDayProgress(now);
 		const todayRow = series.find(x => x.dayIndex === utcDayIndex);
+		if (preferredTodayTotal == null && !todayRow) throw new Error('aephia_summary_lp_today_missing');
 		const todayTotal = preferredTodayTotal != null && Number.isFinite(Number(preferredTodayTotal)) ? Number(preferredTodayTotal) : (todayRow?.totalPoints || 0);
 		const fallbackTargetNow = Math.max(avg7Weighted * p, 1);
 		const targetNow = Number.isFinite(Number(preferredTargetNow)) && Number(preferredTargetNow) > 0 ? Number(preferredTargetNow) : fallbackTargetNow;
@@ -5982,7 +6033,7 @@
 			throw new Error('upgrade_recipes_not_loaded_yet');
 		}
 
-		const series = await fetchUpgradeAutomationEpochSeries(instanceId);
+		const series = await fetchUpgradeAutomationEpochSeries(instanceId, now);
 
 		const lpInstanceKey = normalizeUpgradeAutomationLpInstance(globalSettings?.upgradeAutomationLpInstance);
 		let influxTarget = { targetNowInflux: null, prevValue: null, nextValue: null, prevCount: 0, nextCount: 0, prevHour: null, nextHour: null, progress: 0 };
@@ -16942,7 +16993,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-316', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-317', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),

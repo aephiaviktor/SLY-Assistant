@@ -63,16 +63,16 @@ test('execution summary feeds Optimizer 2 from the current faction epoch ATLAS p
 	assert.match(source, /optimizer2\.lpValue === null/);
 });
 
-test('MUD Optimizer 2 retains its declared pool when pricing history is unavailable', () => {
-	const context = {
-		UPGRADE_AUTOMATION_ATLAS_POOL_OVERRIDES: Object.freeze({ MUD: 1_991_250 }),
-		normalizeUpgradeAutomationLpInstance: value => String(value || '').toUpperCase()
-	};
+test('all factions retain their configured Optimizer 2 pool when pricing history is unavailable', () => {
+	const context = {};
 	vm.createContext(context);
-	vm.runInContext(`${extractFunction('resolveUpgradeAutomationOptimizer2AtlasPool')}; this.resolvePool = resolveUpgradeAutomationOptimizer2AtlasPool;`, context);
-	assert.equal(context.resolvePool('MUD', null), 1_991_250);
-	assert.equal(context.resolvePool('ONI', { atlasPool: 2_000_000 }), 2_000_000);
-	assert.equal(context.resolvePool('UST', null), 0);
+	const pools = source.match(/const UPGRADE_AUTOMATION_ATLAS_POOL_OVERRIDES = [^\n]+;/)?.[0];
+	assert.ok(pools);
+	vm.runInContext(`${pools}\n${extractFunction('normalizeUpgradeAutomationLpInstance')}\n${extractFunction('resolveUpgradeAutomationOptimizer2AtlasPool')}; this.resolvePool = resolveUpgradeAutomationOptimizer2AtlasPool;`, context);
+	for (const [faction, expected] of [['MUD', 1_991_250], ['ONI', 2_000_000], ['UST', 2_000_000], ['USTUR', 2_000_000]]) {
+		assert.equal(context.resolvePool(faction, null), expected);
+		assert.equal(context.resolvePool(faction, { atlasPool: 123 }), expected);
+	}
 });
 
 test('current ONI epoch inputs create colored pools and reallocate target crew', () => {
