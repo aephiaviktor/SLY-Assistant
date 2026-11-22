@@ -105,7 +105,7 @@ for(const mode of ['warp','warp-smart','subwarp']) test(`production stop retry: 
     persistFleetTransportRouteState:async(_i,effective)=>moves.push(effective),cLog(){},FleetTimeStamp:()=>'',
     execDock:async()=>{tx.push('dock');throw Error('Unexpected paid work');},
   });
-  for(const name of ['resolveWarpSmartTravelMode','hasTransportFuelRequiredLoadRetry','planTransportCargoUnload','markTransportRequiredFuelAmounts','preflightTransportRequiredLoadRetry','handleTransportStop']) vm.runInContext(fn(name),c);
+  for(const name of ['resolveWarpSmartTravelMode','hasTransportFuelRequiredLoadRetry','planTransportCargoUnload','markTransportRequiredFuelAmounts','preflightTransportRequiredLoadRetry','prepareTransportDepartureFuel','handleTransportStop']) vm.runInContext(fn(name),c);
   for(let n=0;n<3;n++) {
     stocks={electronics:n?10000:0};
     assert.equal(await c.handleTransportStop(0,'0,0','1,1',[{res:'inbound',amt:50000}],manifest,mode,true),false);
@@ -135,4 +135,75 @@ test('preflight read failure remains a waiting result, never authorizes paid wor
  vm.runInContext(fn('preflightTransportRequiredLoadRetry'),c);
  const result=await c.preflightTransportRequiredLoadRetry({cargoHold:'fleet'},'0,0',manifest,[]);
  assert.equal(result.ready,false);assert.equal(result.readFailed,true);assert.equal(result.waitingLabel,'Electronics');
+});
+
+for (const { name, capacity, roundTrip, expectedMode, reserve, startingFuel = 10 } of [
+  { name: 'fits only on Subwarp', capacity: 90, roundTrip: true, expectedMode: 'subwarp', reserve: 40 },
+  { name: 'already has enough fuel for a Warp outbound hop', capacity: 90, roundTrip: true, expectedMode: 'subwarp', reserve: 40, startingFuel: 90 },
+  { name: 'fits a Warp outbound and Subwarp return', capacity: 110, roundTrip: true, expectedMode: 'warp', reserve: 100 },
+  { name: 'fits the full Warp reserve', capacity: 160, roundTrip: true, expectedMode: 'warp', reserve: 160 },
+  { name: 'fits only on a one-way Subwarp', capacity: 60, roundTrip: false, expectedMode: 'subwarp', reserve: 20 },
+  { name: 'cannot fit either round trip', capacity: 30, roundTrip: true, expectedMode: null, reserve: 40 },
+]) test(`Automated transport fuel preflight ${name}`, async () => {
+  const fleet = {
+    label: 'Hauler', fuelTank: 'tank', state: 'Idle', fuelCapacity: capacity, exitSubwarpWillBurnFuel: 0,
+  };
+  const events = [];
+  let tank = startingFuel;
+  let saved;
+  const c = context({
+    userFleets: [fleet], globalSettings: {},
+    sageGameAcct: { account: { mints: { fuel: 'fuel', ammo: 'ammo' } } },
+    tokenProgramPK: 'token',
+    solanaReadConnection: {
+      getParsedTokenAccountsByOwner: async () => parsed({ fuel: tank }),
+      getAccountInfoAndContext: async () => ({}),
+    },
+    ConvertCoords: value => value.split(',').map(Number),
+    calculateMovementDistance: () => 4,
+    calcWarpFuelReq: () => 80,
+    calculateSubwarpFuelBurn: () => 20,
+    checkCargo: async (currentManifest, destinationManifest) => ({ currentManifest, destinationManifest }),
+    execDock: async () => { events.push('dock'); },
+    fuelFleet: async (_fleet, _coord, _account, amount) => {
+      events.push(amount);
+      tank += amount;
+      return { amount };
+    },
+    execUndock: async () => { events.push('undock'); return { slot: 1 }; },
+    persistFleetTransportRouteState: async (_index, effectiveMode, _destination, _route, configuredMode) => {
+      saved = { effectiveMode, configuredMode };
+    },
+    resolveAutomatedTravelMode: async () => { events.push('forecast'); return 'warp'; },
+    updateFleetState: (_fleet, state) => { fleet.state = state; },
+    applyTransportLoadedTotals() {}, persistTransportPlusRouteManifestTotals() {},
+    logTransportCrewDecision() {}, clearTransportLoadRetry() {}, cLog() {}, FleetTimeStamp: () => '',
+  });
+  for (const name of [
+    'validateTransportLegFuel', 'getTransportFuelPolicy', 'getFleetFuelData', 'prepareTransportDepartureFuel',
+    'handleTransportRefueling', 'handleTransportStop', 'resolveWarpSmartTravelMode',
+    'cloneTransportManifest', 'applyTransportTotalRemaining', 'markTransportRequiredFuelAmounts', 'hasTransportManifest',
+  ]) vm.runInContext(fn(name), c);
+
+  const validation = c.validateTransportLegFuel(fleet, [0, 0], [4, 0], 'automated', roundTrip);
+  assert.equal(validation.valid, Boolean(expectedMode));
+  assert.equal(validation.moveType, 'automated');
+
+  const ready = await c.handleTransportStop(0, '0,0', '4,0', [{}], [{}], 'automated', roundTrip, 0);
+  assert.equal(ready, Boolean(expectedMode));
+  assert.equal(fleet.resupplying, false);
+  if (!expectedMode) {
+    assert.match(fleet.state, /Fuel tank too small/);
+    assert.deepEqual(events, []);
+    assert.equal(saved, undefined);
+    return;
+  }
+  if (startingFuel < reserve) {
+    assert.deepEqual(events.slice(0, 3), ['dock', reserve - startingFuel, 'undock']);
+  } else {
+    assert.deepEqual(events, []);
+  }
+  assert.equal(tank, Math.max(startingFuel, reserve));
+  assert.equal(events.includes('forecast'), expectedMode === 'warp');
+  assert.deepEqual(saved, { effectiveMode: expectedMode, configuredMode: 'automated' });
 });

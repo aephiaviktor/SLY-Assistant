@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-318
+// @aephia-version 0.7.35-319
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -12651,8 +12651,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					departureInventory = adjustAutomatedInventoryForManifest(departureInventory, leg.source, carriedManifest, -1);
 				}
 
-				const candidateModes = step === 0 && ['warp', 'subwarp'].includes(input.forcedFirstMode) ? [input.forcedFirstMode] : ['warp', 'subwarp'];
-				for(const mode of candidateModes) {
+				for(const mode of ['warp', 'subwarp']) {
 					const durationMs = Math.max(1, Number(mode === 'warp' ? leg.warpMs : leg.subwarpMs) || 1);
 					const arrivalMs = state.timeMs + durationMs;
 					const arrived = applyAutomatedProductionEvents(departureInventory, input.productionEvents, prepared.appliedEventIds, arrivalMs);
@@ -13078,7 +13077,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return inventoryAmount < 10 * cargoCapacity ? 'subwarp' : 'warp';
 	}
 
-	async function buildAutomatedTravelForecast(fleet, routeLegs, currentLegIndex, baselineMode, loadedCargo = []) {
+	async function buildAutomatedTravelForecast(fleet, routeLegs, currentLegIndex, loadedCargo = []) {
 		const legs = (routeLegs || []).map(leg => getAutomatedRouteLeg(fleet, leg)).filter(leg => leg.source && leg.destination);
 		if(!legs.length || !legs.some(leg => getAutomatedRequiredManifest(leg.manifest).length > 0)) return null;
 		const nowMs = Date.now();
@@ -13099,13 +13098,22 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			if(cssMode) return { modes: [cssMode], summary: compressAutomatedTravelPlan([cssMode]), completedLegs: 1, reason: 'css_inventory_threshold', productionEvents: [] };
 			return { modes: [], summary: '', completedLegs: 0, reason: 'awaiting_final_output', productionEvents: [] };
 		}
-		const loadedAmounts = Object.fromEntries((loadedCargo || []).map(entry => [String(entry.mint || ''), Math.max(0, Number(entry.amount || 0))]));
-		const observedCurrentManifest = (currentLeg.manifest || []).filter(entry => !entry?.cargoTotal || Number(loadedAmounts[entry.res] || 0) > 0);
-		const currentLoadedManifest = observedCurrentManifest.some(entry => entry && entry.cargoTotal) ? observedCurrentManifest : currentLeg.manifest;
+		const loadedAmounts = Object.create(null);
+		for(const { mint, amount } of loadedCargo || []) {
+			if(mint) loadedAmounts[mint] = (loadedAmounts[mint] || 0) + Math.max(0, Number(amount || 0));
+		}
+		const checkedMints = new Set(getAutomatedRequiredManifest(currentLeg.manifest).map(entry => entry.res));
+		const ammoMint = sageGameAcct.account.mints.ammo.toString();
+		const ammoBankAmount = checkedMints.has(ammoMint) ? await getTransportAmmoBankAmount(fleet) : 0;
+		const unloadPlan = planTransportCargoUnload(currentLeg.manifest, loadedAmounts, ammoBankAmount, ammoMint, globalSettings.transportKeep1);
+		const currentLoadedManifest = unloadPlan.entries
+			.filter(entry => checkedMints.has(entry.res))
+			.map(({ res, amount }) => ({ res, amt: amount + (res === ammoMint ? unloadPlan.ammoToUnload : 0), cargoTotal: true }))
+			.filter(entry => entry.amt > 0);
 		const plannerInput = { nowMs, legs, currentLegIndex, currentLegLoaded: true, currentLoadedManifest, inventory, productionEvents, horizonLegs: 48 };
 		const plan = estimatedEvents.length > 0
 			? planAutomatedStockRunway({...plannerInput, targetAtMs: Math.min(...estimatedEvents.map(event => Number(event.atMs || nowMs))), horizonLegs: 96})
-			: planAutomatedTravelModes({...plannerInput, forcedFirstMode: baselineMode === 'subwarp' ? 'subwarp' : ''});
+			: planAutomatedTravelModes(plannerInput);
 		if(!plan || !plan.modes.length) return null;
 		plan.productionEvents = productionEvents;
 		plan.estimated = estimatedEvents.length > 0;
@@ -13135,7 +13143,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		fleet.automatedTravelForecastAt = Date.now();
 		if(forecastContext && Array.isArray(forecastContext.legs)) {
 			try {
-				const plan = await buildAutomatedTravelForecast(fleet, forecastContext.legs, forecastContext.currentLegIndex || 0, moveType, loadedCargo);
+				const plan = await buildAutomatedTravelForecast(fleet, forecastContext.legs, forecastContext.currentLegIndex || 0, loadedCargo);
 				if(plan && plan.modes.length) {
 					if(plan.estimated) {
 						moveType = plan.modes[0];
@@ -13568,6 +13576,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		}
 		let effectiveMoveType = moveType;
 		const warpCost = calcWarpFuelReq(fleet, sourceCoords, destCoords, moveType == 'warpsubwarp');
+		if (moveType == 'automated') {
+			const subwarpCost = Math.ceil(calculateSubwarpFuelBurn(fleet, calculateMovementDistance(sourceCoords, destCoords)));
+			const { fuelNeeded } = getTransportFuelPolicy(warpCost, subwarpCost, fleet.fuelCapacity, roundTrip, moveType);
+			return { valid: fuelNeeded <= fleet.fuelCapacity, moveType };
+		}
 		if (warpCost > fleet.fuelCapacity) {
 			const subwarpCost = calculateSubwarpFuelBurn(fleet, calculateMovementDistance(sourceCoords, destCoords));
 			if (subwarpCost * (roundTrip ? 2 : 1) > fleet.fuelCapacity) {
@@ -16993,7 +17006,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-318', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-319', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -18345,26 +18358,23 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${logPrefix} - recovery departure blocked: arriving leg still has ${pendingCrewUnload ? passengerCrew + ' crew' : 'cargo'} to unload`);
 				return false;
 			}
-			const configuredMoveType = moveType;
-			if(configuredMoveType == 'automated') {
-				userFleets[i].moveType = await resolveAutomatedTravelMode(userFleets[i], destinationManifest, {
+			const effectiveMoveType = moveType == 'automated'
+				? await resolveAutomatedTravelMode(userFleets[i], destinationManifest, {
 					legs: getLegacyAutomatedRouteLegs(sourceCoord, destCoord, destinationManifest, arrivalManifest),
 					currentLegIndex: 0
-				});
-				userFleets[i].automatedTravelMoveType = userFleets[i].moveType;
-			} else if(configuredMoveType == 'warp-smart') {
-				userFleets[i].moveType = resolveWarpSmartTravelMode(configuredMoveType, false);
-			}
+				})
+				: resolveWarpSmartTravelMode(moveType, false);
 
 			// Loaded cargo proves which leg was prepared, but it does not prove the
 			// propulsion tank was filled before the reload/update. Only bypass the
 			// normal transport stop when the tank already satisfies that leg's fuel
 			// policy. Otherwise fall through so the regular path can refuel locally.
 			const fuelData = await getFleetFuelData(
-				{ ...userFleets[i], moveType },
+				{ ...userFleets[i], moveType: effectiveMoveType },
 				ConvertCoords(sourceCoord),
 				ConvertCoords(destCoord),
-				roundTrip
+				roundTrip,
+				moveType == 'automated' && effectiveMoveType == 'warp' ? moveType : effectiveMoveType
 			);
 			if(fuelData.amount < fuelData.fuelNeeded) {
 				cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${logPrefix} - cargo is already onboard but fuel is ${fuelData.amount}/${fuelData.fuelNeeded}; resuming normal refuel path`);
@@ -18374,7 +18384,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const recovery = {
 				recovered: true,
 				reason: 'loaded_cargo_at_source_after_restart',
-				leg: { sourceCoord, destCoord, destinationManifest, moveType: userFleets[i].moveType, configuredMoveType, routeIndex }
+				leg: { sourceCoord, destCoord, destinationManifest, moveType: fuelData.effectiveMoveType || effectiveMoveType, configuredMoveType: moveType, routeIndex }
 			};
 			cLog(1,`${FleetTimeStamp(userFleets[i].label)} ${logPrefix} - cargo for ${destCoord} is already onboard; skipping reload`);
 			await recoverTransportMovement(i, fleetCoords, recovery, logPrefix);
@@ -18413,7 +18423,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			if(!leg || !leg.destCoord) return false;
 			let effectiveMoveType = leg.moveType || userFleets[i].moveType;
 			const configuredMoveType = leg.configuredMoveType || effectiveMoveType;
-			if(effectiveMoveType == 'automated') effectiveMoveType = await resolveAutomatedTravelMode(userFleets[i], leg.destinationManifest || []);
+			if(effectiveMoveType == 'automated') effectiveMoveType = await resolveAutomatedTravelMode(userFleets[i], leg.destinationManifest || [], leg.forecastContext);
 			else effectiveMoveType = resolveWarpSmartTravelMode(effectiveMoveType, false);
 			userFleets[i].moveType = effectiveMoveType;
 			await persistFleetTransportRouteState(i, effectiveMoveType, leg.destCoord, leg.routeIndex, configuredMoveType);
@@ -18610,13 +18620,40 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			await maybeFinalizeFleetTelemetryCostCycle(userFleets[i], fleetParsedData, getFleetTelemetryHomeStarbaseName(userFleets[i], fleetParsedData), 2);
 		}
 
+		const recoveryMoveType = configuredMoveType == 'automated' ? configuredMoveType : userFleets[i].moveType;
+		const routeLegs = getLegacyAutomatedRouteLegs(userFleets[i].starbaseCoord, userFleets[i].destCoord, targetCargoManifest, starbaseCargoManifest);
+		const recoveryLegs = routeLegs.map((leg, currentLegIndex) => ({
+			...leg,
+			moveType: recoveryMoveType,
+			forecastContext: configuredMoveType == 'automated' ? { legs: routeLegs, currentLegIndex } : null
+		}));
+		if(configuredMoveType == 'automated' && fleetState == 'Idle' && !hasRequiredLoadRetry) {
+			const savedTarget = ConvertCoords(getTransportCoordKey(fleetParsedData.moveTarget));
+			const runtimeTarget = ConvertCoords(getTransportCoordKey(userFleets[i].moveTarget));
+			const savedLeg = recoveryLegs.find(leg => CoordsEqual(ConvertCoords(leg.destCoord), savedTarget));
+			const activeLeg = savedLeg || recoveryLegs.find(leg => CoordsEqual(ConvertCoords(leg.destCoord), runtimeTarget));
+			if(activeLeg && !CoordsEqual(fleetCoords, ConvertCoords(activeLeg.destCoord))) {
+				if(userFleets[i].stopping) return;
+				const savedMode = savedLeg ? fleetParsedData.transportEffectiveMoveType : null;
+				if(!['warp', 'subwarp'].includes(savedMode)) {
+					await recoverTransportMovement(i, fleetCoords, { leg: activeLeg, reason: 'saved_route_without_effective_mode' }, 'Transporting');
+					return;
+				}
+				const [targetX, targetY] = ConvertCoords(activeLeg.destCoord);
+				userFleets[i].moveType = savedMode;
+				userFleets[i].moveTarget = activeLeg.destCoord;
+				await handleMovement(i, calculateMovementDistance(fleetCoords, [targetX, targetY]), targetX, targetY, false);
+				return;
+			}
+		}
+
 		// After an app reload/update, moveTarget is not guaranteed to survive in
 		// memory. If the fleet is still idle at a route source but already carries
 		// meaningful cargo for the departing leg, loading has already completed.
 		// Resume movement instead of trying to top up the manifest and ending in
 		// "No cargo loaded" when the starbase has nothing further to transfer.
-		if(await resumeLoadedTransportDeparture(i, fleetState, fleetCoords, userFleets[i].starbaseCoord, userFleets[i].destCoord, targetCargoManifest, starbaseCargoManifest, userFleets[i].moveType, true, null, 'Transporting', fleetParsedData.moveTarget)) return;
-		if(await resumeLoadedTransportDeparture(i, fleetState, fleetCoords, userFleets[i].destCoord, userFleets[i].starbaseCoord, starbaseCargoManifest, targetCargoManifest, userFleets[i].moveType, false, null, 'Transporting', fleetParsedData.moveTarget)) return;
+		if(await resumeLoadedTransportDeparture(i, fleetState, fleetCoords, userFleets[i].starbaseCoord, userFleets[i].destCoord, targetCargoManifest, starbaseCargoManifest, recoveryMoveType, true, null, 'Transporting', fleetParsedData.moveTarget)) return;
+		if(await resumeLoadedTransportDeparture(i, fleetState, fleetCoords, userFleets[i].destCoord, userFleets[i].starbaseCoord, starbaseCargoManifest, targetCargoManifest, recoveryMoveType, false, null, 'Transporting', fleetParsedData.moveTarget)) return;
 
         //let moveDist = calculateMovementDistance([starbaseX,starbaseY], [destX,destY]);
         if (fleetState === 'Idle') {
@@ -18642,7 +18679,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		logTransportCrewDecision(userFleets[i], 'to target', targetTotalManifest, targetLoadManifest, starbaseCargoManifest, needToLoadCrew, needToUnloadCrew);
 		if(starbaseCargoManifest[0].crew > 0 || targetLoadManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
 
-                const fuelData = await getFleetFuelData(userFleets[i], [starbaseX, starbaseY], [destX, destY], true);
+                const fuelData = await prepareTransportDepartureFuel(userFleets[i], [starbaseX, starbaseY], [destX, destY], true, configuredMoveType);
+                if(!fuelData) return false;
 		//previously we only checked for "fuelData.fuelNeeded > 0" below, but fuelNeeded is always greater than 0 - it is just the fuel needed for the warp/subwarp.
 		//this broke the check if the fleet needs to do the dock/undock sequence and the sequence was always executed
 		//We need to explicitly calculate the needed fuel minus the available fuel, just like in handleTransportRefueling()
@@ -18804,7 +18842,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                 }
 				clearTransportLoadRetry(userFleets[i]);
 				if(configuredMoveType == 'automated') {
-					userFleets[i].moveType = await resolveAutomatedTravelMode(userFleets[i], targetTotalManifest, {
+					userFleets[i].moveType = fuelData.forcedMoveType || await resolveAutomatedTravelMode(userFleets[i], targetTotalManifest, {
 						legs: getLegacyAutomatedRouteLegs(userFleets[i].starbaseCoord, userFleets[i].destCoord, targetTotalManifest, starbaseCargoManifest),
 						currentLegIndex: 0
 					});
@@ -18812,9 +18850,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				} else if(configuredMoveType == 'warp-smart') {
 					userFleets[i].moveType = resolveWarpSmartTravelMode(configuredMoveType, resumedRequiredLoadWait);
 				}
-                if(configuredMoveType == 'warp-smart') await persistFleetTransportRouteState(i, userFleets[i].moveType, userFleets[i].destCoord, null, configuredMoveType);
-                else userFleets[i].moveTarget = userFleets[i].destCoord;
                 userFleets[i].resupplying = false;
+                if(configuredMoveType == 'automated' || configuredMoveType == 'warp-smart') {
+                    await persistFleetTransportRouteState(i, userFleets[i].moveType, userFleets[i].destCoord, null, configuredMoveType);
+                } else userFleets[i].moveTarget = userFleets[i].destCoord;
                 cLog(3,`${FleetTimeStamp(userFleets[i].label)} userFleets[i]: `, userFleets[i]);
             }
 
@@ -18840,7 +18879,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		logTransportCrewDecision(userFleets[i], 'to starbase', starbaseTotalManifest, starbaseLoadManifest, targetCargoManifest, needToLoadCrew, needToUnloadCrew);
 		if(starbaseLoadManifest[0].crew > 0 || targetCargoManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
 
-                const fuelData = await getFleetFuelData(userFleets[i], [destX, destY], [starbaseX, starbaseY], false);
+                const fuelData = await prepareTransportDepartureFuel(userFleets[i], [destX, destY], [starbaseX, starbaseY], false, configuredMoveType);
+                if(!fuelData) return false;
 		//previously we only checked for "fuelData.fuelNeeded > 0" below, but fuelNeeded is always greater than 0 - it is just the fuel needed for the warp/subwarp.
 		//We need to explicitly calculate the needed fuel minus the available fuel, just like in handleTransportRefueling()
 		const fuelEntry = starbaseLoadManifest.find(e => e.res === sageGameAcct.account.mints.fuel.toString()) || {amt: 0};
@@ -18996,7 +19036,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
                 }
 				clearTransportLoadRetry(userFleets[i]);
 				if(configuredMoveType == 'automated') {
-					userFleets[i].moveType = await resolveAutomatedTravelMode(userFleets[i], starbaseTotalManifest, {
+					userFleets[i].moveType = fuelData.forcedMoveType || await resolveAutomatedTravelMode(userFleets[i], starbaseTotalManifest, {
 						legs: getLegacyAutomatedRouteLegs(userFleets[i].starbaseCoord, userFleets[i].destCoord, targetCargoManifest, starbaseTotalManifest),
 						currentLegIndex: 1
 					});
@@ -19004,9 +19044,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				} else if(configuredMoveType == 'warp-smart') {
 					userFleets[i].moveType = resolveWarpSmartTravelMode(configuredMoveType, resumedRequiredLoadWait);
 				}
-                if(configuredMoveType == 'warp-smart') await persistFleetTransportRouteState(i, userFleets[i].moveType, userFleets[i].starbaseCoord, null, configuredMoveType);
-                else userFleets[i].moveTarget = userFleets[i].starbaseCoord;
                 userFleets[i].resupplying = false;
+                if(configuredMoveType == 'automated' || configuredMoveType == 'warp-smart') {
+                    await persistFleetTransportRouteState(i, userFleets[i].moveType, userFleets[i].starbaseCoord, null, configuredMoveType);
+                } else userFleets[i].moveTarget = userFleets[i].starbaseCoord;
                 cLog(3,`${FleetTimeStamp(userFleets[i].label)} userFleets[i]: `, userFleets[i]);
             }
 
@@ -19016,9 +19057,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const currentMoveTarget = typeof userFleets[i].moveTarget === 'string' ? userFleets[i].moveTarget.trim() : '';
 			// Persisted route state is the strongest recovery signal. Prefer it over
 			// cargo inference (and over a stale in-memory target) when it is valid.
-			const activeMoveTarget = CoordsValid(ConvertCoords(savedMoveTarget))
-				? savedMoveTarget
-				: (CoordsValid(ConvertCoords(currentMoveTarget)) ? currentMoveTarget : '');
+			const atRouteStop = CoordsEqual(fleetCoords, [starbaseX, starbaseY]) || CoordsEqual(fleetCoords, [destX, destY]);
+			const activeMoveTarget = configuredMoveType == 'automated'
+				? (atRouteStop ? currentMoveTarget : '')
+				: (CoordsValid(ConvertCoords(savedMoveTarget)) ? savedMoveTarget : (CoordsValid(ConvertCoords(currentMoveTarget)) ? currentMoveTarget : ''));
 	            if (activeMoveTarget !== '') {
 				userFleets[i].moveTarget = activeMoveTarget;
 	                const targetX = activeMoveTarget.split(',').length > 1 ? activeMoveTarget.split(',')[0].trim() : '';
@@ -19027,24 +19069,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let isStarbaseAndWarpSubwarp = userFleets[i].moveType == 'warpsubwarp' && ((fleetCoords[0] == starbaseX && fleetCoords[1] == starbaseY) || (fleetCoords[0] == destX && fleetCoords[1] == destY));
 	                await handleMovement(i, moveDist, targetX, targetY, isStarbaseAndWarpSubwarp);
 	            } else {
-					const recovery = await inferTransportRecoveryLeg(userFleets[i], [
-						{
-							label: 'to target',
-							sourceCoord: userFleets[i].starbaseCoord,
-							destCoord: userFleets[i].destCoord,
-							moveType: userFleets[i].moveType,
-							routeIndex: null,
-							destinationManifest: targetCargoManifest
-						},
-						{
-							label: 'to starbase',
-							sourceCoord: userFleets[i].destCoord,
-							destCoord: userFleets[i].starbaseCoord,
-							moveType: userFleets[i].moveType,
-							routeIndex: null,
-							destinationManifest: starbaseCargoManifest
-						}
-					]);
+					const recovery = await inferTransportRecoveryLeg(userFleets[i], recoveryLegs);
 					if(recovery.recovered) {
 						await recoverTransportMovement(i, fleetCoords, recovery, 'Transporting');
 					} else {
@@ -19142,7 +19167,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		logTransportCrewDecision(userFleets[i], `${sourceCoord} -> ${destCoord}`, destinationTotalManifest, destinationCargoManifest, sourceCargoManifest, needToLoadCrew, needToUnloadCrew);
 		if(sourceCargoManifest[0].crew > 0 || destinationCargoManifest[0].crew > 0) cLog(3, `${FleetTimeStamp(userFleets[i].label)} crew:`, userFleets[i].crewCount, 'passengerCapacity:', userFleets[i].passengerCapacity, 'required crew:', userFleets[i].requiredCrew, 'load:', needToLoadCrew, 'unload:', needToUnloadCrew);
 
-		const fuelData = await getFleetFuelData(userFleets[i], sourceCoords, destCoords, roundTrip);
+		const fuelData = await prepareTransportDepartureFuel(userFleets[i], sourceCoords, destCoords, roundTrip, configuredMoveType);
+		if(!fuelData) return false;
 		const fuelEntry = destinationCargoManifest.find(e => e.res === sageGameAcct.account.mints.fuel.toString()) || {amt: 0};
 		const totalFuel = fuelData.fuelNeeded + fuelEntry.amt;
 		let fuelToAdd = Math.min(fuelData.capacity, totalFuel) - fuelData.amount;
@@ -19285,7 +19311,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 		clearTransportLoadRetry(userFleets[i]);
 		if(configuredMoveType == 'automated') {
-			userFleets[i].moveType = await resolveAutomatedTravelMode(userFleets[i], destinationTotalManifest, {
+			userFleets[i].moveType = fuelData.forcedMoveType || await resolveAutomatedTravelMode(userFleets[i], destinationTotalManifest, {
 				legs: automatedRouteLegs || [{ sourceCoord, destCoord, destinationManifest: destinationTotalManifest }],
 				currentLegIndex: routeIndex === null || routeIndex === undefined ? 0 : routeIndex
 			});
@@ -19383,24 +19409,30 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			}
 		}
 
-	async function getFleetFuelData(fleet, currentPos, targetPos, roundTrip = true) {
+	function getTransportFuelPolicy(warpCost, subwarpCost, capacity, roundTrip, moveType) {
+		const costMultiplier = roundTrip ? 2 : 1;
+		const subwarpReserve = subwarpCost * costMultiplier;
+		const warpMode = ['warp', 'warpsubwarp', 'warp-subwarp-warp'].includes(moveType);
+		const warpReserve = warpCost * costMultiplier <= capacity
+			? warpCost * costMultiplier
+			: (roundTrip ? warpCost + subwarpCost : subwarpCost);
+		if (moveType == 'automated') {
+			return warpCost <= capacity && warpReserve <= capacity
+				? { fuelNeeded: warpReserve, effectiveMoveType: 'warp' }
+				: { fuelNeeded: subwarpReserve, effectiveMoveType: 'subwarp' };
+		}
+		return { fuelNeeded: warpMode ? warpReserve : subwarpReserve, effectiveMoveType: moveType };
+	}
+
+	async function getFleetFuelData(fleet, currentPos, targetPos, roundTrip = true, moveType = fleet.moveType) {
 		const moveDist = calculateMovementDistance(currentPos, targetPos);
 		const fleetCurrentFuelTank = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.fuelTank, {programId: tokenProgramPK});
 		const token = fleetCurrentFuelTank.value.find(item => item.account.data.parsed.info.mint === sageGameAcct.account.mints.fuel.toString());
 		const account = token ? token.pubkey : await getFleetFuelToken(fleet);
 		const amount = token ? token.account.data.parsed.info.tokenAmount.uiAmount - fleet.exitSubwarpWillBurnFuel : 0;
-        const warpCost = calcWarpFuelReq(fleet, currentPos, targetPos, fleet.moveType == 'warpsubwarp');
+        const warpCost = calcWarpFuelReq(fleet, currentPos, targetPos, moveType == 'warpsubwarp');
         const subwarpCost = Math.ceil(calculateSubwarpFuelBurn(fleet, moveDist));
-
-        //Calculate fuel needed
-        const costMultiplier = roundTrip ? 2 : 1;
-        let fuelNeeded = 0;
-        if (fleet.moveType == 'warp' || fleet.moveType == 'warpsubwarp' || fleet.moveType == 'warp-subwarp-warp') {
-            fuelNeeded = warpCost * costMultiplier;
-            if (fuelNeeded > fleet.fuelCapacity) fuelNeeded = roundTrip ? warpCost + subwarpCost : subwarpCost;
-        } else {
-            fuelNeeded = subwarpCost * costMultiplier;
-        }
+		const fuelPolicy = getTransportFuelPolicy(warpCost, subwarpCost, fleet.fuelCapacity, roundTrip, moveType);
 
 		//cLog(4, `${FleetTimeStamp(fleet.label)} getFleetFuelData -> calcWarpFuelReq:`, currentPos, targetPos);
 		return {
@@ -19410,8 +19442,30 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			capacity: fleet.fuelCapacity,
 			warpCost: warpCost,
 			subwarpCost: subwarpCost,
-            fuelNeeded: fuelNeeded
+			...fuelPolicy
 		}
+	}
+
+	async function prepareTransportDepartureFuel(fleet, currentPos, targetPos, roundTrip, configuredMoveType) {
+		const automated = configuredMoveType == 'automated';
+		const moveType = automated ? configuredMoveType : fleet.moveType;
+		const fuelData = await getFleetFuelData(fleet, currentPos, targetPos, roundTrip, moveType);
+		if(!automated) return fuelData;
+		if(fuelData.fuelNeeded > fuelData.capacity) {
+			const detail = roundTrip ? 'ERROR: Fuel tank too small for round trip' : 'ERROR: Fuel tank too small for this leg';
+			cLog(1, `${FleetTimeStamp(fleet.label)} ${detail}`);
+			updateFleetState(fleet, detail);
+			fleet.resupplying = false;
+			return null;
+		}
+		if(fuelData.effectiveMoveType == 'subwarp') {
+			fleet.moveType = 'subwarp';
+			fleet.automatedTravelPlan = [];
+			fleet.automatedTravelPlanPending = false;
+			cLog(1, `${FleetTimeStamp(fleet.label)} Automated Travel Mode -> Subwarp (fuel capacity)`);
+			return { ...fuelData, forcedMoveType: 'subwarp' };
+		}
+		return fuelData;
 	}
 
 	async function fuelFleet(fleet, dockCoords, account, amount, returnTx, telemetryOptions = null) {

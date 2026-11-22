@@ -14,7 +14,9 @@ function readFunctionSource(name, sourcePath = 'SLY_Assistant.user.js') {
   assert.notEqual(functionStart, -1, `${name} must exist in ${sourcePath}`);
   const asyncStart = source.lastIndexOf('async ', functionStart);
   const start = asyncStart >= 0 && source.slice(asyncStart, functionStart) === 'async ' ? asyncStart : functionStart;
-  const bodyStart = source.indexOf('{', functionStart);
+  const signatureEnd = source.indexOf(') {', functionStart);
+  assert.notEqual(signatureEnd, -1, `missing function body for ${name}`);
+  const bodyStart = signatureEnd + 2;
   let depth = 0;
   for (let end = bodyStart; end < source.length; end += 1) {
     if (source[end] === '{') depth += 1;
@@ -270,7 +272,6 @@ test('Automated forecast waits for a direct final-output event instead of extrap
     {},
     makeTwoLegRoute(),
     0,
-    'warp',
     [{ mint: 'ore', amount: 10 }],
   );
 
@@ -281,7 +282,9 @@ test('Automated forecast waits for a direct final-output event instead of extrap
 
 test('estimated final-craft ETA chooses Subwarp internally but keeps the displayed plan pending', async () => {
   const route = makeTwoLegRoute({ warpMs: 10, subwarpMs: 30, amount: 10 });
-  const { buildAutomatedTravelForecast } = loadFunctions(['buildAutomatedTravelForecast'], {
+  const { buildAutomatedTravelForecast } = loadFunctions(['buildAutomatedTravelForecast', 'planTransportCargoUnload'], {
+    globalSettings: {},
+    sageGameAcct: { account: { mints: { ammo: 'ammo' } } },
     getAutomatedRouteLeg: (_fleet, leg) => leg,
     getAutomatedRequiredManifest: manifest => manifest.filter(entry => entry.cargoTotal),
     readAutomatedRouteInventory: async () => ({ A: { ore: 0 }, B: {} }),
@@ -296,14 +299,16 @@ test('estimated final-craft ETA chooses Subwarp internally but keeps the display
     Date,
   });
 
-  const plan = await buildAutomatedTravelForecast({}, route, 0, 'warp', [{ mint: 'ore', amount: 10 }]);
+  const plan = await buildAutomatedTravelForecast({}, route, 0, [{ mint: 'ore', amount: 10 }]);
 
   assert.equal(plan.estimated, true);
   assert.equal(plan.modes[0], 'subwarp');
 });
 
 test('Automated forecast starts when a direct final-output event is visible', async () => {
-  const { buildAutomatedTravelForecast } = loadFunctions(['buildAutomatedTravelForecast'], {
+  const { buildAutomatedTravelForecast } = loadFunctions(['buildAutomatedTravelForecast', 'planTransportCargoUnload'], {
+    globalSettings: {},
+    sageGameAcct: { account: { mints: { ammo: 'ammo' } } },
     getAutomatedRouteLeg: (_fleet, leg) => leg,
     getAutomatedRequiredManifest: manifest => manifest.filter(entry => entry.cargoTotal),
     readAutomatedRouteInventory: async () => ({ A: { ore: 100 }, B: {} }),
@@ -314,10 +319,102 @@ test('Automated forecast starts when a direct final-output event is visible', as
     Date,
   });
 
-  const plan = await buildAutomatedTravelForecast({}, makeTwoLegRoute(), 0, 'warp', [{ mint: 'ore', amount: 10 }]);
+  const plan = await buildAutomatedTravelForecast({}, makeTwoLegRoute(), 0, [{ mint: 'ore', amount: 10 }]);
 
   assert.deepEqual(Array.from(plan.modes), ['warp', 'subwarp']);
   assert.equal(plan.productionEvents.length, 1);
+});
+
+const deliveryScenarios = [
+  {
+    name: 'a partial load across token accounts',
+    loadedCargo: [{ mint: 'electronics', amount: 125 }, { mint: 'electronics', amount: 75 }, { mint: 'polymer', amount: 1_000 }],
+    craftAmount: 800,
+    keepOne: false,
+  },
+  {
+    name: 'a retained unit',
+    loadedCargo: [{ mint: 'electronics', amount: 1 }, { mint: 'polymer', amount: 1_000 }],
+    craftAmount: 1_000,
+    keepOne: true,
+  },
+  {
+    name: 'an empty cargo snapshot',
+    loadedCargo: [],
+    craftAmount: 1_000,
+    keepOne: false,
+  },
+];
+
+for (const { name, loadedCargo, craftAmount, keepOne } of deliveryScenarios) {
+  test(`Automated forecast uses actual delivery amounts for ${name}`, async () => {
+    const electronics = { res: 'electronics', amt: 1_000, requiredAmount: 1_000, cargoTotal: true };
+    const durations = { warpMs: 20_000, subwarpMs: 180_000 };
+    const legs = [
+      { ...durations, source: 'A', destination: 'B', manifest: [electronics, { res: 'polymer', amt: 1_000, cargoTotal: true }] },
+      { ...durations, source: 'B', destination: 'C', manifest: [electronics] },
+      { ...durations, source: 'C', destination: 'A', manifest: [] },
+    ];
+    const { buildAutomatedTravelForecast } = loadFunctions([
+      'buildAutomatedTravelForecast',
+      'planTransportCargoUnload',
+      'cloneAutomatedInventory',
+      'applyAutomatedProductionEvents',
+      'getAutomatedRequiredManifest',
+      'canWithdrawAutomatedManifest',
+      'adjustAutomatedInventoryForManifest',
+      'compressAutomatedTravelPlan',
+      'planAutomatedTravelModes',
+    ], {
+      Date: class extends Date { static now() { return 1; } },
+      globalSettings: { transportKeep1: keepOne },
+      sageGameAcct: { account: { mints: { ammo: 'ammo' } } },
+      getAutomatedRouteLeg: (_fleet, leg) => leg,
+      readAutomatedRouteInventory: async () => ({ A: {}, B: { electronics: 0 }, C: {} }),
+      collectAutomatedCraftingProductionEvents: async () => [{
+        id: 'electronics-craft', atMs: 120_001, location: 'B', res: 'electronics', amount: craftAmount,
+      }],
+      collectAutomatedMiningProductionEvents: async () => [],
+      collectAutomatedEstimatedCraftingProductionEvents: async () => [],
+    });
+    const plan = await buildAutomatedTravelForecast({}, legs, 0, loadedCargo);
+    assert.deepEqual(Array.from(plan.modes), ['subwarp', 'warp', 'warp']);
+  });
+}
+
+test('Automated forecast credits only the unloadable hold and bank amounts for checked ammo', async () => {
+  const fleet = { ammoBank: 'bank' };
+  const route = makeTwoLegRoute({ amount: 1_000 });
+  route[0].manifest = [{ res: 'ammo', amt: 1_000, cargoTotal: true }, { res: 'food', amt: 1_000 }];
+  const { buildAutomatedTravelForecast } = loadFunctions([
+    'buildAutomatedTravelForecast',
+    'getAutomatedRequiredManifest',
+    'planTransportCargoUnload',
+    'getTransportAmmoBankAmount',
+    'getParsedTokenAmount',
+  ], {
+    globalSettings: { transportUseAmmoBank: true, transportKeep1: true },
+    sageGameAcct: { account: { mints: { ammo: 'ammo' } } },
+    tokenProgramPK: 'token',
+    solanaReadConnection: {
+      getParsedTokenAccountsByOwner: async owner => {
+        assert.equal(owner, fleet.ammoBank);
+        return { value: [{ account: { data: { parsed: { info: { mint: 'ammo', tokenAmount: { uiAmount: 300 } } } } } }] };
+      },
+    },
+    getAutomatedRouteLeg: (_fleet, leg) => leg,
+    readAutomatedRouteInventory: async () => ({ A: {}, B: {} }),
+    collectAutomatedCraftingProductionEvents: async () => [{ id: 'craft', location: 'A', res: 'ammo', amount: 10 }],
+    collectAutomatedMiningProductionEvents: async () => [],
+    collectAutomatedEstimatedCraftingProductionEvents: async () => [],
+    planAutomatedTravelModes: input => {
+      assert.deepEqual(Array.from(input.currentLoadedManifest, entry => ({ ...entry })), [
+        { res: 'ammo', amt: 418, cargoTotal: true },
+      ]);
+      return { modes: ['warp'] };
+    },
+  });
+  await buildAutomatedTravelForecast(fleet, route, 0, [{ mint: 'ammo', amount: 120 }, { mint: 'food', amount: 1_000 }]);
 });
 
 test('future Automated manifests convert cargo capacity to weighted token amounts', () => {
@@ -472,6 +569,69 @@ test('Automated uses conservative Subwarp and a dash when no craft ETA is availa
   assert.deepEqual(Array.from(fleet.automatedTravelPlan), []);
   assert.equal(fleet.automatedTravelPlanPending, true);
   assert.equal(statusUpdates, 1);
+});
+
+test('unchecked Food cannot force Subwarp when the Electronics forecast favors Warp', async () => {
+  const route = makeTwoLegRoute({ amount: 39_687, warpMs: 22_361, subwarpMs: 333_742 });
+  route[0].manifest[0].res = 'electronics';
+  route[1].manifest = [{ res: 'food', amt: 60_000, cargoTotal: false }];
+  const now = Date.parse('2026-11-22T08:59:08+01:00');
+  const cargo = [{ mint: 'food', amount: 50_000 }, { mint: 'electronics', amount: 1 }];
+  const fleet = { cargoHold: 'cargo', cargoCapacity: 79_380 };
+  const { calculateAutomatedTravelMode, resolveAutomatedTravelMode } = loadFunctions([
+    'cloneAutomatedInventory',
+    'applyAutomatedProductionEvents',
+    'getAutomatedRequiredManifest',
+    'canWithdrawAutomatedManifest',
+    'adjustAutomatedInventoryForManifest',
+    'compressAutomatedTravelPlan',
+    'planAutomatedTravelModes',
+    'calculateAutomatedTravelMode',
+    'buildAutomatedTravelForecast',
+    'resolveAutomatedTravelMode',
+    'planTransportCargoUnload',
+  ], {
+    Date: class extends Date { static now() { return now; } },
+    solanaReadConnection: {
+      getParsedTokenAccountsByOwner: async () => ({
+        value: cargo.map(({ mint, amount }) => ({
+          account: { data: { parsed: { info: { mint, tokenAmount: { uiAmount: amount } } } } },
+        })),
+      }),
+    },
+    tokenProgramPK: 'token-program',
+    cargoItems: [{ token: 'food', size: 1 }, { token: 'electronics', size: 2 }],
+    globalSettings: { transportUseAmmoBank: true },
+    sageGameAcct: { account: { mints: { ammo: 'ammo', fuel: 'fuel' } } },
+    getAutomatedRouteLeg: (_fleet, leg) => leg,
+    readAutomatedRouteInventory: async () => ({ A: { electronics: 404_057 }, B: { food: 1 } }),
+    collectAutomatedCraftingProductionEvents: async () => [{
+      id: 'electronics-craft',
+      res: 'electronics',
+      location: 'A',
+      amount: 1_700_000,
+      atMs: Date.parse('2026-11-22T10:07:51+01:00'),
+      source: 'craft',
+    }],
+    collectAutomatedMiningProductionEvents: async () => [],
+    collectAutomatedEstimatedCraftingProductionEvents: async () => [],
+    FleetTimeStamp: () => '',
+    TimeToStr: () => '',
+    updateAssistStatus: () => {},
+    cLog: () => {},
+  });
+
+  const manifest = route[1].manifest;
+  const baseline = calculateAutomatedTravelMode({
+    manifest, loadedCargo: cargo, cargoCapacity: fleet.cargoCapacity, cargoSizes: { food: 1, electronics: 2 },
+  });
+  assert.equal(baseline.moveType, 'subwarp');
+
+  assert.equal(await resolveAutomatedTravelMode(fleet, manifest, { legs: route, currentLegIndex: 1 }), 'warp');
+  assert.equal(fleet.automatedTravelPlan[0], 'warp');
+
+  route[0].manifest[0].cargoTotal = false;
+  assert.equal(await resolveAutomatedTravelMode(fleet, manifest, { legs: route, currentLegIndex: 1 }), 'subwarp');
 });
 
 test('Automated uses an estimated plan first mode while keeping the dash', async () => {
