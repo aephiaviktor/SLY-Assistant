@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-322
+// @aephia-version 0.7.35-323
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -12627,20 +12627,22 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const beamWidth = Math.max(8, Math.min(256, Math.floor(Number(input.beamWidth || 96))));
 		// Without scheduled replenishment, slowing down cannot change a pickup's stock.
 		const availableModes = input.productionEvents?.length ? ['warp', 'subwarp'] : ['warp'];
+		const comparePlans = (a, b) => b.warpCount - a.warpCount || a.modeOrder.localeCompare(b.modeOrder) || a.timeMs - b.timeMs;
 		let states = [{
 			timeMs: nowMs,
 			inventory: cloneAutomatedInventory(input.inventory),
 			appliedEventIds: new Set(),
 			modes: [],
+			modeOrder: '',
 			warpCount: 0
 		}];
-		let bestStates = states;
+		let best = states[0];
 
 		for(let step = 0; step < horizonLegs; step++) {
 			const legIndex = (currentLegIndex + step) % legs.length;
 			const leg = legs[legIndex] || {};
 			const departureModes = step === 0 && ['warp', 'subwarp'].includes(input.firstMoveType) ? [input.firstMoveType] : availableModes;
-			const nextStates = [];
+			const nextStates = new Map();
 			for(const state of states) {
 				let prepared = applyAutomatedProductionEvents(state.inventory, input.productionEvents, state.appliedEventIds, state.timeMs);
 				let departureInventory = prepared.inventory;
@@ -12660,23 +12662,34 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					const arrivalMs = state.timeMs + durationMs;
 					const arrived = applyAutomatedProductionEvents(departureInventory, input.productionEvents, prepared.appliedEventIds, arrivalMs);
 					const arrivalInventory = adjustAutomatedInventoryForManifest(arrived.inventory, leg.destination, carriedManifest, 1);
-					nextStates.push({
+					const next = {
 						timeMs: arrivalMs,
 						inventory: arrivalInventory,
 						appliedEventIds: arrived.appliedEventIds,
 						modes: state.modes.concat(mode),
+						modeOrder: state.modeOrder + (mode === 'warp' ? '0' : '1'),
 						warpCount: state.warpCount + (mode === 'warp' ? 1 : 0)
-					});
+					};
+					const key = JSON.stringify([arrivalMs, arrivalInventory, [...arrived.appliedEventIds].sort()]);
+					const existing = nextStates.get(key);
+					if(!existing || comparePlans(next, existing) < 0) nextStates.set(key, next);
 				}
 			}
-			if(!nextStates.length) break;
-			nextStates.sort((a, b) => a.modes.map(mode => mode === 'warp' ? '0' : '1').join('').localeCompare(b.modes.map(mode => mode === 'warp' ? '0' : '1').join('')) || b.warpCount - a.warpCount || a.timeMs - b.timeMs);
-			states = nextStates.slice(0, beamWidth);
-			bestStates = states;
+			if(!nextStates.size) break;
+			const ranked = [...nextStates.values()].sort(comparePlans);
+			best = ranked[0];
+			states = ranked.slice(0, beamWidth);
+			if(ranked.length > beamWidth) {
+				// Preserve enough delay to bridge production, even when faster plans fill the beam.
+				const latestByWarpCount = new Map();
+				for(const state of ranked) {
+					const latest = latestByWarpCount.get(state.warpCount);
+					if(!latest || state.timeMs > latest.timeMs) latestByWarpCount.set(state.warpCount, state);
+				}
+				states = [...new Set([...states, ...latestByWarpCount.values()])];
+			}
 		}
 
-		bestStates.sort((a, b) => b.modes.length - a.modes.length || a.modes.map(mode => mode === 'warp' ? '0' : '1').join('').localeCompare(b.modes.map(mode => mode === 'warp' ? '0' : '1').join('')) || b.warpCount - a.warpCount || a.timeMs - b.timeMs);
-		const best = bestStates[0] || { modes: [], timeMs: nowMs, warpCount: 0 };
 		return {
 			modes: best.modes,
 			summary: compressAutomatedTravelPlan(best.modes),
@@ -17026,7 +17039,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-322', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-323', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),

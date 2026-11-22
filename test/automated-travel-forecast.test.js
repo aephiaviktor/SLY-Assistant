@@ -119,6 +119,37 @@ test('Automated planner warps while stock covers future pickups, then subwarps t
   assert.match(compressAutomatedTravelPlan(plan.modes), /^\d+w(?:\d+sw)+/);
 });
 
+test('Automated reserves Electronics for the minimum Subwarp legs needed to reach the craft', () => {
+  const { planAutomatedTravelModes } = loadFunctions([
+    'cloneAutomatedInventory',
+    'applyAutomatedProductionEvents',
+    'getAutomatedRequiredManifest',
+    'canWithdrawAutomatedManifest',
+    'adjustAutomatedInventoryForManifest',
+    'compressAutomatedTravelPlan',
+    'planAutomatedTravelModes',
+  ]);
+  const pickupAmount = 39_687;
+  const route = makeTwoLegRoute({ amount: pickupAmount, warpMs: 22_361, subwarpMs: 333_742 });
+  route[0].manifest[0].res = 'electronics';
+  const input = {
+    legs: route,
+    currentLegIndex: 1,
+    currentLoadedManifest: [],
+    horizonLegs: 48,
+    productionEvents: [{ atMs: 9_913_000, location: 'A', res: 'electronics', amount: 1_700_000 }],
+  };
+
+  for (const [stock, summary] of [[794_419, '12w29sw7w'], [16 * pickupAmount + 679, '3w30sw15w']]) {
+    for (const beamWidth of [8, 96]) {
+      const plan = planAutomatedTravelModes({ ...input, beamWidth, inventory: { A: { electronics: stock }, B: {} } });
+      assert.equal(plan.reason, 'forecast_complete');
+      assert.equal(plan.completedLegs, 48);
+      assert.equal(plan.summary, summary);
+    }
+  }
+});
+
 test('Automated planner recalculates back to warp when a confirmed unload raises stock', () => {
   const { planAutomatedTravelModes } = loadFunctions([
     'cloneAutomatedInventory',
