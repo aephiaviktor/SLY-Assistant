@@ -55,6 +55,44 @@ test('CSS Automated fallback uses only the configured required asset and only at
   assert.equal(getAutomatedCssTravelMode({ ...base, requiredAsset: { res: 'polymer' }, inventory: { electronics: 999, polymer: 999 } }), 'subwarp');
 });
 
+test('CSS Automated fallback projects up to 48 stock-funded legs from either direction', async () => {
+  const capacity = 201_428;
+  const legs = makeTwoLegRoute({ amount: capacity });
+  let stock = 16_754_612;
+  const { buildAutomatedTravelForecast } = loadFunctions([
+    'buildAutomatedTravelForecast', 'getAutomatedCssTravelMode', 'planAutomatedTravelModes',
+    'cloneAutomatedInventory', 'applyAutomatedProductionEvents', 'getAutomatedRequiredManifest',
+    'canWithdrawAutomatedManifest', 'adjustAutomatedInventoryForManifest',
+    'compressAutomatedTravelPlan', 'planTransportCargoUnload',
+  ], {
+    getAutomatedRouteLeg: (_fleet, leg) => leg,
+    getStarbaseNameFromCoords: (_x, y) => y === -39 ? 'MUD-1' : 'MUD-PHANTOM',
+    readAutomatedRouteInventory: async () => ({ '0,-39': { ore: stock }, '0,-24': {} }),
+    collectAutomatedCraftingProductionEvents: async () => [],
+    collectAutomatedMiningProductionEvents: async () => [],
+    collectAutomatedEstimatedCraftingProductionEvents: async () => [],
+    globalSettings: {},
+    sageGameAcct: { account: { mints: { ammo: 'ammo' } } },
+  });
+
+  legs[0] = { ...legs[0], source: '0,-39', destination: '0,-24' };
+  legs[1] = { ...legs[1], source: '0,-24', destination: '0,-39' };
+  const fleet = { cargoCapacity: capacity };
+  const loadedCargo = [{ mint: 'ore', amount: capacity }];
+  for (const [legIndex, cargo] of [[0, loadedCargo], [1, []]]) {
+    const plan = await buildAutomatedTravelForecast(fleet, legs, legIndex, cargo);
+    assert.equal(plan.summary, '48w');
+    assert.equal(plan.completedLegs, 48);
+    assert.equal(plan.estimated, false);
+  }
+
+  stock = 10 * capacity;
+  const limited = await buildAutomatedTravelForecast(fleet, legs, 0, loadedCargo);
+  assert.equal(limited.summary, '2w20sw');
+  assert.equal(limited.completedLegs, 22);
+  assert.equal(limited.reason, 'inventory_horizon');
+});
+
 test('Automated planner warps while stock covers future pickups, then subwarps to bridge production', () => {
   const { planAutomatedTravelModes, compressAutomatedTravelPlan } = loadFunctions([
     'cloneAutomatedInventory',

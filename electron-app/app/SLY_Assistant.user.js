@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-320
+// @aephia-version 0.7.35-321
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -12637,7 +12637,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		for(let step = 0; step < horizonLegs; step++) {
 			const legIndex = (currentLegIndex + step) % legs.length;
 			const leg = legs[legIndex] || {};
-			const modes = step === 0 && ['warp', 'subwarp'].includes(input.firstMoveType) ? [input.firstMoveType] : ['warp', 'subwarp'];
+			const departureModes = step === 0 && ['warp', 'subwarp'].includes(input.firstMoveType) ? [input.firstMoveType] : ['warp', 'subwarp'];
 			const nextStates = [];
 			for(const state of states) {
 				let prepared = applyAutomatedProductionEvents(state.inventory, input.productionEvents, state.appliedEventIds, state.timeMs);
@@ -12652,7 +12652,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					departureInventory = adjustAutomatedInventoryForManifest(departureInventory, leg.source, carriedManifest, -1);
 				}
 
-				for(const mode of modes) {
+				const stockMode = input.getStockTravelMode?.(legIndex, departureInventory);
+				for(const mode of stockMode ? [stockMode] : departureModes) {
 					const durationMs = Math.max(1, Number(mode === 'warp' ? leg.warpMs : leg.subwarpMs) || 1);
 					const arrivalMs = state.timeMs + durationMs;
 					const arrived = applyAutomatedProductionEvents(departureInventory, input.productionEvents, prepared.appliedEventIds, arrivalMs);
@@ -13091,17 +13092,28 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const covered = new Set(directEvents.map(event => String(event.location) + ':' + String(event.res)));
 		const estimatedEvents = (await collectAutomatedEstimatedCraftingProductionEvents(legs, inventory, nowMs)).filter(event => !covered.has(String(event.location) + ':' + String(event.res)));
 		const productionEvents = directEvents.concat(estimatedEvents);
-		const currentLeg = legs[Math.max(0, Number(currentLegIndex || 0)) % legs.length];
+		const legIndex = Math.max(0, Math.floor(Number(currentLegIndex || 0))) % legs.length;
+		const currentLeg = legs[legIndex];
+		let getStockTravelMode;
 		if(!productionEvents.length) {
-			const [sourceX, sourceY] = String(currentLeg.source || '').split(',').map(Number);
-			const cssMode = typeof getAutomatedCssTravelMode === 'function' ? getAutomatedCssTravelMode({
-				sourceStarbaseName: typeof getStarbaseNameFromCoords === 'function' ? getStarbaseNameFromCoords(sourceX, sourceY) : '',
-				inventory: inventory[currentLeg.source] || {},
-				requiredAsset: getAutomatedRequiredManifest(currentLeg.manifest)[0],
-				cargoCapacity: fleet.cargoCapacity
-			}) : null;
-			if(cssMode) return { modes: [cssMode], summary: compressAutomatedTravelPlan([cssMode]), completedLegs: 1, reason: 'css_inventory_threshold', productionEvents: [] };
-			return { modes: [], summary: '', completedLegs: 0, reason: 'awaiting_final_output', productionEvents: [] };
+			if(typeof getStarbaseNameFromCoords === 'function') {
+				const pickups = legs.map(leg => ({
+					source: leg.source,
+					sourceStarbaseName: getStarbaseNameFromCoords(...leg.source.split(',').map(Number)),
+					requiredAsset: getAutomatedRequiredManifest(leg.manifest)[0],
+					cargoCapacity: fleet.cargoCapacity
+				}));
+				getStockTravelMode = (index, balances) => {
+					// A return leg uses the stock at the next CSS pickup on its route.
+					for(let offset = 0; offset < pickups.length; offset++) {
+						const pickup = pickups[(index + offset) % pickups.length];
+						const mode = getAutomatedCssTravelMode({...pickup, inventory: balances[pickup.source]});
+						if(mode) return mode;
+					}
+					return null;
+				};
+			}
+			if(!getStockTravelMode?.(legIndex, inventory)) return { modes: [], summary: '', completedLegs: 0, reason: 'awaiting_final_output', productionEvents: [] };
 		}
 		const loadedAmounts = Object.create(null);
 		for(const { mint, amount } of loadedCargo || []) {
@@ -13115,7 +13127,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			.filter(entry => checkedMints.has(entry.res))
 			.map(({ res, amount }) => ({ res, amt: amount + (res === ammoMint ? unloadPlan.ammoToUnload : 0), cargoTotal: true }))
 			.filter(entry => entry.amt > 0);
-		const plannerInput = { nowMs, legs, currentLegIndex, currentLegLoaded: true, currentLoadedManifest, inventory, productionEvents, horizonLegs: 48 };
+		const plannerInput = { nowMs, legs, currentLegIndex: legIndex, currentLegLoaded: true, currentLoadedManifest, inventory, productionEvents, horizonLegs: 48, getStockTravelMode };
 		const runway = estimatedEvents.length > 0
 			? planAutomatedStockRunway({...plannerInput, targetAtMs: Math.min(...estimatedEvents.map(event => Number(event.atMs || nowMs))), horizonLegs: 96})
 			: null;
@@ -17011,7 +17023,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-320', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-321', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
