@@ -31,13 +31,17 @@ function readFunctionSource(name, sourcePath = 'SLY_Assistant.user.js') {
 function loadFunctions(names, globals = {}) {
   const dependencies = [];
   if (names.includes('buildAutomatedTravelForecast')) {
-    dependencies.push('getAutomatedLoadedManifest', 'getAutomatedCssStockSelector');
+    dependencies.push('getAutomatedLoadedManifest', 'getAutomatedCssStockSelector', 'explainSharedAutomatedSubwarp');
   }
-  if (names.includes('resolveAutomatedTravelMode')) dependencies.push('getTransportCoordKey');
+  if (names.includes('planAutomatedTravelModes') || names.includes('planSharedAutomatedTravel')) {
+    dependencies.push('getAutomatedPickupShortfall');
+  }
+  if (names.includes('resolveAutomatedTravelMode')) dependencies.push('getTransportCoordKey', 'logAutomatedSubwarpDecision');
   names = [...new Set([...names, ...dependencies])];
   const context = vm.createContext({
     automatedTravelForecastQueue: Promise.resolve(),
     collectSharedAutomatedFleets: async () => [],
+    getAccountInfo: async () => null,
     ...globals,
   });
   vm.runInContext(`${names.map(name => readFunctionSource(name)).join('\n')}; this.out = { ${names.join(', ')} };`, context);
@@ -119,19 +123,48 @@ test('two fleets stagger their returns to use separate production batches', () =
   assert.deepEqual(Array.from(plans, plan => plan.summary).sort(), ['1sw1w', '2w']);
 });
 
+test('a shared Subwarp reports the fleet and pickup that would go short if it Warped', () => {
+  const { planSharedAutomatedTravel, explainSharedAutomatedSubwarp } = loadFunctions([
+    ...sharedPlannerFunctions, 'explainSharedAutomatedSubwarp',
+  ]);
+  const legs = makeTwoLegRoute();
+  const fleets = ['first', 'second'].map(label => makeSharedFleet(legs, { fleet: { label } }));
+  const events = [
+    { id: 'mine', location: 'A', res: 'ore', amount: 10, atMs: 5 },
+    { id: 'craft', location: 'A', res: 'ore', amount: 10, atMs: 25 },
+  ];
+  const plans = planSharedAutomatedTravel(fleets, {}, events, 0);
+  const index = plans.findIndex(plan => plan.firstSubwarp);
+  assert.ok(index >= 0);
+  const decision = explainSharedAutomatedSubwarp(fleets, plans, index, {}, events, 0);
+  assert.equal(decision.leg, 1);
+  assert.equal(decision.shortfall.fleetLabel, 'second');
+  assert.equal(decision.shortfall.location, 'A');
+  assert.equal(decision.shortfall.atMs, 10);
+  assert.equal(decision.shortfall.requirements[0].available, 0);
+  assert.equal(decision.shortfall.requirements[0].required, 10);
+  assert.equal(decision.shortfall.replenishment.atMs, 25);
+});
+
 test('an in-flight fleet credits only its observed cargo and only at its arrival', () => {
-  const { planSharedAutomatedTravel } = loadFunctions(sharedPlannerFunctions);
+  const { planSharedAutomatedTravel, explainSharedAutomatedSubwarp } = loadFunctions([
+    ...sharedPlannerFunctions, 'explainSharedAutomatedSubwarp',
+  ]);
   const deliveryLegs = makeTwoLegRoute();
   const consumerLegs = [...deliveryLegs].reverse().map((leg, index) => ({
     ...leg,
     manifest: index ? [] : [{ res: 'ore', amt: 10, cargoTotal: true }],
   }));
-  const consumer = makeSharedFleet(consumerLegs);
+  const consumer = makeSharedFleet(consumerLegs, { fleet: { label: 'consumer' } });
   const delivery = makeSharedFleet(deliveryLegs, {
+    fleet: { label: 'delivery' },
     legIndex: 0, atMs: 20, modes: ['warp'], arriving: true, cargo: [{ res: 'ore', amt: 10, cargoTotal: true }],
   });
   const plans = planSharedAutomatedTravel([consumer, delivery], {}, [], 0, 2);
   assert.equal(plans[0].summary, '1sw1w');
+  const decision = explainSharedAutomatedSubwarp([consumer, delivery], plans, 0, {}, [], 0);
+  assert.equal(decision.shortfall.replenishment.atMs, 20);
+  assert.equal(decision.shortfall.replenishment.source, 'fleet delivery');
   delivery.cargo[0].amt = 9;
   const short = planSharedAutomatedTravel([consumer, delivery], {}, [], 0, 2);
   assert.equal(short[0].completedLegs, 1);
@@ -522,7 +555,7 @@ test('Automated keeps Warp through a missing mining ETA only when stock covers t
   assert.equal(await resolveAutomatedTravelMode(fleet, legs[1].manifest, context), 'subwarp');
 });
 
-test('estimated final-craft ETA forecasts up to 48 legs using the estimated output and the runway departure mode', async () => {
+test('estimated final-craft ETA puts the Subwarp bridge after stock-funded Warp legs', async () => {
   const route = makeTwoLegRoute({ warpMs: 10, subwarpMs: 30, amount: 10 });
   let eta = 95;
   let batch = 300;
@@ -534,7 +567,6 @@ test('estimated final-craft ETA forecasts up to 48 legs using the estimated outp
     'adjustAutomatedInventoryForManifest',
     'compressAutomatedTravelPlan',
     'planAutomatedTravelModes',
-    'planAutomatedStockRunway',
     'buildAutomatedTravelForecast',
     'planTransportCargoUnload',
   ], {
@@ -552,7 +584,7 @@ test('estimated final-craft ETA forecasts up to 48 legs using the estimated outp
 
   assert.equal(plan.estimated, true);
   assert.equal(plan.modes.length, 48);
-  assert.equal(plan.summary, '1sw4w1sw42w');
+  assert.equal(plan.summary, '4w2sw42w');
 
   eta = 60;
   const stocked = await buildAutomatedTravelForecast({}, route, 0, [{ mint: 'ore', amount: 10 }]);
@@ -562,6 +594,72 @@ test('estimated final-craft ETA forecasts up to 48 legs using the estimated outp
   const shortfall = await buildAutomatedTravelForecast({}, route, 0, [{ mint: 'ore', amount: 10 }]);
   assert.equal(shortfall.summary, '8w');
   assert.equal(shortfall.reason, 'inventory_horizon');
+});
+
+test('estimated production keeps 48w for the observed MUD and ONI stock examples', async () => {
+  const { buildAutomatedTravelForecast } = loadFunctions([
+    ...sharedPlannerFunctions, 'buildAutomatedTravelForecast', 'planAutomatedTravelModes', 'planTransportCargoUnload',
+  ], {
+    Date: { now: () => 0 },
+    globalSettings: {},
+    sageGameAcct: { account: { mints: { ammo: 'ammo' } } },
+    getAutomatedRouteLeg: (_fleet, leg) => leg,
+    readAutomatedRouteInventory: async ([leg]) => ({ A: { ore: leg.stock } }),
+    collectAutomatedCraftingProductionEvents: async () => [],
+    collectAutomatedMiningProductionEvents: async () => [],
+    collectAutomatedEstimatedCraftingProductionEvents: async ([leg]) => [
+      { id: 'estimate', atMs: leg.eta, location: 'A', res: 'ore', amount: 1_000_000, source: 'craft-estimate' },
+    ],
+  });
+  for (const example of [
+    { stock: 1_694_201, amount: 39_687, warpMs: 22_361, subwarpMs: 333_742, eta: 34 * 60_000 },
+    { stock: 10_854_322, amount: 50_017, warpMs: 67_083, subwarpMs: 1_427_278, eta: 120 * 60_000 },
+    { stock: 230, amount: 10, warpMs: 10, subwarpMs: 30, eta: 495 },
+  ]) {
+    const route = makeTwoLegRoute(example);
+    Object.assign(route[0], { stock: example.stock, eta: example.eta });
+    const plan = await buildAutomatedTravelForecast({}, route, 0, [{ mint: 'ore', amount: example.amount }]);
+    assert.equal(plan.summary, example.stock === 230 ? '47w1sw' : '48w');
+    assert.equal(plan.completedLegs, 48);
+    assert.equal(plan.estimated, true);
+  }
+});
+
+test('the last safe Warp depends on the next pickup and the remaining warp cooldown', () => {
+  const { planAutomatedTravelModes } = loadFunctions([...sharedPlannerFunctions, 'planAutomatedTravelModes']);
+  const input = { legs: makeTwoLegRoute(), inventory: { A: { ore: 0 } }, currentLegLoaded: true, horizonLegs: 4 };
+  const forecast = (atMs, extra = {}) => planAutomatedTravelModes({
+    ...input, ...extra, productionEvents: [{ id: 'craft', res: 'ore', amount: 100, location: 'A', atMs }],
+  });
+  assert.equal(forecast(20).summary, '4w');
+  const later = forecast(35);
+  assert.equal(later.summary, '1w1sw2w');
+  assert.equal(later.firstSubwarp.leg, 2);
+  assert.equal(later.firstSubwarp.shortfall.atMs, 20);
+  assert.equal(later.firstSubwarp.shortfall.replenishment.atMs, 35);
+  assert.equal(forecast(50).summary, '2sw2w');
+  assert.equal(forecast(70).summary, '2sw');
+  assert.equal(forecast(35, { warpReadyMs: 15 }).summary, '4w');
+});
+
+test('Subwarp logs the decision leg, required stock, and the relevant replenishment ETA', () => {
+  const logs = [];
+  const { logAutomatedSubwarpDecision, getAutomatedPickupShortfall } = loadFunctions([
+    'logAutomatedSubwarpDecision', 'getAutomatedPickupShortfall', 'getAutomatedRequiredManifest',
+  ], {
+    FleetTimeStamp: label => label,
+    cargoItems: [{ token: 'ore', name: 'Copper Ore' }],
+    cLog: (_level, message) => logs.push(message),
+  });
+  const events = [
+    { id: 'irrelevant', res: 'ore', amount: 100, location: 'B', atMs: 25 },
+    { id: 'mine', res: 'ore', amount: 3, location: 'A', atMs: 30 },
+    { id: 'mine', res: 'ore', amount: 3, location: 'A', atMs: 35 },
+    { id: 'craft', res: 'ore', amount: 4, location: 'A', atMs: 50, source: 'craft-estimate' },
+  ];
+  const shortfall = getAutomatedPickupShortfall({ A: { ore: 3 } }, makeTwoLegRoute()[0], 20, events);
+  logAutomatedSubwarpDecision({ label: 'Phantom' }, { leg: 48, shortfall });
+  assert.match(logs[0], /Phantom Automated Subwarp leg 48.*pickup A.*Copper Ore 3\/10.*replenishment ETA 1970-01-01T00:00:00\.050Z \(craft-estimate\)/);
 });
 
 test('Automated forecast starts when a direct final-output event is visible', async () => {
@@ -698,125 +796,6 @@ test('future Automated manifests convert cargo capacity to weighted token amount
   );
 
   assert.equal(leg.manifest[0].requiredAmount, 50);
-});
-
-test('estimated stock runway aligns the last current-stock cargo arrival immediately after craft completion', () => {
-  const { planAutomatedStockRunway } = loadFunctions([
-    'cloneAutomatedInventory',
-    'getAutomatedRequiredManifest',
-    'canWithdrawAutomatedManifest',
-    'adjustAutomatedInventoryForManifest',
-    'compressAutomatedTravelPlan',
-    'planAutomatedStockRunway',
-  ]);
-  const plan = planAutomatedStockRunway({
-    nowMs: 0,
-    targetAtMs: 100,
-    legs: makeTwoLegRoute({ warpMs: 10, subwarpMs: 30, amount: 10 }),
-    currentLegIndex: 0,
-    currentLegLoaded: true,
-    currentLoadedManifest: [{ res: 'ore', amt: 10, cargoTotal: true }],
-    inventory: { A: { ore: 20 }, B: {} },
-  });
-
-  // Current loaded cargo plus two stock-funded loads: five legs through the last
-  // cargo arrival. 50ms all-Warp + three 20ms slowdowns = 110ms, the closest
-  // reachable arrival at or after the 100ms craft ETA.
-  assert.equal(plan.lastCargoArrivalMs, 110);
-  assert.equal(plan.modes.length, 5);
-  assert.equal(plan.modes.filter(mode => mode === 'subwarp').length, 3);
-  assert.equal(plan.modes[0], 'subwarp');
-});
-
-test('estimated stock runway keeps all Warp when its earliest last cargo arrival is already after craft completion', () => {
-  const { planAutomatedStockRunway } = loadFunctions([
-    'cloneAutomatedInventory',
-    'getAutomatedRequiredManifest',
-    'canWithdrawAutomatedManifest',
-    'adjustAutomatedInventoryForManifest',
-    'compressAutomatedTravelPlan',
-    'planAutomatedStockRunway',
-  ]);
-  const plan = planAutomatedStockRunway({
-    nowMs: 0,
-    targetAtMs: 40,
-    legs: makeTwoLegRoute({ warpMs: 10, subwarpMs: 30, amount: 10 }),
-    currentLegIndex: 0,
-    currentLegLoaded: true,
-    currentLoadedManifest: [{ res: 'ore', amt: 10, cargoTotal: true }],
-    inventory: { A: { ore: 20 }, B: {} },
-  });
-
-  assert.equal(plan.lastCargoArrivalMs, 50);
-  assert.deepEqual(Array.from(plan.modes), ['warp', 'warp', 'warp', 'warp', 'warp']);
-});
-
-test('estimated stock runway keeps Warp when the craft completes before the next unfunded pickup', () => {
-  const { planAutomatedStockRunway } = loadFunctions([
-    'cloneAutomatedInventory',
-    'getAutomatedRequiredManifest',
-    'canWithdrawAutomatedManifest',
-    'adjustAutomatedInventoryForManifest',
-    'compressAutomatedTravelPlan',
-    'planAutomatedStockRunway',
-  ]);
-  const input = {
-    nowMs: 0,
-    legs: makeTwoLegRoute(),
-    currentLoadedManifest: [{ res: 'ore', amt: 10, cargoTotal: true }],
-    inventory: { A: { ore: 20 }, B: {} },
-  };
-
-  // The last stocked load arrives at 50ms, and the next pickup is at 60ms.
-  for (const targetAtMs of [55, 60]) {
-    const plan = planAutomatedStockRunway({ ...input, targetAtMs });
-    assert.equal(plan.lastCargoArrivalMs, 50);
-    assert.deepEqual(Array.from(plan.modes), ['warp', 'warp', 'warp', 'warp', 'warp']);
-  }
-
-  const shortfall = planAutomatedStockRunway({ ...input, targetAtMs: 61 });
-  assert.equal(shortfall.modes[0], 'subwarp');
-
-  const laterCraft = planAutomatedStockRunway({
-    ...input,
-    targetAtMs: 85,
-    legs: [
-      input.legs[0],
-      { ...input.legs[1], destination: 'C', manifest: [{ res: 'polymer', amt: 10, cargoTotal: true }] },
-      { ...input.legs[1], source: 'C' },
-    ],
-    inventory: { A: { ore: 20 }, B: { polymer: 30 } },
-    productionEvents: [
-      { source: 'craft-estimate', atMs: 85, location: 'B', res: 'polymer', amount: 10 },
-      { source: 'craft-estimate', atMs: 95, location: 'A', res: 'ore', amount: 10 },
-    ],
-  });
-  // The ore pickup at 90ms still needs to wait for the ore craft at 95ms.
-  assert.equal(laterCraft.modes[0], 'subwarp');
-});
-
-test('estimated stock runway uses the latest possible arrival when even all Subwarp is too early', () => {
-  const { planAutomatedStockRunway } = loadFunctions([
-    'cloneAutomatedInventory',
-    'getAutomatedRequiredManifest',
-    'canWithdrawAutomatedManifest',
-    'adjustAutomatedInventoryForManifest',
-    'compressAutomatedTravelPlan',
-    'planAutomatedStockRunway',
-  ]);
-  const plan = planAutomatedStockRunway({
-    nowMs: 0,
-    targetAtMs: 200,
-    legs: makeTwoLegRoute({ warpMs: 10, subwarpMs: 30, amount: 10 }),
-    currentLegIndex: 0,
-    currentLegLoaded: true,
-    currentLoadedManifest: [{ res: 'ore', amt: 10, cargoTotal: true }],
-    inventory: { A: { ore: 20 }, B: {} },
-  });
-
-  assert.equal(plan.reason, 'runway_shortfall');
-  assert.equal(plan.lastCargoArrivalMs, 150);
-  assert.deepEqual(Array.from(plan.modes), ['subwarp', 'subwarp', 'subwarp', 'subwarp', 'subwarp']);
 });
 
 test('Automated falls back to conservative Subwarp and a dash when the forecast fails', async () => {

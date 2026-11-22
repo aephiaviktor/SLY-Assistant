@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-324
+// @aephia-version 0.7.35-325
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -12588,6 +12588,28 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return required.length < 1 || required.some(entry => Number(balances[entry.res] || 0) >= entry.amount);
 	}
 
+	function getAutomatedPickupShortfall(inventory, leg, atMs, productionEvents, appliedEventIds) {
+		const balances = inventory[leg.source] || {};
+		const requirements = getAutomatedRequiredManifest(leg.manifest).map(entry => ({
+			res: entry.res, required: entry.amount, available: Number(balances[entry.res] || 0)
+		}));
+		const projected = Object.fromEntries(requirements.map(entry => [entry.res, entry.available]));
+		const seen = new Set(appliedEventIds);
+		const upcoming = productionEvents.filter(event => event.location === leg.source && event.atMs > atMs
+			&& Object.hasOwn(projected, event.res)).sort((a, b) => a.atMs - b.atMs);
+		let replenishment = null;
+		for(const event of upcoming) {
+			if(event.id && seen.has(String(event.id))) continue;
+			if(event.id) seen.add(String(event.id));
+			projected[event.res] += Math.max(0, Number(event.amount || 0));
+			if(requirements.some(entry => entry.res === event.res && projected[entry.res] >= entry.required)) {
+				replenishment = event;
+				break;
+			}
+		}
+		return {location: leg.source, atMs, requirements, replenishment};
+	}
+
 	function adjustAutomatedInventoryForManifest(inventory, location, manifest, direction) {
 		const next = cloneAutomatedInventory(inventory);
 		const key = String(location || '');
@@ -12627,7 +12649,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const horizonLegs = Math.max(1, Math.min(96, Math.floor(Number(input.horizonLegs || 32))));
 		const beamWidth = Math.max(8, Math.min(256, Math.floor(Number(input.beamWidth || 96))));
 		// Without scheduled replenishment, slowing down cannot change a pickup's stock.
-		const availableModes = input.productionEvents?.length ? ['warp', 'subwarp'] : ['warp'];
+		const productionEvents = input.productionEvents || [];
+		const availableModes = productionEvents.length ? ['warp', 'subwarp'] : ['warp'];
 		const comparePlans = (a, b) => b.warpCount - a.warpCount || a.modeOrder.localeCompare(b.modeOrder) || a.timeMs - b.timeMs;
 		let states = [{
 			timeMs: nowMs,
@@ -12635,48 +12658,65 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			appliedEventIds: new Set(),
 			modes: [],
 			modeOrder: '',
-			warpCount: 0
+			warpCount: 0,
+			warpReadyMs: input.warpReadyMs || 0
 		}];
 		let best = states[0];
+		let warpShortfall = null;
 
 		for(let step = 0; step < horizonLegs; step++) {
 			const legIndex = (currentLegIndex + step) % legs.length;
 			const leg = legs[legIndex] || {};
-			const departureModes = step === 0 && ['warp', 'subwarp'].includes(input.firstMoveType) ? [input.firstMoveType] : availableModes;
 			const nextStates = new Map();
+			let bestBlocked = null;
 			for(const state of states) {
-				let prepared = applyAutomatedProductionEvents(state.inventory, input.productionEvents, state.appliedEventIds, state.timeMs);
+				const prepared = applyAutomatedProductionEvents(state.inventory, productionEvents, state.appliedEventIds, state.timeMs);
 				let departureInventory = prepared.inventory;
 				let carriedManifest = leg.manifest || [];
 				if(step === 0 && input.currentLegLoaded !== false) {
 					if(Array.isArray(input.currentLoadedManifest)) carriedManifest = input.currentLoadedManifest;
 				} else {
-					if(!canWithdrawAutomatedManifest(departureInventory, leg.source, leg.manifest)) continue;
+					if(!canWithdrawAutomatedManifest(departureInventory, leg.source, leg.manifest)) {
+						const shortfall = getAutomatedPickupShortfall(departureInventory, leg, state.timeMs, productionEvents, prepared.appliedEventIds);
+						if(!warpShortfall && state.warpCount === state.modes.length) warpShortfall = shortfall;
+						const waitMs = shortfall.replenishment ? shortfall.replenishment.atMs - state.timeMs : Infinity;
+						if(!bestBlocked || waitMs < bestBlocked.waitMs || (waitMs === bestBlocked.waitMs && comparePlans(state, bestBlocked) < 0)) {
+							bestBlocked = {...state, shortfall, waitMs};
+						}
+						continue;
+					}
 					const balances = departureInventory[String(leg.source || '')] || {};
 					carriedManifest = (leg.manifest || []).filter(entry => !entry?.cargoTotal || Number(balances[entry.res] || 0) >= Number(entry.requiredAmount !== undefined ? entry.requiredAmount : entry.amt || 0));
 					departureInventory = adjustAutomatedInventoryForManifest(departureInventory, leg.source, carriedManifest, -1);
 				}
 
-				const stockMode = input.getStockTravelMode?.(legIndex, departureInventory);
-				for(const mode of stockMode ? [stockMode] : departureModes) {
+				const stockChoice = input.getStockTravelMode?.(legIndex, departureInventory);
+				for(const mode of stockChoice ? [stockChoice.mode] : availableModes) {
 					const durationMs = Math.max(1, Number(mode === 'warp' ? leg.warpMs : leg.subwarpMs) || 1);
-					const arrivalMs = state.timeMs + durationMs;
-					const arrived = applyAutomatedProductionEvents(departureInventory, input.productionEvents, prepared.appliedEventIds, arrivalMs);
+					const startMs = mode === 'warp' ? Math.max(state.timeMs, state.warpReadyMs) : state.timeMs;
+					const arrivalMs = startMs + durationMs;
+					const warpReadyMs = mode === 'warp' ? arrivalMs + (leg.warpRecoveryMs || 0) : state.warpReadyMs;
+					const arrived = applyAutomatedProductionEvents(departureInventory, productionEvents, prepared.appliedEventIds, arrivalMs);
 					const arrivalInventory = adjustAutomatedInventoryForManifest(arrived.inventory, leg.destination, carriedManifest, 1);
 					const next = {
 						timeMs: arrivalMs,
 						inventory: arrivalInventory,
 						appliedEventIds: arrived.appliedEventIds,
+						warpReadyMs,
 						modes: state.modes.concat(mode),
 						modeOrder: state.modeOrder + (mode === 'warp' ? '0' : '1'),
-						warpCount: state.warpCount + (mode === 'warp' ? 1 : 0)
+						warpCount: state.warpCount + (mode === 'warp' ? 1 : 0),
+						firstSubwarp: state.firstSubwarp || (mode === 'subwarp' ? {leg: step + 1, stock: stockChoice?.stock} : null)
 					};
-					const key = JSON.stringify([arrivalMs, arrivalInventory, [...arrived.appliedEventIds].sort()]);
+					const key = JSON.stringify([arrivalMs, warpReadyMs, arrivalInventory, [...arrived.appliedEventIds].sort()]);
 					const existing = nextStates.get(key);
 					if(!existing || comparePlans(next, existing) < 0) nextStates.set(key, next);
 				}
 			}
-			if(!nextStates.size) break;
+			if(!nextStates.size) {
+				best = bestBlocked || best;
+				break;
+			}
 			const ranked = [...nextStates.values()].sort(comparePlans);
 			best = ranked[0];
 			states = ranked.slice(0, beamWidth);
@@ -12697,6 +12737,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			completedLegs: best.modes.length,
 			projectedEndMs: best.timeMs,
 			warpCount: best.warpCount,
+			shortfall: best.shortfall,
+			firstSubwarp: best.firstSubwarp && {...best.firstSubwarp, shortfall: warpShortfall},
 			reason: best.modes.length === horizonLegs ? 'forecast_complete' : 'inventory_horizon'
 		};
 	}
@@ -12993,104 +13035,6 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return events;
 	}
 
-	function planAutomatedStockRunway(input) {
-		input = input || {};
-		const legs = Array.isArray(input.legs) ? input.legs.filter(Boolean) : [];
-		if(!legs.length) return { modes: [], summary: '', completedLegs: 0, reason: 'no_legs' };
-		const nowMs = Math.max(0, Number(input.nowMs || 0));
-		const targetAtMs = Math.max(nowMs, Number(input.targetAtMs || nowMs));
-		const currentLegIndex = Math.max(0, Math.floor(Number(input.currentLegIndex || 0))) % legs.length;
-		const horizonLegs = Math.max(1, Math.min(192, Math.floor(Number(input.horizonLegs || 96))));
-		let states = [{
-			timeMs: nowMs,
-			inventory: cloneAutomatedInventory(input.inventory),
-			modes: [],
-			warpCount: 0,
-			lastCargoArrivalMs: 0,
-			lastCargoModeCount: 0,
-			stockFundedCargoLegs: 0
-		}];
-		const terminalStates = [];
-
-		for(let step = 0; step < horizonLegs && states.length; step++) {
-			const legIndex = (currentLegIndex + step) % legs.length;
-			const leg = legs[legIndex] || {};
-			const nextByKey = new Map();
-			for(const state of states) {
-				let departureInventory = state.inventory;
-				let carriedManifest = leg.manifest || [];
-				let stockFundedCargo = false;
-				if(step === 0 && input.currentLegLoaded !== false) {
-					if(Array.isArray(input.currentLoadedManifest)) carriedManifest = input.currentLoadedManifest;
-				} else {
-					const required = getAutomatedRequiredManifest(leg.manifest);
-					if(required.length > 0 && !canWithdrawAutomatedManifest(departureInventory, leg.source, leg.manifest)) {
-						terminalStates.push(state);
-						continue;
-					}
-					const balances = departureInventory[String(leg.source || '')] || {};
-					carriedManifest = (leg.manifest || []).filter(entry => !entry?.cargoTotal || Number(balances[entry.res] || 0) >= Number(entry.requiredAmount !== undefined ? entry.requiredAmount : entry.amt || 0));
-					stockFundedCargo = getAutomatedRequiredManifest(carriedManifest).length > 0;
-					departureInventory = adjustAutomatedInventoryForManifest(departureInventory, leg.source, carriedManifest, -1);
-				}
-				const cargoBearing = getAutomatedRequiredManifest(carriedManifest).length > 0;
-				for(const mode of ['warp', 'subwarp']) {
-					const durationMs = Math.max(1, Number(mode === 'warp' ? leg.warpMs : leg.subwarpMs) || 1);
-					const arrivalMs = state.timeMs + durationMs;
-					const modes = state.modes.concat(mode);
-					const arrivalInventory = adjustAutomatedInventoryForManifest(departureInventory, leg.destination, carriedManifest, 1);
-					const next = {
-						timeMs: arrivalMs,
-						inventory: arrivalInventory,
-						modes,
-						warpCount: state.warpCount + (mode === 'warp' ? 1 : 0),
-						lastCargoArrivalMs: cargoBearing ? arrivalMs : state.lastCargoArrivalMs,
-						lastCargoModeCount: cargoBearing ? modes.length : state.lastCargoModeCount,
-						stockFundedCargoLegs: state.stockFundedCargoLegs + (stockFundedCargo ? 1 : 0)
-					};
-					const inventoryKey = JSON.stringify(arrivalInventory);
-					const key = [arrivalMs, next.lastCargoArrivalMs, next.lastCargoModeCount, next.stockFundedCargoLegs, inventoryKey].join('|');
-					const previous = nextByKey.get(key);
-					const slowEarly = value => value.modes.map(item => item === 'subwarp' ? '0' : '1').join('');
-					if(!previous || next.warpCount > previous.warpCount || (next.warpCount === previous.warpCount && slowEarly(next) < slowEarly(previous))) nextByKey.set(key, next);
-				}
-			}
-			states = Array.from(nextByKey.values());
-		}
-		if(!terminalStates.length) terminalStates.push(...states);
-		const candidates = terminalStates.filter(state => state.lastCargoArrivalMs > 0 && state.lastCargoModeCount > 0);
-		if(!candidates.length) return { modes: [], summary: '', completedLegs: 0, reason: 'no_stock_funded_cargo' };
-		const lastEstimatedAtMs = (input.productionEvents || []).reduce((latest, event) =>
-			event.source === 'craft-estimate' ? Math.max(latest, Number(event.atMs || 0)) : latest, targetAtMs);
-		// Stock is needed at pickup. The last delivery can arrive before the craft if the return reaches it after completion.
-		const allWarp = candidates.find(state => state.warpCount === state.modes.length && state.timeMs >= lastEstimatedAtMs);
-		const afterTarget = candidates.some(state => state.lastCargoArrivalMs >= targetAtMs);
-		const cargoModes = state => state.modes.slice(0, state.lastCargoModeCount);
-		const cargoWarps = state => cargoModes(state).filter(mode => mode === 'warp').length;
-		const slowEarly = state => cargoModes(state).map(mode => mode === 'subwarp' ? '0' : '1').join('');
-		if(!allWarp) candidates.sort((a, b) => {
-			if(afterTarget) {
-				const aAfter = a.lastCargoArrivalMs >= targetAtMs;
-				const bAfter = b.lastCargoArrivalMs >= targetAtMs;
-				if(aAfter !== bAfter) return aAfter ? -1 : 1;
-				if(aAfter && a.lastCargoArrivalMs !== b.lastCargoArrivalMs) return a.lastCargoArrivalMs - b.lastCargoArrivalMs;
-			} else if(a.lastCargoArrivalMs !== b.lastCargoArrivalMs) return b.lastCargoArrivalMs - a.lastCargoArrivalMs;
-			return cargoWarps(b) - cargoWarps(a) || slowEarly(a).localeCompare(slowEarly(b));
-		});
-		const best = allWarp || candidates[0];
-		const modes = best.modes.slice(0, best.lastCargoModeCount);
-		return {
-			modes,
-			summary: compressAutomatedTravelPlan(modes),
-			completedLegs: modes.length,
-			projectedEndMs: best.lastCargoArrivalMs,
-			lastCargoArrivalMs: best.lastCargoArrivalMs,
-			stockFundedCargoLegs: best.stockFundedCargoLegs,
-			warpCount: modes.filter(mode => mode === 'warp').length,
-			reason: allWarp ? 'warp_stock_covers_eta' : (best.lastCargoArrivalMs >= targetAtMs ? 'runway_aligned' : 'runway_shortfall')
-		};
-	}
-
 	function getAutomatedCssTravelMode(input) {
 		input = input || {};
 		const cssStarbases = new Set(['MUD-1', 'ONI-1', 'UST-1']);
@@ -13105,9 +13049,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	}
 
 	function planSharedAutomatedTravel(fleets, inventory, productionEvents, nowMs, horizonLegs = 48) {
-		let states = [{inventory, appliedEventIds: new Set(), fleets, completed: 0, warps: 0, shortfallMs: 0, timeMs: nowMs}];
+		let states = [{inventory, appliedEventIds: new Set(), fleets, completed: 0, warps: 0, modeOrder: '', shortfallMs: 0, timeMs: nowMs}];
 		let best;
-		const compare = (a, b) => b.completed - a.completed || a.shortfallMs - b.shortfallMs || b.warps - a.warps || a.timeMs - b.timeMs;
+		const compare = (a, b) => b.completed - a.completed || a.shortfallMs - b.shortfallMs || b.warps - a.warps
+			|| a.modeOrder.localeCompare(b.modeOrder) || a.timeMs - b.timeMs;
 		const pickups = new Set(fleets.flatMap(fleet => fleet.legs.flatMap(leg =>
 			getAutomatedRequiredManifest(leg.manifest).map(entry => leg.source + ':' + entry.res))));
 		const hasDelivery = fleets.some(fleet => fleet.legs.some(leg =>
@@ -13138,6 +13083,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					const next = {
 						inventory: balances, appliedEventIds: prepared.appliedEventIds, fleets: nextFleets, timeMs: atMs,
 						completed: state.completed + (mode ? 1 : 0), warps: state.warps + (mode === 'warp' ? 1 : 0),
+						modeOrder: mode ? state.modeOrder + (mode === 'warp' ? '0' : '1') : state.modeOrder,
 						shortfallMs: state.shortfallMs + shortfallMs
 					};
 					const key = JSON.stringify([balances, [...prepared.appliedEventIds].sort(), nextFleets.map(item =>
@@ -13157,25 +13103,38 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				}
 				let balances = prepared.inventory;
 				let cargo = fleet.cargo;
+				if(cargo === null && !canWithdrawAutomatedManifest(balances, leg.source, leg.manifest)) {
+					const incoming = fleet.plannedModes ? state.fleets.flatMap(other =>
+						other.arriving && other.atMs > atMs && other.legs[other.legIndex].destination === leg.source
+							? getAutomatedRequiredManifest(other.cargo).map(entry => ({
+								atMs: other.atMs, location: leg.source, res: entry.res, amount: entry.amount, source: 'fleet delivery'
+							})) : []) : [];
+					const shortfall = getAutomatedPickupShortfall(balances, leg, atMs, productionEvents.concat(incoming), prepared.appliedEventIds);
+					save({...fleet, done: true, shortfall}, balances, null,
+						shortfall.replenishment ? shortfall.replenishment.atMs - atMs : 0);
+					continue;
+				}
+				if(fleet.plannedModes && fleet.modes.length >= fleet.plannedModes.length) {
+					save({...fleet, done: true}, balances);
+					continue;
+				}
 				if(cargo === null) {
-					if(!canWithdrawAutomatedManifest(balances, leg.source, leg.manifest)) {
-						const mints = new Set(getAutomatedRequiredManifest(leg.manifest).map(entry => entry.res));
-						const nextBatch = productionEvents.reduce((earliest, event) =>
-							event.atMs > atMs && event.location === leg.source && mints.has(event.res)
-								? Math.min(earliest, event.atMs) : earliest, Infinity);
-						save({...fleet, done: true}, balances, null, Number.isFinite(nextBatch) ? nextBatch - atMs : 0);
-						continue;
-					}
 					cargo = leg.manifest.filter(entry => entry?.cargoTotal && Number(balances[leg.source]?.[entry.res] || 0) >= Number(entry.requiredAmount ?? entry.amt ?? 0));
 					balances = adjustAutomatedInventoryForManifest(balances, leg.source, cargo, -1);
 				}
-				const fixedMode = fleet.fixedMode || leg.fixedMode || fleet.getStockTravelMode?.(fleet.legIndex, balances);
-				const modes = fixedMode ? [fixedMode] : availableModes;
+				const stockChoice = !fleet.fixedMode && !leg.fixedMode && fleet.getStockTravelMode?.(fleet.legIndex, balances);
+				const fixedMode = fleet.fixedMode || leg.fixedMode || stockChoice?.mode;
+				const plannedMode = fleet.plannedModes?.[fleet.modes.length];
+				const modes = fixedMode || plannedMode ? [fixedMode || plannedMode] : availableModes;
 				for(const mode of modes) {
 					const startMs = mode === 'warp' ? Math.max(atMs, fleet.warpReadyMs || 0) : atMs;
 					const arrivalMs = startMs + (mode === 'warp' ? leg.warpMs : leg.subwarpMs);
 					const warpReadyMs = mode === 'warp' ? arrivalMs + (leg.warpRecoveryMs || 0) : fleet.warpReadyMs;
-					save({...fleet, atMs: arrivalMs, warpReadyMs, arriving: true, cargo, fixedMode: null, modes: fleet.modes.concat(mode)}, balances, mode);
+					const firstSubwarp = fleet.firstSubwarp || (mode === 'subwarp' ? {
+						leg: fleet.modes.length + 1, stock: stockChoice?.stock, reason: leg.subwarpReason
+					} : null);
+					save({...fleet, atMs: arrivalMs, warpReadyMs, arriving: true, cargo, fixedMode: null, firstSubwarp,
+						modes: fleet.modes.concat(mode)}, balances, mode);
 				}
 			}
 			const ranked = [...nextStates.values()].sort(compare);
@@ -13187,7 +13146,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				states = [...new Set([...states, ...late])];
 			}
 		}
-		return best.fleets.map(({modes}) => ({modes, summary: compressAutomatedTravelPlan(modes), completedLegs: modes.length}));
+		return best.fleets.map(({modes, firstSubwarp, shortfall}) => ({
+			modes, summary: compressAutomatedTravelPlan(modes), completedLegs: modes.length, firstSubwarp, shortfall
+		}));
 	}
 
 	function getAutomatedCssStockSelector(fleet, legs) {
@@ -13203,10 +13164,30 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			for(let offset = 0; offset < pickups.length; offset++) {
 				const pickup = pickups[(index + offset) % pickups.length];
 				const mode = getAutomatedCssTravelMode({...pickup, inventory: balances[pickup.source]});
-				if(mode) return mode;
+				if(mode) return {mode, stock: {location: pickup.source, requirements: [{
+					res: pickup.requiredAsset.res, available: Number(balances[pickup.source]?.[pickup.requiredAsset.res] || 0),
+					required: 10 * pickup.cargoCapacity
+				}]}};
 			}
 			return null;
 		};
+	}
+
+	function explainSharedAutomatedSubwarp(participants, plans, index, inventory, productionEvents, nowMs) {
+		const decision = plans[index].firstSubwarp;
+		if(!decision || decision.reason || decision.stock) return decision;
+		// Try Warp on this leg with the other planned departures held constant.
+		const alternative = participants.map((participant, i) => {
+			const plannedModes = plans[i].modes.slice();
+			if(i === index) plannedModes[decision.leg - 1] = 'warp';
+			return {...participant, plannedModes};
+		});
+		const replay = planSharedAutomatedTravel(alternative, inventory, productionEvents, nowMs);
+		const dryPickups = replay.flatMap((plan, i) => plan.shortfall &&
+			(!plans[i].shortfall || plan.shortfall.atMs < plans[i].shortfall.atMs || plan.completedLegs < plans[i].completedLegs)
+			? [{...plan.shortfall, fleetLabel: participants[i].fleet.label}] : []);
+		dryPickups.sort((a, b) => a.atMs - b.atMs);
+		return {...decision, shortfall: dryPickups[0], reason: dryPickups.length ? undefined : 'shared schedule preference'};
 	}
 
 	async function getAutomatedLoadedManifest(fleet, leg, loadedCargo) {
@@ -13246,7 +13227,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const subwarpReserve = subwarpCost * (leg.roundTrip ? 2 : 1);
 			const fixedMode = fuel.effectiveMoveType === 'subwarp' || leg.configuredMode === 'subwarp' ? 'subwarp'
 				: (leg.configuredMode === 'automated' && subwarpReserve <= fleet.fuelCapacity ? null : 'warp');
-			return {...leg, fixedMode, blocked: (fixedMode === 'subwarp' ? subwarpReserve : fuel.fuelNeeded) > fleet.fuelCapacity};
+			const subwarpReason = leg.configuredMode === 'subwarp' ? 'configured route mode' : 'warp fuel reserve exceeds tank capacity';
+			return {...leg, fixedMode, subwarpReason: fixedMode === 'subwarp' ? subwarpReason : undefined,
+				blocked: (fixedMode === 'subwarp' ? subwarpReserve : fuel.fuelNeeded) > fleet.fuelCapacity};
 		});
 	}
 
@@ -13358,34 +13341,62 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			return select?.(atIndex, inventory) ? select : undefined;
 		};
 		const getStockTravelMode = stockSelector(fleet, legs, legIndex);
+		let warpReadyMs = 0;
+		if(peers.length || productionEvents.length) {
+			const account = await getAccountInfo(fleet.label, 'travel forecast warp cooldown', fleet.publicKey);
+			if(account) warpReadyMs = maybeBnToNumber(sageProgram.coder.accounts.decode('fleet', account.data).warpCooldownExpiresAt) * 1000;
+		}
 		if(peers.length) {
-			const account = await getAccountInfo(fleet.label, 'shared travel forecast', fleet.publicKey);
-			const warpReadyMs = account ? maybeBnToNumber(sageProgram.coder.accounts.decode('fleet', account.data).warpCooldownExpiresAt) * 1000 : 0;
 			const participants = [{fleet, legs, legIndex, atMs: nowMs, modes: [], cargo: currentLoadedManifest, warpReadyMs, getStockTravelMode},
 				...peers.map(peer => ({...peer, getStockTravelMode: stockSelector(peer.fleet, peer.legs, peer.legIndex)}))];
 			// Use the same tie order regardless of which fleet is refreshing its forecast.
 			participants.sort((a, b) => a.fleet.publicKey.toString().localeCompare(b.fleet.publicKey.toString()));
-			const shared = planSharedAutomatedTravel(participants.map(participant => ({
+			const routes = participants.map(participant => ({
 				...participant, legs: getSharedAutomatedRoute(participant.fleet, participant.legs)
-			})), inventory, productionEvents, nowMs);
+			}));
+			const shared = planSharedAutomatedTravel(routes, inventory, productionEvents, nowMs);
 			const index = participants.findIndex(participant => participant.fleet === fleet);
-			return {...shared[index], productionEvents, estimated: estimatedEvents.length > 0,
+			const subwarpDecision = i => explainSharedAutomatedSubwarp(routes, shared, i, inventory, productionEvents, nowMs);
+			return {...shared[index], firstSubwarp: subwarpDecision(index), productionEvents, estimated: estimatedEvents.length > 0,
 				sharedPlans: participants.flatMap((participant, i) => i !== index && participant.legs.some(leg => leg.configuredMode === 'automated')
-					? [{fleet: participant.fleet, modes: shared[i].modes}] : [])};
+					? [{fleet: participant.fleet, modes: shared[i].modes, firstSubwarp: subwarpDecision(i)}] : [])};
 		}
-		const plannerInput = { nowMs, legs, currentLegIndex: legIndex, currentLegLoaded: true, currentLoadedManifest, inventory, productionEvents, horizonLegs: 48, getStockTravelMode };
-		const runway = estimatedEvents.length > 0
-			? planAutomatedStockRunway({...plannerInput, targetAtMs: Math.min(...estimatedEvents.map(event => Number(event.atMs || nowMs))), horizonLegs: 96})
-			: null;
-		// Keep the runway's departure mode and credit the estimated batch when projecting later pickups.
-		const plan = planAutomatedTravelModes({...plannerInput, firstMoveType: runway?.modes[0]});
+		// Plan past the displayed legs when a later estimated batch may affect today's departure.
+		const displayLegs = 48;
+		const plan = planAutomatedTravelModes({nowMs, legs, currentLegIndex: legIndex, currentLegLoaded: true,
+			currentLoadedManifest, inventory, productionEvents, horizonLegs: estimatedEvents.length ? 96 : displayLegs,
+			getStockTravelMode, warpReadyMs});
 		if(!plan || !plan.modes.length) return null;
-		if(!productionEvents.length && !getStockTravelMode && plan.completedLegs < plannerInput.horizonLegs) {
-			return { modes: [], summary: '', completedLegs: 0, reason: 'awaiting_final_output', productionEvents: [] };
+		if(!productionEvents.length && !getStockTravelMode && plan.completedLegs < displayLegs) {
+			return {modes: [], summary: '', completedLegs: 0, reason: 'awaiting_final_output', productionEvents: [], shortfall: plan.shortfall};
 		}
+		if(plan.modes.length > displayLegs) {
+			plan.modes = plan.modes.slice(0, displayLegs);
+			plan.summary = compressAutomatedTravelPlan(plan.modes);
+			plan.completedLegs = plan.modes.length;
+			plan.reason = 'forecast_complete';
+		}
+		if(plan.firstSubwarp?.leg > displayLegs) plan.firstSubwarp = null;
 		plan.productionEvents = productionEvents;
 		plan.estimated = estimatedEvents.length > 0;
 		return plan;
+	}
+
+	function logAutomatedSubwarpDecision(fleet, decision) {
+		const stock = decision.stock || decision.shortfall;
+		const requirements = (stock?.requirements || []).map(entry =>
+			`${cargoItems.find(item => item.token === entry.res)?.name || entry.res} ${entry.available}/${entry.required}`);
+		const reason = decision.reason || (decision.stock ? 'CSS stock threshold' : stock ? 'projected pickup shortfall' : 'forecast schedule preference');
+		const details = [reason];
+		if(stock) {
+			const eta = stock.replenishment?.atMs;
+			const source = stock.replenishment?.source;
+			details.push(`pickup ${stock.location}` + (stock.fleetLabel ? ` (${stock.fleetLabel})` : ''),
+				`projected stock/required ${requirements.join(', ')}`,
+				`pickup ETA ${stock.atMs === undefined ? 'unavailable' : new Date(stock.atMs).toISOString()}`,
+				`replenishment ETA ${eta === undefined ? 'unavailable' : new Date(eta).toISOString()}` + (source ? ` (${source})` : ''));
+		}
+		cLog(1, `${FleetTimeStamp(fleet.label)} Automated Subwarp leg ${decision.leg || 1} | ${details.join(' | ')}`);
 	}
 
 	async function resolveAutomatedTravelMode(fleet, manifest, forecastContext = null) {
@@ -13433,13 +13444,18 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					updatePlan(fleet, plan.modes);
 					for(const peer of plan.sharedPlans || []) {
 						updatePlan(peer.fleet, peer.modes);
+						if(peer.firstSubwarp) logAutomatedSubwarpDecision(peer.fleet, peer.firstSubwarp);
 						updateAssistStatus(peer.fleet);
 					}
 					moveType = plan.modes[0];
 					const eventSummary = (plan.productionEvents || []).slice(0, 3).map(event => event.source + ':' + event.res + '@' + TimeToStr(new Date(event.atMs))).join(',');
 					cLog(1, `${FleetTimeStamp(fleet.label)} Automated forecast -> ${moveType == 'warp' ? 'Warp' : 'Subwarp'} | ${plan.summary} | production ${eventSummary || 'none'}`);
+					if(plan.firstSubwarp || moveType === 'subwarp') logAutomatedSubwarpDecision(fleet, plan.firstSubwarp || {shortfall: plan.shortfall});
 				} else if(plan?.reason === 'awaiting_final_output') {
 					moveType = 'subwarp';
+					logAutomatedSubwarpDecision(fleet, {reason: 'no replenishment ETA for the projected pickup shortfall', shortfall: plan.shortfall});
+				} else if(moveType === 'subwarp') {
+					logAutomatedSubwarpDecision(fleet, {reason: 'loaded cargo below the Warp threshold'});
 				}
 			};
 			const pending = automatedTravelForecastQueue.then(refreshForecast).catch(error => {
@@ -13450,6 +13466,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			});
 			automatedTravelForecastQueue = pending.catch(() => {});
 			await pending;
+		} else if(moveType === 'subwarp') {
+			logAutomatedSubwarpDecision(fleet, {reason: 'loaded cargo below the Warp threshold'});
 		}
 		cLog(1, `${FleetTimeStamp(fleet.label)} Automated Travel Mode -> ${moveType == 'warp' ? 'Warp' : 'Subwarp'} (loaded ${decision.loadedCargoVolume}/${decision.requiredVolume}, threshold ${decision.thresholdVolume})`);
 		updateAssistStatus(fleet);
@@ -17110,6 +17128,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					const fleetSavedData = await GM.getValue(fleetPK, '{}');
 					const fleetParsedData = JSON.parse(fleetSavedData);
 					const assignment = fleetParsedData.assignment;
+					if(fleetParsedData.moveType === 'automated' && userFleets[i].moveType === 'warp') {
+						const reason = shortSubwarp ? 'short-distance setting' : `available Warp fuel ${currentFuelCnt + currentCargoFuelCnt}/${warpCost}`;
+						logAutomatedSubwarpDecision(userFleets[i], {reason});
+					}
 					moveTime = calculateSubwarpTime(userFleets[i], moveDist);
 					const scanningMovementTime = calculateScanningMovementOpportunityCost(Date.now(), moveTime, userFleets[i].scanEnd);
 					userFleets[i].scanOptimizationMovementContext = {
@@ -17294,7 +17316,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-324', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-325', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -19751,7 +19773,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			fleet.automatedTravelPlan = [];
 			fleet.automatedTravelPlanEstimated = false;
 			fleet.automatedTravelPlanPending = false;
-			cLog(1, `${FleetTimeStamp(fleet.label)} Automated Travel Mode -> Subwarp (fuel capacity)`);
+			cLog(1, `${FleetTimeStamp(fleet.label)} Automated Travel Mode -> Subwarp (fuel capacity, tank ${fuelData.capacity}, Warp leg ${fuelData.warpCost}, Subwarp reserve ${fuelData.fuelNeeded})`);
 			return { ...fuelData, forcedMoveType: 'subwarp' };
 		}
 		return fuelData;
