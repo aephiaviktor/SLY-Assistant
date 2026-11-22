@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-323
+// @aephia-version 0.7.35-324
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -115,6 +115,7 @@
 	const transportLoadDiagnostics = new Map();
 	const transportLoadRetryTimers = new Map();
 	const fleetOperationInFlight = new Set();
+	let automatedTravelForecastQueue = Promise.resolve();
 	let craftTransactionInFlightCount = 0;
 	const settingsGmKey = 'globalSettings';
 	const UPGRADE_AUTOMATION_LOG_KEY = 'upgradeAutomationLog';
@@ -12738,8 +12739,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 	function getLegacyAutomatedRouteLegs(starbaseCoord, destCoord, targetManifest, starbaseManifest) {
 		return [
-			{ sourceCoord: starbaseCoord, destCoord, destinationManifest: targetManifest },
-			{ sourceCoord: destCoord, destCoord: starbaseCoord, destinationManifest: starbaseManifest }
+			{ sourceCoord: starbaseCoord, destCoord, destinationManifest: targetManifest, roundTrip: true },
+			{ sourceCoord: destCoord, destCoord: starbaseCoord, destinationManifest: starbaseManifest, roundTrip: false }
 		];
 	}
 
@@ -12749,6 +12750,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const distance = calculateMovementDistance(ConvertCoords(source), ConvertCoords(destination));
 		const maxWarpDistance = Math.max(0.01, Number(fleet.maxWarpDistance || 0) / 100);
 		const warpJumps = Math.max(1, Math.ceil(distance / maxWarpDistance));
+		const warpCooldown = Number(fleet.warpCooldown || 0);
+		const lastJumpDistance = Math.max(0, distance - (warpJumps - 1) * maxWarpDistance);
 		const manifest = cloneTransportManifest((leg && (leg.manifest || leg.destinationManifest)) || []);
 		const cargoCapacity = Math.max(0, Number(fleet.cargoCapacity || 0));
 		const cargoSizes = Object.fromEntries(cargoItems.map(item => [item.token, Math.max(1, Number(item.size || 1))]));
@@ -12766,7 +12769,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			source,
 			destination,
 			manifest,
-			warpMs: Math.max(1000, Math.ceil((calculateWarpTime(fleet, distance) + Math.max(0, warpJumps - 1) * Number(fleet.warpCooldown || 0)) * 1000)),
+			configuredMode: leg?.moveType || 'automated',
+			roundTrip: Boolean(leg?.roundTrip),
+			warpMs: Math.max(1000, Math.ceil((calculateWarpTime(fleet, distance) + (warpJumps - 1) * warpCooldown) * 1000)),
+			warpRecoveryMs: Math.max(0, Math.ceil((warpCooldown - calculateWarpTime(fleet, lastJumpDistance)) * 1000)),
 			subwarpMs: Math.max(1000, Math.ceil(calculateSubwarpTime(fleet, distance) * 1000))
 		};
 	}
@@ -13098,48 +13104,275 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return inventoryAmount < 10 * cargoCapacity ? 'subwarp' : 'warp';
 	}
 
-	async function buildAutomatedTravelForecast(fleet, routeLegs, currentLegIndex, loadedCargo = []) {
-		const legs = (routeLegs || []).map(leg => getAutomatedRouteLeg(fleet, leg)).filter(leg => leg.source && leg.destination);
-		if(!legs.length || !legs.some(leg => getAutomatedRequiredManifest(leg.manifest).length > 0)) return null;
-		const nowMs = Date.now();
-		const inventory = await readAutomatedRouteInventory(legs);
-		const directEvents = (await collectAutomatedCraftingProductionEvents(legs, nowMs)).concat(await collectAutomatedMiningProductionEvents(legs, nowMs));
-		const covered = new Set(directEvents.map(event => String(event.location) + ':' + String(event.res)));
-		const estimatedEvents = (await collectAutomatedEstimatedCraftingProductionEvents(legs, inventory, nowMs)).filter(event => !covered.has(String(event.location) + ':' + String(event.res)));
-		const productionEvents = directEvents.concat(estimatedEvents);
-		const legIndex = Math.max(0, Math.floor(Number(currentLegIndex || 0))) % legs.length;
-		const currentLeg = legs[legIndex];
-		let getStockTravelMode;
-		if(!productionEvents.length && typeof getStarbaseNameFromCoords === 'function') {
-			const pickups = legs.map(leg => ({
-				source: leg.source,
-				sourceStarbaseName: getStarbaseNameFromCoords(...leg.source.split(',').map(Number)),
-				requiredAsset: getAutomatedRequiredManifest(leg.manifest)[0],
-				cargoCapacity: fleet.cargoCapacity
-			}));
-			getStockTravelMode = (index, balances) => {
-				// A return leg uses the stock at the next CSS pickup on its route.
-				for(let offset = 0; offset < pickups.length; offset++) {
-					const pickup = pickups[(index + offset) % pickups.length];
-					const mode = getAutomatedCssTravelMode({...pickup, inventory: balances[pickup.source]});
-					if(mode) return mode;
+	function planSharedAutomatedTravel(fleets, inventory, productionEvents, nowMs, horizonLegs = 48) {
+		let states = [{inventory, appliedEventIds: new Set(), fleets, completed: 0, warps: 0, shortfallMs: 0, timeMs: nowMs}];
+		let best;
+		const compare = (a, b) => b.completed - a.completed || a.shortfallMs - b.shortfallMs || b.warps - a.warps || a.timeMs - b.timeMs;
+		const pickups = new Set(fleets.flatMap(fleet => fleet.legs.flatMap(leg =>
+			getAutomatedRequiredManifest(leg.manifest).map(entry => leg.source + ':' + entry.res))));
+		const hasDelivery = fleets.some(fleet => fleet.legs.some(leg =>
+			getAutomatedRequiredManifest(leg.manifest).some(entry => pickups.has(leg.destination + ':' + entry.res))));
+		const availableModes = productionEvents.length || hasDelivery ? ['warp', 'subwarp'] : ['warp'];
+		const beamWidth = 64;
+		while(states.length) {
+			const nextStates = new Map();
+			for(const state of states) {
+				let index = -1;
+				for(let i = 0; i < state.fleets.length; i++) {
+					const candidate = state.fleets[i];
+					if(candidate.done) continue;
+					const first = state.fleets[index];
+					if(!first || candidate.atMs < first.atMs || (candidate.atMs === first.atMs && candidate.arriving && !first.arriving)) index = i;
 				}
-				return null;
-			};
-			if(!getStockTravelMode(legIndex, inventory)) getStockTravelMode = undefined;
+				if(index < 0) {
+					if(!best || compare(state, best) < 0) best = state;
+					continue;
+				}
+				const fleet = state.fleets[index];
+				const leg = fleet.legs[fleet.legIndex];
+				const atMs = fleet.atMs;
+				const prepared = applyAutomatedProductionEvents(state.inventory, productionEvents, state.appliedEventIds, atMs);
+				const save = (nextFleet, balances, mode = null, shortfallMs = 0) => {
+					const nextFleets = state.fleets.slice();
+					nextFleets[index] = nextFleet;
+					const next = {
+						inventory: balances, appliedEventIds: prepared.appliedEventIds, fleets: nextFleets, timeMs: atMs,
+						completed: state.completed + (mode ? 1 : 0), warps: state.warps + (mode === 'warp' ? 1 : 0),
+						shortfallMs: state.shortfallMs + shortfallMs
+					};
+					const key = JSON.stringify([balances, [...prepared.appliedEventIds].sort(), nextFleets.map(item =>
+						[item.legIndex, item.atMs, item.arriving, item.done, item.modes.length, item.warpReadyMs, item.cargo])]);
+					const previous = nextStates.get(key);
+					if(!previous || compare(next, previous) < 0) nextStates.set(key, next);
+				};
+				if(fleet.arriving) {
+					const balances = adjustAutomatedInventoryForManifest(prepared.inventory, leg.destination, fleet.cargo, 1);
+					save({...fleet, legIndex: (fleet.legIndex + 1) % fleet.legs.length, arriving: false, cargo: null,
+						done: fleet.modes.length >= horizonLegs}, balances);
+					continue;
+				}
+				if(leg.blocked) {
+					save({...fleet, done: true}, prepared.inventory);
+					continue;
+				}
+				let balances = prepared.inventory;
+				let cargo = fleet.cargo;
+				if(cargo === null) {
+					if(!canWithdrawAutomatedManifest(balances, leg.source, leg.manifest)) {
+						const mints = new Set(getAutomatedRequiredManifest(leg.manifest).map(entry => entry.res));
+						const nextBatch = productionEvents.reduce((earliest, event) =>
+							event.atMs > atMs && event.location === leg.source && mints.has(event.res)
+								? Math.min(earliest, event.atMs) : earliest, Infinity);
+						save({...fleet, done: true}, balances, null, Number.isFinite(nextBatch) ? nextBatch - atMs : 0);
+						continue;
+					}
+					cargo = leg.manifest.filter(entry => entry?.cargoTotal && Number(balances[leg.source]?.[entry.res] || 0) >= Number(entry.requiredAmount ?? entry.amt ?? 0));
+					balances = adjustAutomatedInventoryForManifest(balances, leg.source, cargo, -1);
+				}
+				const fixedMode = fleet.fixedMode || leg.fixedMode || fleet.getStockTravelMode?.(fleet.legIndex, balances);
+				const modes = fixedMode ? [fixedMode] : availableModes;
+				for(const mode of modes) {
+					const startMs = mode === 'warp' ? Math.max(atMs, fleet.warpReadyMs || 0) : atMs;
+					const arrivalMs = startMs + (mode === 'warp' ? leg.warpMs : leg.subwarpMs);
+					const warpReadyMs = mode === 'warp' ? arrivalMs + (leg.warpRecoveryMs || 0) : fleet.warpReadyMs;
+					save({...fleet, atMs: arrivalMs, warpReadyMs, arriving: true, cargo, fixedMode: null, modes: fleet.modes.concat(mode)}, balances, mode);
+				}
+			}
+			const ranked = [...nextStates.values()].sort(compare);
+			if(!ranked.length) break;
+			states = ranked.slice(0, beamWidth);
+			if(ranked.length > beamWidth) {
+				// Keep slower schedules that can span the time until a batch becomes available.
+				const late = ranked.sort((a, b) => b.timeMs - a.timeMs || compare(a, b)).slice(0, beamWidth);
+				states = [...new Set([...states, ...late])];
+			}
 		}
+		return best.fleets.map(({modes}) => ({modes, summary: compressAutomatedTravelPlan(modes), completedLegs: modes.length}));
+	}
+
+	function getAutomatedCssStockSelector(fleet, legs) {
+		if(typeof getStarbaseNameFromCoords !== 'function') return undefined;
+		const pickups = legs.map(leg => ({
+			source: leg.source,
+			sourceStarbaseName: getStarbaseNameFromCoords(...leg.source.split(',').map(Number)),
+			requiredAsset: getAutomatedRequiredManifest(leg.manifest)[0],
+			cargoCapacity: fleet.cargoCapacity
+		}));
+		return (index, balances) => {
+			// A return leg uses the stock at the next CSS pickup on its route.
+			for(let offset = 0; offset < pickups.length; offset++) {
+				const pickup = pickups[(index + offset) % pickups.length];
+				const mode = getAutomatedCssTravelMode({...pickup, inventory: balances[pickup.source]});
+				if(mode) return mode;
+			}
+			return null;
+		};
+	}
+
+	async function getAutomatedLoadedManifest(fleet, leg, loadedCargo) {
 		const loadedAmounts = Object.create(null);
 		for(const { mint, amount } of loadedCargo || []) {
 			if(mint) loadedAmounts[mint] = (loadedAmounts[mint] || 0) + Math.max(0, Number(amount || 0));
 		}
-		const checkedMints = new Set(getAutomatedRequiredManifest(currentLeg.manifest).map(entry => entry.res));
+		const checkedMints = new Set(getAutomatedRequiredManifest(leg.manifest).map(entry => entry.res));
+		if(!checkedMints.size) return [];
 		const ammoMint = sageGameAcct.account.mints.ammo.toString();
 		const ammoBankAmount = checkedMints.has(ammoMint) ? await getTransportAmmoBankAmount(fleet) : 0;
-		const unloadPlan = planTransportCargoUnload(currentLeg.manifest, loadedAmounts, ammoBankAmount, ammoMint, globalSettings.transportKeep1);
-		const currentLoadedManifest = unloadPlan.entries
+		const unloadPlan = planTransportCargoUnload(leg.manifest, loadedAmounts, ammoBankAmount, ammoMint, globalSettings.transportKeep1);
+		return unloadPlan.entries
 			.filter(entry => checkedMints.has(entry.res))
 			.map(({ res, amount }) => ({ res, amt: amount + (res === ammoMint ? unloadPlan.ammoToUnload : 0), cargoTotal: true }))
 			.filter(entry => entry.amt > 0);
+	}
+
+	function getAutomatedPeerRoute(fleet, config) {
+		const source = config.starbase || fleet.starbaseCoord;
+		const destination = config.dest || fleet.destCoord;
+		if(config.assignment === 'Supply Chain') return getTransportPlusLegs(config, source, destination);
+		if(!source || !destination) return [];
+		const manifest = prefix => [1, 2, 3, 4].map(index => getLegacyTransportManifestEntry(config, prefix + index));
+		const mode = transportSubwarpPrefToMoveType(config.subwarpPref || 0);
+		return getLegacyAutomatedRouteLegs(source, destination, manifest('transportResource'), manifest('transportSBResource'))
+			.map(leg => ({...leg, moveType: mode}));
+	}
+
+	function getSharedAutomatedRoute(fleet, legs) {
+		return legs.map(leg => {
+			const source = ConvertCoords(leg.source);
+			const destination = ConvertCoords(leg.destination);
+			const warpCost = calcWarpFuelReq(fleet, source, destination, false);
+			const subwarpCost = Math.ceil(calculateSubwarpFuelBurn(fleet, calculateMovementDistance(source, destination)));
+			const fuel = getTransportFuelPolicy(warpCost, subwarpCost, fleet.fuelCapacity, leg.roundTrip, 'automated');
+			const subwarpReserve = subwarpCost * (leg.roundTrip ? 2 : 1);
+			const fixedMode = fuel.effectiveMoveType === 'subwarp' || leg.configuredMode === 'subwarp' ? 'subwarp'
+				: (leg.configuredMode === 'automated' && subwarpReserve <= fleet.fuelCapacity ? null : 'warp');
+			return {...leg, fixedMode, blocked: (fixedMode === 'subwarp' ? subwarpReserve : fuel.fuelNeeded) > fleet.fuelCapacity};
+		});
+	}
+
+	async function getAutomatedPeerStart(fleet, config, legs, nowMs) {
+		const account = await getAccountInfo(fleet.label, 'shared travel forecast', fleet.publicKey);
+		if(!account) return null;
+		const [state, extra] = getFleetState(account);
+		const warpReadyMs = maybeBnToNumber(sageProgram.coder.accounts.decode('fleet', account.data).warpCooldownExpiresAt) * 1000;
+		const committed = fleet.automatedDeparture;
+		const activeCommit = committed?.untilMs >= nowMs ? committed : null;
+		const target = activeCommit?.destination || getTransportCoordKey(config.moveTarget);
+		const routeIndex = getTransportPlusRouteIndex(config);
+		const matchesLeg = predicate => legs[routeIndex] && predicate(legs[routeIndex]) ? routeIndex : legs.findIndex(predicate);
+		const base = {fleet, legs, warpReadyMs, modes: [], cargo: null, atMs: nowMs};
+		const readCargo = async leg => {
+			if(!getAutomatedRequiredManifest(leg.manifest).length) return [];
+			const tokens = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.cargoHold, {programId: tokenProgramPK});
+			return getAutomatedLoadedManifest(fleet, leg, tokens.value.map(item => ({
+				mint: item.account.data.parsed.info.mint, amount: item.account.data.parsed.info.tokenAmount.uiAmount
+			})));
+		};
+		if(state === 'MoveWarp' || state === 'MoveSubwarp') {
+			const from = getTransportCoordKey(extra.fromSector);
+			const to = getTransportCoordKey(extra.toSector);
+			let legIndex = matchesLeg(leg => leg.destination === to && leg.source === from);
+			if(legIndex < 0) legIndex = matchesLeg(leg => leg.destination === (target || to));
+			if(legIndex < 0) return null;
+			const mode = state === 'MoveWarp' ? 'warp' : 'subwarp';
+			const leg = legs[legIndex];
+			const finishMs = Math.max(nowMs, maybeBnToNumber(mode === 'warp' ? extra.warpFinish : extra.arrivalTime) * 1000);
+			const remaining = to === leg.destination ? null : getAutomatedRouteLeg(fleet, {source: to, destination: leg.destination});
+			const remainingStart = mode === 'warp' && remaining ? Math.max(finishMs, warpReadyMs) : finishMs;
+			const atMs = remainingStart + (remaining?.[mode + 'Ms'] || 0);
+			return {...base, legIndex, atMs, arriving: true, modes: [mode], cargo: await readCargo(leg),
+				warpReadyMs: mode === 'warp' && remaining ? atMs + remaining.warpRecoveryMs : warpReadyMs};
+		}
+		if(state !== 'Idle' && state !== 'StarbaseLoadingBay') return null;
+		const sector = state === 'Idle' ? extra : (await sageProgram.account.starbase.fetch(extra.starbase)).sector;
+		const location = getTransportCoordKey(sector);
+		if(activeCommit?.source === location && !activeCommit.mode && !fleet.transportLoadRetryResource) {
+			const legIndex = matchesLeg(leg => leg.source === location && leg.destination === target);
+			if(legIndex >= 0) return {...base, legIndex, cargo: await readCargo(legs[legIndex])};
+		}
+		const savedMode = activeCommit?.mode || config.transportEffectiveMoveType;
+		const resume = target && target !== location && ['warp', 'subwarp'].includes(savedMode)
+			? matchesLeg(leg => leg.destination === target && (leg.source === location || !legs.some(item => item.source === location))) : -1;
+		if(resume >= 0 && (state === 'Idle' || activeCommit?.source === location) && !fleet.transportLoadRetryResource) {
+			const leg = legs[resume];
+			const remaining = leg.source === location ? leg : getAutomatedRouteLeg(fleet, {source: location, destination: target});
+			const startMs = savedMode === 'warp' ? Math.max(nowMs, warpReadyMs) : nowMs;
+			const atMs = startMs + remaining[savedMode + 'Ms'];
+			return {...base, legIndex: resume, atMs, arriving: true, modes: [savedMode], cargo: await readCargo(leg),
+				warpReadyMs: savedMode === 'warp' ? atMs + remaining.warpRecoveryMs : warpReadyMs};
+		}
+		const indexed = legs[routeIndex];
+		const incoming = indexed?.destination === location ? routeIndex : legs.findIndex(leg => leg.destination === location);
+		if(incoming < 0) return null;
+		return {...base, legIndex: incoming, arriving: true, cargo: await readCargo(legs[incoming]),
+			atMs: Math.max(nowMs, Number(fleet.transportLoadRetryAt || 0))};
+	}
+
+	async function collectSharedAutomatedFleets(fleet, legs, nowMs) {
+		const peers = userFleets.filter(peer => peer !== fleet && !peer.stopping && !/STOPPED|ERROR/.test(peer.state || '')
+			&& ['Transport', 'Supply Chain', 'Cargo / Mine'].includes(peer.assignment));
+		const pickupKeys = route => route.flatMap(leg => getAutomatedRequiredManifest(leg.manifest).map(entry => `${leg.source}:${entry.res}`));
+		const sharedKeys = new Set(pickupKeys(legs));
+		const candidates = await Promise.all(peers.map(async peer => {
+			const config = JSON.parse(await GM.getValue(peer.publicKey.toString(), '{}'));
+			if(!['Transport', 'Supply Chain', 'Cargo / Mine'].includes(config.assignment)) return null;
+			const route = getAutomatedPeerRoute(peer, config).map(leg => getAutomatedRouteLeg(peer, leg)).filter(leg => leg.source && leg.destination);
+			return {peer, config, route, keys: pickupKeys(route)};
+		}));
+		const participants = [];
+		// Include a peer's other shared pickups so connected routes use the same balances.
+		for(let added = true; added;) {
+			added = false;
+			for(let i = 0; i < candidates.length; i++) {
+				const candidate = candidates[i];
+				if(!candidate?.keys.some(key => sharedKeys.has(key))) continue;
+				candidates[i] = null;
+				const start = await getAutomatedPeerStart(candidate.peer, candidate.config, candidate.route, nowMs);
+				if(!start) continue;
+				participants.push(start);
+				for(const key of candidate.keys) sharedKeys.add(key);
+				added = true;
+			}
+		}
+		return participants;
+	}
+
+	async function buildAutomatedTravelForecast(fleet, routeLegs, currentLegIndex, loadedCargo = []) {
+		const legs = (routeLegs || []).map(leg => getAutomatedRouteLeg(fleet, leg)).filter(leg => leg.source && leg.destination);
+		if(!legs.length || !legs.some(leg => getAutomatedRequiredManifest(leg.manifest).length > 0)) return null;
+		const nowMs = Date.now();
+		const peers = await collectSharedAutomatedFleets(fleet, legs, nowMs);
+		const allLegs = legs.concat(peers.flatMap(peer => peer.legs));
+		const inventory = await readAutomatedRouteInventory(allLegs);
+		const directEvents = (await collectAutomatedCraftingProductionEvents(allLegs, nowMs)).concat(await collectAutomatedMiningProductionEvents(allLegs, nowMs));
+		const covered = new Set(directEvents.map(event => String(event.location) + ':' + String(event.res)));
+		const estimatedEvents = (await collectAutomatedEstimatedCraftingProductionEvents(allLegs, inventory, nowMs)).filter(event => !covered.has(String(event.location) + ':' + String(event.res)));
+		const productionEvents = directEvents.concat(estimatedEvents);
+		const legIndex = Math.max(0, Math.floor(Number(currentLegIndex || 0))) % legs.length;
+		const currentLoadedManifest = await getAutomatedLoadedManifest(fleet, legs[legIndex], loadedCargo);
+		const stockSelector = (owner, route, atIndex) => {
+			const hasProduction = route.some(leg => getAutomatedRequiredManifest(leg.manifest).some(entry =>
+				productionEvents.some(event => event.location === leg.source && event.res === entry.res)));
+			if(hasProduction) return undefined;
+			const select = getAutomatedCssStockSelector(owner, route);
+			return select?.(atIndex, inventory) ? select : undefined;
+		};
+		const getStockTravelMode = stockSelector(fleet, legs, legIndex);
+		if(peers.length) {
+			const account = await getAccountInfo(fleet.label, 'shared travel forecast', fleet.publicKey);
+			const warpReadyMs = account ? maybeBnToNumber(sageProgram.coder.accounts.decode('fleet', account.data).warpCooldownExpiresAt) * 1000 : 0;
+			const participants = [{fleet, legs, legIndex, atMs: nowMs, modes: [], cargo: currentLoadedManifest, warpReadyMs, getStockTravelMode},
+				...peers.map(peer => ({...peer, getStockTravelMode: stockSelector(peer.fleet, peer.legs, peer.legIndex)}))];
+			// Use the same tie order regardless of which fleet is refreshing its forecast.
+			participants.sort((a, b) => a.fleet.publicKey.toString().localeCompare(b.fleet.publicKey.toString()));
+			const shared = planSharedAutomatedTravel(participants.map(participant => ({
+				...participant, legs: getSharedAutomatedRoute(participant.fleet, participant.legs)
+			})), inventory, productionEvents, nowMs);
+			const index = participants.findIndex(participant => participant.fleet === fleet);
+			return {...shared[index], productionEvents, estimated: estimatedEvents.length > 0,
+				sharedPlans: participants.flatMap((participant, i) => i !== index && participant.legs.some(leg => leg.configuredMode === 'automated')
+					? [{fleet: participant.fleet, modes: shared[i].modes}] : [])};
+		}
 		const plannerInput = { nowMs, legs, currentLegIndex: legIndex, currentLegLoaded: true, currentLoadedManifest, inventory, productionEvents, horizonLegs: 48, getStockTravelMode };
 		const runway = estimatedEvents.length > 0
 			? planAutomatedStockRunway({...plannerInput, targetAtMs: Math.min(...estimatedEvents.map(event => Number(event.atMs || nowMs))), horizonLegs: 96})
@@ -13178,23 +13411,45 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		fleet.automatedTravelPlanPending = true;
 		fleet.automatedTravelForecastAt = Date.now();
 		if(forecastContext && Array.isArray(forecastContext.legs)) {
-			try {
-				const plan = await buildAutomatedTravelForecast(fleet, forecastContext.legs, forecastContext.currentLegIndex || 0, loadedCargo);
-				if(plan && plan.modes.length) {
-					fleet.automatedTravelPlan = plan.modes;
-					fleet.automatedTravelPlanEstimated = Boolean(plan.estimated);
-					fleet.automatedTravelPlanPending = false;
-					fleet.automatedTravelForecastAt = Date.now();
+			const index = forecastContext.currentLegIndex || 0;
+			const leg = forecastContext.legs[index];
+			// Others may forecast while this fleet already has its outgoing cargo loaded.
+			const departure = leg ? {
+				source: getTransportCoordKey(leg.source || leg.sourceCoord),
+				destination: getTransportCoordKey(leg.destination || leg.destCoord),
+				mode: null,
+				untilMs: Date.now() + Math.max(60000, Number(fleet.warpCooldown || 0) * 1000 + 15000)
+			} : null;
+			fleet.automatedDeparture = departure;
+			const refreshForecast = async () => {
+				const plan = await buildAutomatedTravelForecast(fleet, forecastContext.legs, index, loadedCargo);
+				if(plan?.modes.length) {
+					const updatePlan = (owner, modes) => {
+						owner.automatedTravelPlan = modes;
+						owner.automatedTravelPlanEstimated = Boolean(plan.estimated);
+						owner.automatedTravelPlanPending = false;
+						owner.automatedTravelForecastAt = Date.now();
+					};
+					updatePlan(fleet, plan.modes);
+					for(const peer of plan.sharedPlans || []) {
+						updatePlan(peer.fleet, peer.modes);
+						updateAssistStatus(peer.fleet);
+					}
 					moveType = plan.modes[0];
 					const eventSummary = (plan.productionEvents || []).slice(0, 3).map(event => event.source + ':' + event.res + '@' + TimeToStr(new Date(event.atMs))).join(',');
 					cLog(1, `${FleetTimeStamp(fleet.label)} Automated forecast -> ${moveType == 'warp' ? 'Warp' : 'Subwarp'} | ${plan.summary} | production ${eventSummary || 'none'}`);
-				} else if(plan && plan.reason === 'awaiting_final_output') {
+				} else if(plan?.reason === 'awaiting_final_output') {
 					moveType = 'subwarp';
 				}
-			} catch(error) {
+			};
+			const pending = automatedTravelForecastQueue.then(refreshForecast).catch(error => {
 				moveType = 'subwarp';
 				cLog(1, `${FleetTimeStamp(fleet.label)} Automated production forecast unavailable; using conservative Subwarp`, error);
-			}
+			}).finally(() => {
+				if(departure) departure.mode = moveType;
+			});
+			automatedTravelForecastQueue = pending.catch(() => {});
+			await pending;
 		}
 		cLog(1, `${FleetTimeStamp(fleet.label)} Automated Travel Mode -> ${moveType == 'warp' ? 'Warp' : 'Subwarp'} (loaded ${decision.loadedCargoVolume}/${decision.requiredVolume}, threshold ${decision.thresholdVolume})`);
 		updateAssistStatus(fleet);
@@ -17039,7 +17294,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-323', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-324', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),

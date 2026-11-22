@@ -29,7 +29,17 @@ function readFunctionSource(name, sourcePath = 'SLY_Assistant.user.js') {
 }
 
 function loadFunctions(names, globals = {}) {
-  const context = vm.createContext({ ...globals });
+  const dependencies = [];
+  if (names.includes('buildAutomatedTravelForecast')) {
+    dependencies.push('getAutomatedLoadedManifest', 'getAutomatedCssStockSelector');
+  }
+  if (names.includes('resolveAutomatedTravelMode')) dependencies.push('getTransportCoordKey');
+  names = [...new Set([...names, ...dependencies])];
+  const context = vm.createContext({
+    automatedTravelForecastQueue: Promise.resolve(),
+    collectSharedAutomatedFleets: async () => [],
+    ...globals,
+  });
   vm.runInContext(`${names.map(name => readFunctionSource(name)).join('\n')}; this.out = { ${names.join(', ')} };`, context);
   return context.out;
 }
@@ -40,6 +50,137 @@ function makeTwoLegRoute({ warpMs = 10, subwarpMs = 30, amount = 10 } = {}) {
     { source: 'B', destination: 'A', warpMs, subwarpMs, manifest: [] },
   ];
 }
+
+const sharedPlannerFunctions = [
+  'planSharedAutomatedTravel', 'cloneAutomatedInventory', 'applyAutomatedProductionEvents',
+  'getAutomatedRequiredManifest', 'canWithdrawAutomatedManifest', 'adjustAutomatedInventoryForManifest',
+  'compressAutomatedTravelPlan',
+];
+
+function makeSharedFleet(legs, overrides = {}) {
+  return { legs, legIndex: 1, atMs: 0, modes: [], cargo: [], ...overrides };
+}
+
+test('shared CSS forecast spends stock once across both fleets and gives each up to 48 legs', async () => {
+  const legs = makeTwoLegRoute().map((leg, index) => ({
+    ...leg,
+    source: index ? '1,0' : '0,0',
+    destination: index ? '0,0' : '1,0',
+    configuredMode: 'automated',
+  }));
+  const fleetA = { publicKey: 'a', cargoCapacity: 10 };
+  const fleetB = { publicKey: 'b', cargoCapacity: 10 };
+  let stock = 600;
+  let inventoryReads = 0;
+  const { buildAutomatedTravelForecast } = loadFunctions([
+    ...sharedPlannerFunctions, 'buildAutomatedTravelForecast', 'getAutomatedCssTravelMode', 'planTransportCargoUnload',
+  ], {
+    Date: { now: () => 0 },
+    collectSharedAutomatedFleets: async fleet => [makeSharedFleet(legs, { fleet: fleet === fleetA ? fleetB : fleetA })],
+    getAutomatedRouteLeg: (_fleet, leg) => leg,
+    getSharedAutomatedRoute: (_fleet, route) => route,
+    getAccountInfo: async () => null,
+    getStarbaseNameFromCoords: x => x === 0 ? 'ONI-1' : 'ONI-Phantom',
+    readAutomatedRouteInventory: async route => {
+      inventoryReads++;
+      assert.equal(route.length, 4);
+      return { '0,0': { ore: stock } };
+    },
+    collectAutomatedCraftingProductionEvents: async () => [],
+    collectAutomatedMiningProductionEvents: async () => [],
+    collectAutomatedEstimatedCraftingProductionEvents: async () => [],
+  });
+  const full = await buildAutomatedTravelForecast(fleetA, legs, 1);
+  assert.equal(full.summary, '48w');
+  assert.equal(full.sharedPlans[0].modes.length, 48);
+  assert.ok(full.sharedPlans[0].modes.every(mode => mode === 'warp'));
+
+  stock = 120;
+  const limited = await buildAutomatedTravelForecast(fleetA, legs, 1);
+  const other = await buildAutomatedTravelForecast(fleetB, legs, 1);
+  const pickups = modes => Math.floor(modes.length / 2);
+  assert.equal(pickups(limited.modes) + pickups(limited.sharedPlans[0].modes), 12);
+  assert.ok(limited.modes.includes('subwarp'));
+  assert.ok(limited.sharedPlans[0].modes.includes('subwarp'));
+  assert.deepEqual(Array.from(limited.modes), Array.from(other.sharedPlans[0].modes));
+  assert.deepEqual(Array.from(other.modes), Array.from(limited.sharedPlans[0].modes));
+  assert.equal(inventoryReads, 3);
+});
+
+test('two fleets stagger their returns to use separate production batches', () => {
+  const { planSharedAutomatedTravel } = loadFunctions(sharedPlannerFunctions);
+  const legs = makeTwoLegRoute();
+  const fleets = [makeSharedFleet(legs), makeSharedFleet(legs)];
+  const firstBatch = { id: 'mine:1', location: 'A', res: 'ore', amount: 10, atMs: 5 };
+  const laterBatch = { id: 'craft:1', location: 'A', res: 'ore', amount: 10, atMs: 25 };
+  const oneBatch = planSharedAutomatedTravel(fleets, {}, [firstBatch, firstBatch], 0, 2);
+  assert.equal(oneBatch.reduce((total, plan) => total + (plan.completedLegs === 2), 0), 1);
+  const plans = planSharedAutomatedTravel(fleets, {}, [firstBatch, laterBatch], 0, 2);
+  assert.deepEqual(Array.from(plans, plan => plan.summary).sort(), ['1sw1w', '2w']);
+});
+
+test('an in-flight fleet credits only its observed cargo and only at its arrival', () => {
+  const { planSharedAutomatedTravel } = loadFunctions(sharedPlannerFunctions);
+  const deliveryLegs = makeTwoLegRoute();
+  const consumerLegs = [...deliveryLegs].reverse().map((leg, index) => ({
+    ...leg,
+    manifest: index ? [] : [{ res: 'ore', amt: 10, cargoTotal: true }],
+  }));
+  const consumer = makeSharedFleet(consumerLegs);
+  const delivery = makeSharedFleet(deliveryLegs, {
+    legIndex: 0, atMs: 20, modes: ['warp'], arriving: true, cargo: [{ res: 'ore', amt: 10, cargoTotal: true }],
+  });
+  const plans = planSharedAutomatedTravel([consumer, delivery], {}, [], 0, 2);
+  assert.equal(plans[0].summary, '1sw1w');
+  delivery.cargo[0].amt = 9;
+  const short = planSharedAutomatedTravel([consumer, delivery], {}, [], 0, 2);
+  assert.equal(short[0].completedLegs, 1);
+});
+
+test('shared fleet collection uses active routes and preserves an in-flight subwarp ETA', async () => {
+  const fleet = { publicKey: 'requester', assignment: 'Transport' };
+  const peer = { publicKey: 'peer', assignment: 'Transport', state: 'Move', cargoHold: 'peer-cargo' };
+  const stopped = { publicKey: 'stopped', assignment: 'Transport', state: 'STOPPED' };
+  const differentMint = { publicKey: 'different', assignment: 'Transport', state: 'Move' };
+  const makeRoute = mint => [{
+    source: '0,0', destination: '1,0', manifest: [{ res: mint, amt: 10, cargoTotal: true }],
+  }];
+  const reads = [];
+  const { collectSharedAutomatedFleets } = loadFunctions([
+    'collectSharedAutomatedFleets', 'getAutomatedPeerStart', 'getAutomatedLoadedManifest',
+    'getAutomatedRequiredManifest', 'getTransportCoordKey', 'getTransportPlusRouteIndex', 'planTransportCargoUnload',
+  ], {
+    userFleets: [fleet, peer, stopped, differentMint],
+    GM: { getValue: async key => JSON.stringify({ assignment: 'Transport', key, moveTarget: '0,0' }) },
+    getAutomatedPeerRoute: (_fleet, config) => makeRoute(config.key === 'different' ? 'food' : 'ore'),
+    getAutomatedRouteLeg: (_fleet, leg) => leg,
+    getAccountInfo: async (_label, _reason, key) => {
+      reads.push(key);
+      return { data: [] };
+    },
+    getFleetState: () => ['MoveSubwarp', { fromSector: [0, 0], toSector: [1, 0], arrivalTime: 30 }],
+    maybeBnToNumber: Number,
+    globalSettings: {},
+    sageGameAcct: { account: { mints: { ammo: 'ammo' } } },
+    sageProgram: { coder: { accounts: { decode: () => ({ warpCooldownExpiresAt: 31 }) } } },
+    tokenProgramPK: 'tokens',
+    solanaReadConnection: {
+      getParsedTokenAccountsByOwner: async owner => {
+        assert.equal(owner, 'peer-cargo');
+        return { value: [{ account: { data: { parsed: { info: { mint: 'ore', tokenAmount: { uiAmount: 4 } } } } } }] };
+      },
+    },
+  });
+  const participants = await collectSharedAutomatedFleets(fleet, makeRoute('ore'), 10_000);
+  assert.deepEqual(reads, ['peer']);
+  assert.equal(participants.length, 1);
+  assert.equal(participants[0].fleet, peer);
+  assert.equal(participants[0].arriving, true);
+  assert.equal(participants[0].atMs, 30_000);
+  assert.equal(participants[0].warpReadyMs, 31_000);
+  assert.equal(participants[0].modes[0], 'subwarp');
+  assert.equal(participants[0].cargo[0].amt, 4);
+});
 
 test('CSS Automated fallback uses only the configured required asset and only at CSS', () => {
   const { getAutomatedCssTravelMode } = loadFunctions(['getAutomatedCssTravelMode']);
