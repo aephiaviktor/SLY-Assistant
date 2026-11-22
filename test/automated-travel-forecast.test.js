@@ -295,28 +295,59 @@ test('estimated craft collector combines active intermediate remaining time with
   assert.equal(events[0].atMs, 306000);
 });
 
-test('Automated forecast waits for a direct final-output event instead of extrapolating current stock', async () => {
-  const { buildAutomatedTravelForecast } = loadFunctions(['buildAutomatedTravelForecast'], {
+test('Automated keeps Warp through a missing mining ETA only when stock covers the full forecast', async () => {
+  const capacity = 91_081;
+  let copperStock = 66_169_918;
+  const legs = [
+    { source: '11,-16', destination: '2,-23', warpMs: 357_000, subwarpMs: 3_564_000, manifest: [{ res: 'copper', amt: capacity, cargoTotal: true }] },
+    { source: '2,-23', destination: '11,-16', warpMs: 357_000, subwarpMs: 3_564_000, manifest: [{ res: 'food', amt: 3_500 }] },
+  ];
+  const { buildAutomatedTravelForecast, resolveAutomatedTravelMode } = loadFunctions([
+    'buildAutomatedTravelForecast', 'getAutomatedCssTravelMode', 'planAutomatedTravelModes',
+    'cloneAutomatedInventory', 'applyAutomatedProductionEvents', 'getAutomatedRequiredManifest',
+    'canWithdrawAutomatedManifest', 'adjustAutomatedInventoryForManifest',
+    'compressAutomatedTravelPlan', 'planTransportCargoUnload',
+    'calculateAutomatedTravelMode', 'resolveAutomatedTravelMode',
+  ], {
     getAutomatedRouteLeg: (_fleet, leg) => leg,
-    getAutomatedRequiredManifest: manifest => manifest.filter(entry => entry.cargoTotal),
-    readAutomatedRouteInventory: async () => ({ A: { ore: 100 }, B: {} }),
+    getStarbaseNameFromCoords: x => x === 11 ? 'MRZ-6' : 'MRZ-5',
+    readAutomatedRouteInventory: async () => ({ '11,-16': { copper: copperStock }, '2,-23': { food: 23_030_464 } }),
     collectAutomatedCraftingProductionEvents: async () => [],
     collectAutomatedMiningProductionEvents: async () => [],
     collectAutomatedEstimatedCraftingProductionEvents: async () => [],
-    planAutomatedTravelModes: input => ({ modes: ['warp', 'warp'], productionEvents: input.productionEvents }),
+    globalSettings: {},
+    sageGameAcct: { account: { mints: { ammo: 'ammo', fuel: 'fuel' } } },
+    solanaReadConnection: { getParsedTokenAccountsByOwner: async () => ({ value: [
+      { account: { data: { parsed: { info: { mint: 'food', tokenAmount: { uiAmount: 3_500 } } } } } },
+    ] }) },
+    tokenProgramPK: 'token-program',
+    cargoItems: [{ token: 'food', size: 1 }],
+    cLog: () => {},
+    FleetTimeStamp: () => '',
+    updateAssistStatus: () => {},
     Date,
   });
 
-  const plan = await buildAutomatedTravelForecast(
-    {},
-    makeTwoLegRoute(),
-    0,
-    [{ mint: 'ore', amount: 10 }],
-  );
+  const fleet = { cargoCapacity: capacity, cargoHold: 'hold' };
+  const loaded = [{ mint: 'food', amount: 3_500 }];
+  const context = { legs, currentLegIndex: 1 };
+  for (const stock of [copperStock, 24 * capacity]) {
+    copperStock = stock;
+    const plan = await buildAutomatedTravelForecast(fleet, legs, 1, loaded);
+    assert.equal(plan.summary, '48w');
+    assert.equal(plan.completedLegs, 48);
+    assert.equal(plan.estimated, false);
+    assert.deepEqual(Array.from(plan.productionEvents), []);
+    assert.equal(await resolveAutomatedTravelMode(fleet, legs[1].manifest, context), 'warp');
+    assert.equal(fleet.automatedTravelPlan.length, 48);
+  }
 
+  copperStock = 24 * capacity - 1;
+  const plan = await buildAutomatedTravelForecast(fleet, legs, 1, loaded);
   assert.deepEqual(Array.from(plan.modes), []);
   assert.equal(plan.reason, 'awaiting_final_output');
   assert.deepEqual(Array.from(plan.productionEvents), []);
+  assert.equal(await resolveAutomatedTravelMode(fleet, legs[1].manifest, context), 'subwarp');
 });
 
 test('estimated final-craft ETA forecasts up to 48 legs using the estimated output and the runway departure mode', async () => {
