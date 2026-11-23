@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         [FLY] Freelance System: Core
 // @namespace    http://tampermonkey.net/
-// @version      0.5.4-06
+// @version      0.5.4-07
 // @description  try to take over the world!
 // @author       SLY
 // @match        https://based.staratlas.com/
@@ -18,7 +18,7 @@
 (async function() {
     'use strict';
 
-    const solanaConnection = new solanaWeb3.Connection('https://rpc.ironforge.network/mainnet?apiKey=01JEEEQP3FTZJFCP5RCCKB2NSQ', 'confirmed');
+    const solanaConnection = new solanaWeb3.Connection('https://api.mainnet-beta.solana.com', 'confirmed');
     const anchorProvider = new BrowserAnchor.anchor.AnchorProvider(solanaConnection, null, null);
 
     const sageProgramId = new solanaWeb3.PublicKey('SAGE2HAwep459SNq61LHvjxPk4pLPEJLoMETef7f7EE');
@@ -26,7 +26,7 @@
     const pointsStoreProgramId = new solanaWeb3.PublicKey('PsToRxhEPScGt1Bxpm7zNDRzaMk31t8Aox7fyewoVse');
     const profileIDL = {version: "0.7.3",name: "player_profile",instructions: [{name: "acceptRoleInvitation",accounts: [{name: "newMember",isMut: !1,isSigner: !1,docs: ["The new member"]}, {name: "roleAccount",isMut: !0,isSigner: !1,docs: ["The role which the player is joining"]}, {name: "roleMembershipAccount",isMut: !0,isSigner: !1,docs: ["The role membership account for the new member"]}],args: [{name: "keyIndex",type: "u16"}, {name: "keyIndexInRoleAccount",type: "u16"}, {name: "keyIndexInMembershipAccount",type: "u16"}]}, {name: "addExistingMemberToRole",accounts: [{name: "funder",isMut: !0,isSigner: !0,docs: ["The funder for reallocation."]}, {name: "newMember",isMut: !1,isSigner: !1,docs: ["The profile of the member to be added to the role"]}, {name: "profile",isMut: !1,isSigner: !1,docs: ["The profile which the role belongs to."]}, {name: "roleMembershipAccount",isMut: !0,isSigner: !1,docs: ["The role membership account for the new member"]}, {name: "roleAccount",isMut: !0,isSigner: !1,docs: ["The role which the player is joining"]}, {name: "systemProgram",isMut: !1,isSigner: !1,docs: ["The system program"]}],args: [{name: "keyIndex",type: "u16"}, {name: "keyIndexInMembershipAccount",type: "u16"}]}, {name: "addKeys",accounts: [{name: "funder",isMut: !0,isSigner: !0,docs: ["The funder for the profile."]}, {name: "key",isMut: !1,isSigner: !0,docs: ["Key with [`ProfilePermissions::ADD_KEYS`] permission to add keys."]}, {name: "profile",isMut: !0,isSigner: !1,docs: ["The profile to add to"]}, {name: "systemProgram",isMut: !1,isSigner: !1,docs: ["The system program"]}],args: [{name: "keyAddIndex",type: "u16"}, {name: "keyPermissionsIndex",type: "u16"}, {name: "keysToAdd",type: {vec: {defined: "AddKeyInput"}}}]}, {name: "adjustAuth",accounts: [{name: "funder",isMut: !0,isSigner: !0,docs: ["The funder for the profile."]}, {name: "profile",isMut: !0,isSigner: !1,docs: ["The profile to create"]}, {name: "systemProgram",isMut: !1,isSigner: !1,docs: ["The system program"]}],args: [{name: "authIndexes",type: {vec: "u16"}}, {name: "newKeyPermissions",type: {vec: {defined: "AddKeyInput"}}}, {name: "removeRange",type: {array: ["u16", 2]}}, {name: "newKeyThreshold",type: "u8"}]}, {name: "createProfile",accounts: [{name: "funder",isMut: !0,isSigner: !0,docs: ["The funder for the new profile."]}, {name: "profile",isMut: !0,isSigner: !0,docs: ["The profile to create"]}, {name: "systemProgram",isMut: !1,isSigner: !1,docs: ["The system program"]}],args: [{name: "keyPermissions",type: {vec: {defined: "AddKeyInput"}}}, {name: "keyThreshold",type: "u8"}]}, {name: "createRole",accounts: [{name: "funder",isMut: !0,isSigner: !0,docs: ["The funder for the transaction"]}, {name: "profile",isMut: !0,isSigner: !1,docs: ["The [`Profile`] account that the role is being created for"]}, {name: "newRoleAccount",isMut: !0,isSigner: !1,docs: ["The role account being created"]}, {name: "systemProgram",isMut: !1,isSigner: !1,docs: ["The system program"]}],args: [{name: "keyIndex",type: "u16"}]}, {name: "inviteMemberToRole",accounts: [{name: "funder",isMut: !0,isSigner: !0,docs: ["The funder for the new profile."]}, {name: "newMember",isMut: !1,isSigner: !1,docs: ["The profile of the user to be added to the role"]}, {name: "profile",isMut: !1,isSigner: !1,docs: ["The profile which the role belongs to."]}, {name: "roleMembershipAccount",isMut: !0,isSigner: !1,docs: ["The role membership account for the new member"]}, {name: "roleAccount",isMut: !0,isSigner: !1,docs: ["The role which the player is joining"]}, {name: "systemProgram",isMut: !1,isSigner: !1,docs: ["The system program"]}],args: [{name: "keyIndex",type: "u16"}]}, {name: "joinRole",accounts: [{name: "funder",isMut: !0,isSigner: !0,docs: ["The funder for the new profile."]}, {name: "newMember",isMut: !1,isSigner: !1,docs: ["The new member joining the role"]}, {name: "roleMembershipAccount",isMut: !0,isSigner: !1,docs: ["The role membership account for the new member"]}, {name: "roleAccount",isMut: !0,isSigner: !1,docs: ["The role which the player is joining"]}, {name: "systemProgram",isMut: !1,isSigner: !1,docs: ["The system program"]}],args: [{name: "keyIndex",type: "u16"}]}, {name: "leaveRole",accounts: [{name: "funder",isMut: !0,isSigner: !1,docs: ["The funder to receive the rent allocation."]}, {name: "member",isMut: !1,isSigner: !1,docs: ["The member leaving the role"]}, {name: "roleMembershipAccount",isMut: !0,isSigner: !1,docs: ["The role membership account for the member"]}, {name: "roleAccount",isMut: !0,isSigner: !1,docs: ["The role which the player is leaving"]}, {name: "systemProgram",isMut: !1,isSigner: !1,docs: ["The system program"]}],args: [{name: "keyIndex",type: "u16"}, {name: "keyIndexInRoleAccount",type: "u16"}, {name: "keyIndexInMembershipAccount",type: "u16"}]}, {name: "removeKeys",accounts: [{name: "funder",isMut: !0,isSigner: !1,docs: ["The funder for the profile."]}, {name: "key",isMut: !1,isSigner: !0,docs: ["Key with [`ProfilePermissions::REMOVE_KEYS`] permission to add keys."]}, {name: "profile",isMut: !0,isSigner: !1,docs: ["The profile to remove from"]}, {name: "systemProgram",isMut: !1,isSigner: !1,docs: ["The system program"]}],args: [{name: "keyIndex",type: "u16"}, {name: "keysToRemove",type: {array: ["u16", 2]}}]}, {name: "removeMemberFromRole",accounts: [{name: "funder",isMut: !0,isSigner: !1,docs: ["The funder to receive the rent allocation"]}, {name: "member",isMut: !1,isSigner: !1,docs: ["The profile of the user to be added to the role"]}, {name: "profile",isMut: !1,isSigner: !1,docs: ["The profile which the role belongs to."]}, {name: "roleMembershipAccount",isMut: !0,isSigner: !1,docs: ["The role membership account for the member"]}, {name: "roleAccount",isMut: !0,isSigner: !1,docs: ["The role which the player is being removed from"]}, {name: "systemProgram",isMut: !1,isSigner: !1,docs: ["The system program"]}],args: [{name: "keyIndex",type: "u16"}, {name: "keyIndexInRoleAccount",type: "u16"}, {name: "keyIndexInMembershipAccount",type: "u16"}]}, {name: "removeRole",accounts: [{name: "funder",isMut: !0,isSigner: !1,docs: ["The funder for the transaction"]}, {name: "profile",isMut: !0,isSigner: !1,docs: ["The Profile that the role is being removed from"]}, {name: "roleAccount",isMut: !0,isSigner: !1,docs: ["The role being removed"]}, {name: "roleNameAccount",isMut: !0,isSigner: !1,docs: ["The role name account (if it exists)"]}],args: [{name: "roleNameBump",type: "u8"}, {name: "keyIndex",type: "u16"}]}, {name: "setName",accounts: [{name: "key",isMut: !1,isSigner: !0,docs: ["The key authorized to change the name."]}, {name: "funder",isMut: !0,isSigner: !0,docs: ["The funder for the name size change."]}, {name: "profile",isMut: !1,isSigner: !1,docs: ["The profile to set the name for."]}, {name: "name",isMut: !0,isSigner: !1,docs: ["The name account."]}, {name: "systemProgram",isMut: !1,isSigner: !1,docs: ["The system program."]}],args: [{name: "keyIndex",type: "u16"}, {name: "name",type: "bytes"}]}, {name: "setRoleAcceptingMembers",accounts: [{name: "profile",isMut: !1,isSigner: !1,docs: ["The profile which owns the role being modified."]}, {name: "roleAccount",isMut: !0,isSigner: !1,docs: ["The role account to set as accepting members."]}],args: [{name: "keyIndex",type: "u16"}]}, {name: "setRoleAuthorizer",accounts: [{name: "funder",isMut: !0,isSigner: !0,docs: ["The funder for the name size change."]}, {name: "profile",isMut: !1,isSigner: !1,docs: ["The profile to set the name for."]}, {name: "roleAccount",isMut: !0,isSigner: !1,docs: ["The role account to set the authorizer for."]}, {name: "authorizer",isMut: !1,isSigner: !1,docs: ["The authorizer account to set."]}],args: [{name: "keyIndex",type: "u16"}]}, {name: "setRoleName",accounts: [{name: "funder",isMut: !0,isSigner: !0,docs: ["The funder for the name size change."]}, {name: "profile",isMut: !1,isSigner: !1,docs: ["The profile which the role belongs to"]}, {name: "role",isMut: !1,isSigner: !1,docs: ["The role to set the name for."]}, {name: "name",isMut: !0,isSigner: !1,docs: ["The name account."]}, {name: "systemProgram",isMut: !1,isSigner: !1,docs: ["The system program."]}],args: [{name: "keyIndex",type: "u16"}, {name: "name",type: "bytes"}]}, {name: "setRoleNotAcceptingMembers",accounts: [{name: "profile",isMut: !1,isSigner: !1,docs: ["The profile which owns the role being modified."]}, {name: "roleAccount",isMut: !0,isSigner: !1,docs: ["The role account to set as not accepting members."]}],args: [{name: "keyIndex",type: "u16"}]}],accounts: [{name: "playerName",docs: ["Stores a players name on-chain."],type: {kind: "struct",fields: [{name: "version",docs: ["The data version of this account."],type: "u8"}, {name: "profile",docs: ["The profile this name is for."],type: "publicKey"}, {name: "bump",docs: ["The bump for this account."],type: "u8"}]}}, {name: "profile",docs: ["A player profile."],type: {kind: "struct",fields: [{name: "version",docs: ["The data version of this account."],type: "u8"}, {name: "authKeyCount",docs: ["The number of auth keys on the account"],type: "u16"}, {name: "keyThreshold",docs: ["The number of auth keys needed to update the profile."],type: "u8"}, {name: "nextSeqId",docs: ["The next sequence number for a new role."],type: "u64"}, {name: "createdAt",docs: ["When the profile was created."],type: "i64"}]}}, {name: "profileRoleMembership",docs: ["A players roles for a given profile", "Remaining data contains an unordered list of [`RoleMembership`](RoleMembership) structs"],type: {kind: "struct",fields: [{name: "version",docs: ["The data version of this account."],type: "u8"}, {name: "profile",docs: ["The Profile this belongs to"],type: "publicKey"}, {name: "member",docs: ["The members profile pubkey"],type: "publicKey"}, {name: "bump",docs: ["PDA bump"],type: "u8"}]}}, {name: "role",docs: ["A Role associated with a Profile. A Role contains an unordered list of Role Members in its", "remaining data which lists all of the members who carry this role."],type: {kind: "struct",fields: [{name: "version",docs: ["The data version of this account."],type: "u8"}, {name: "profile",docs: ["Profile that this role belongs to"],type: "publicKey"}, {name: "authorizer",docs: ["Origin authority of the account"],type: "publicKey"}, {name: "roleSeqId",docs: ["Roles seq_id"],type: "u64"}, {name: "acceptingNewMembers",docs: ["Is role accepting new members"],type: "u8"}, {name: "bump",docs: ["The name of the rank", "TODO: Add instruction to use `player-name` as the label", "PDA bump"],type: "u8"}]}}],types: [{name: "AddKeyInput",docs: ["Struct for adding a key"],type: {kind: "struct",fields: [{name: "scope",docs: ["The block of permissions"],type: "publicKey"}, {name: "expireTime",docs: ["The expire time of the key to add"],type: "i64"}, {name: "permissions",docs: ["The permissions for the key"],type: {array: ["u8", 8]}}]}}, {name: "MemberStatus",docs: ["Represents potential membership statuses for a player with a role"],type: {kind: "enum",variants: [{name: "Inactive"}, {name: "Active"}]}}, {name: "ProfileKey",docs: ["A key on a profile."],type: {kind: "struct",fields: [{name: "key",docs: ["The key."],type: "publicKey"}, {name: "scope",docs: ["The key for the permissions."],type: "publicKey"}, {name: "expireTime",docs: ["The expire time for this key.", "If `<0` does not expire."],type: "i64"}, {name: "permissions",docs: ["The permissions for the key."],type: {array: ["u8", 8]}}]}}, {name: "RoleMembership",docs: ["Represents a members status in a role"],type: {kind: "struct",fields: [{name: "key",docs: ["The member or role key associated with this membership"],type: "publicKey"}, {name: "status",docs: ["The members role status"],type: "u8"}]}}],errors: [{code: 6e3,name: "KeyIndexOutOfBounds",msg: "Key index out of bounds"}, {code: 6001,name: "ProfileMismatch",msg: "Profile did not match profile key"}, {code: 6002,name: "KeyMismatch",msg: "Key did not match profile key"}, {code: 6003,name: "ScopeMismatch",msg: "Scope did not match profile scope"}, {code: 6004,name: "KeyExpired",msg: "Key expired"}, {code: 6005,name: "KeyMissingPermissions",msg: "Key is missing permissions"}, {code: 6006,name: "PermissionsMismatch",msg: "Permissions dont match available"}, {code: 6007,name: "AuthKeyCannotExpire",msg: "Auth keys cannot expire"}, {code: 6008,name: "AuthKeyMustSign",msg: "New auth keys must be signers"}, {code: 6009,name: "DuplicateAuthKey",msg: "Duplicate key when adjusting auth keys"}, {code: 6010,name: "RoleAuthorityAlreadySet",msg: "Role authority has already been set"}, {code: 6011,name: "RoleNotAcceptingMembers",msg: "Role is not accepting new members"}, {code: 6012,name: "RoleMembershipMismatch",msg: "Role membership is not as expected"}, {code: 6013,name: "RoleLimitExceeded",msg: "Role limit exceeded"}, {code: 6014,name: "RoleHasMembers",msg: "Cannot remove role with members"}, {code: 6015,name: "FeatureNotImplemented",msg: "This feature is not yet support"}]};
     const profileProgramId = new solanaWeb3.PublicKey('pprofELXjL5Kck7Jn5hCpwAL82DpTkSYBENzahVtbc9');
-    const flyVersion = '0.5.4-06';
+    const flyVersion = '0.5.4-07';
     const upstreamFlyVersion = '0.5.4';
     const upstreamFlyUrl = 'https://raw.githubusercontent.com/Swift42/SLY-Assistant/main/Freelance_System_Core/SLY_Freelance_System_Core.user.js';
     const aepFlyUrl = 'https://raw.githubusercontent.com/aephiaviktor/SLY-Assistant/aep-release/Freelance_System_Core/SLY_Freelance_System_Core.user.js';
@@ -37,37 +37,27 @@
     let userPublicKey = null;
     let userProfilePublicKey = null;
     let userProfileKeyIdx = 0;
-    let userProfile = null;
     let permissionedAccounts = [];
 
-    async function getPermissionedAccounts() {
-        permissionedAccounts = [];
-
-        // Find the Player Profile associated with the connected wallet
-        [userProfile] = await solanaConnection.getProgramAccounts(
-            profileProgramId,
-            {
-                filters: [
-                    {
-                        memcmp: {
-                            offset: 30,
-                            bytes: userPublicKey.toString(),
-                        },
-                    },
-                ],
-            }
-        );
-
-        // The first 30 bytes are general information about the Profile
-        let profileData = userProfile.account.data.subarray(30);
-        let iter = 0;
-
-        // Each account which has been granted access to this Profile
-        //   is listed in 80 byte chunks
+    async function readSelectedProfileKeys() {
+        const account = await solanaConnection.getAccountInfo(userProfilePublicKey);
+        if (!account || !account.owner.equals(profileProgramId)) {
+            throw new Error('Could not read the selected player profile.');
+        }
+        const profileKeys = [];
+        // Profile keys follow the 30-byte account header in 80-byte entries.
+        let profileData = account.data.subarray(30);
         while (profileData.length >= 80) {
-            let currProfileKey = profileData.subarray(0, 80);
-            let decodedProfileKey = profileProgram.coder.types.decode('ProfileKey', currProfileKey);
+            profileKeys.push(profileProgram.coder.types.decode('ProfileKey', profileData.subarray(0, 80)));
+            profileData = profileData.subarray(80);
+        }
+        return profileKeys;
+    }
 
+    async function getPermissionedAccounts() {
+        const profileKeys = await readSelectedProfileKeys();
+        const accounts = [];
+        for (const [idx, decodedProfileKey] of profileKeys.entries()) {
             // Find the Player Profile associated with the account which has been granted access
             let [targetUserProfile] = await solanaConnection.getProgramAccounts(
                 profileProgramId,
@@ -120,10 +110,9 @@
 
             let permissions = await decodePermissions(decodedProfileKey.permissions);
 
-            permissionedAccounts.push({account: decodedProfileKey.key.toString(), name: playerName, idx: iter, scope: permissionType, permissions: permissions})
-            profileData = profileData.subarray(80);
-            iter += 1;
+            accounts.push({account: decodedProfileKey.key.toString(), name: playerName, idx, scope: permissionType, permissions});
         }
+        permissionedAccounts = accounts;
         console.log(permissionedAccounts);
         return;
     }
@@ -389,73 +378,48 @@
     }
 
     async function addKeyToProfile(newKey) {
-        document.getElementById("waiting").classList.add('lds-ring');
-        let sagePermissions = buildPermissionTemplate('sage');
-        let pointsPermissions = buildPermissionTemplate('points');
-        let pointsStorePermissions = buildPermissionTemplate('points_store');
+        const address = newKey.trim();
+        if (!address) return {name: 'InvalidAccount'};
 
-        let txResult = {};
-        // Check if the public key has already been added.
-        let targetAccount = permissionedAccounts.some(o => o.account === newKey);
-        if (targetAccount) {
-            txResult = {name: "AccountExists"};
-        } else if (newKey.length < 1) {
-            txResult = {name: "InputNeeded"};
-        } else {
-            let instructions = [];
-            let ix1 = { instruction: await profileProgram.methods.addKeys(userProfileKeyIdx, 0, [{
-                scope: sagePermissions.scope,
-                expireTime: new BrowserAnchor.anchor.BN(-1),
-                permissions: sagePermissions.permissions
-            }]).accountsStrict({
-                funder: userPublicKey,
-                profile: userProfilePublicKey,
-                key: userPublicKey,
-                systemProgram: solanaWeb3.SystemProgram.programId
-            }).remainingAccounts([{
-                pubkey: new solanaWeb3.PublicKey(newKey),
-                isSigner: false,
-                isWritable: false
-            }]).instruction()}
-            instructions.push(ix1);
-
-            let ix2 = { instruction: await profileProgram.methods.addKeys(userProfileKeyIdx, 0, [{
-                scope: pointsPermissions.scope,
-                expireTime: new BrowserAnchor.anchor.BN(-1),
-                permissions: pointsPermissions.permissions
-            }]).accountsStrict({
-                funder: userPublicKey,
-                profile: userProfilePublicKey,
-                key: userPublicKey,
-                systemProgram: solanaWeb3.SystemProgram.programId
-            }).remainingAccounts([{
-                pubkey: new solanaWeb3.PublicKey(newKey),
-                isSigner: false,
-                isWritable: false
-            }]).instruction()}
-            instructions.push(ix2);
-
-            let ix3 = { instruction: await profileProgram.methods.addKeys(userProfileKeyIdx, 0, [{
-                scope: pointsStorePermissions.scope,
-                expireTime: new BrowserAnchor.anchor.BN(-1),
-                permissions: pointsStorePermissions.permissions
-            }]).accountsStrict({
-                funder: userPublicKey,
-                profile: userProfilePublicKey,
-                key: userPublicKey,
-                systemProgram: solanaWeb3.SystemProgram.programId
-            }).remainingAccounts([{
-                pubkey: new solanaWeb3.PublicKey(newKey),
-                isSigner: false,
-                isWritable: false
-            }]).instruction()}
-            instructions.push(ix3);
-
-            txResult = await txSignAndSend(instructions);
-            await getPermissionedAccounts();
+        let publicKey;
+        try {
+            publicKey = new solanaWeb3.PublicKey(address);
+        } catch {
+            return {name: 'InvalidAccount'};
         }
-        console.log('txResult: ', txResult);
-        document.getElementById("waiting").classList.remove('lds-ring');
+
+        const profileKeys = await readSelectedProfileKeys();
+        const existingScopes = new Set(profileKeys.filter(entry => entry.key.equals(publicKey))
+            .map(entry => entry.scope.toString()));
+        if (existingScopes.has(profileProgramId.toString())) return {name: 'ProfileAuthority'};
+
+        const missingPermissions = ['sage', 'points', 'points_store']
+            .map(buildPermissionTemplate)
+            .filter(entry => !existingScopes.has(entry.scope.toString()));
+        if (!missingPermissions.length) return {name: 'AccountExists'};
+
+        const instructions = [];
+        for (const {scope, permissions} of missingPermissions) {
+            const instruction = await profileProgram.methods.addKeys(userProfileKeyIdx, 0, [{
+                scope,
+                expireTime: new BrowserAnchor.anchor.BN(-1),
+                permissions
+            }]).accountsStrict({
+                funder: userPublicKey,
+                profile: userProfilePublicKey,
+                key: userPublicKey,
+                systemProgram: solanaWeb3.SystemProgram.programId
+            }).remainingAccounts([{
+                pubkey: publicKey,
+                isSigner: false,
+                isWritable: false
+            }]).instruction();
+            instructions.push({instruction});
+        }
+
+        const txResult = await txSignAndSend(instructions);
+        if (!txResult || txResult.meta?.err) return {name: 'GrantFailed'};
+        await getPermissionedAccounts();
         manageProfileToggle();
         document.querySelector('#addAcctDiv').value = '';
         manageProfileToggle(permissionedAccounts);
@@ -872,16 +836,29 @@
             let updateAepFlyBtn = document.querySelector('#updateAepFlyBtn');
             updateAepFlyBtn.addEventListener('click', function(e) {window.open(aepFlyUrl, '_blank', 'noopener');});
             let addAcctBtn = document.querySelector('#addAcctBtn');
-            addAcctBtn.addEventListener('click', async function(e) {
-                let r = await addKeyToProfile(document.querySelector('#addAcctDiv').value);
-                console.log('r: ', r);
-                let errElem = document.querySelector('#accountModal .assist-modal-error');
-                if (r.name === 'InputNeeded') {
-                    errElem.innerHTML = 'Error: Please enter a public key.';
-                } else if (r.name === 'AccountExists') {
-                    errElem.innerHTML = 'Error: Account already added.';
-                } else {
-                    errElem.innerHTML = '';
+            addAcctBtn.addEventListener('click', async function() {
+                if (addAcctBtn.disabled) return;
+                const errElem = document.querySelector('#accountModal .assist-modal-error');
+                const spinner = document.getElementById('waiting');
+                addAcctBtn.disabled = true;
+                spinner.classList.add('lds-ring');
+                errElem.textContent = '';
+                try {
+                    const result = await addKeyToProfile(document.querySelector('#addAcctDiv').value);
+                    if (result.name === 'InvalidAccount') {
+                        errElem.textContent = 'Enter a valid Solana public key.';
+                    } else if (result.name === 'AccountExists') {
+                        errElem.textContent = 'This account already has all FLY permission scopes.';
+                    } else if (result.name === 'ProfileAuthority') {
+                        errElem.textContent = 'This account is already a profile authority.';
+                    } else if (result.name === 'GrantFailed') {
+                        errElem.textContent = 'The permission grant could not be confirmed.';
+                    }
+                } catch (error) {
+                    errElem.textContent = 'Could not grant permissions: ' + (error?.message || String(error));
+                } finally {
+                    spinner.classList.remove('lds-ring');
+                    addAcctBtn.disabled = false;
                 }
             });
             let removeAcctBtn = document.querySelector('#removeAcctBtn');

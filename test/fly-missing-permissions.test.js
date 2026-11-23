@@ -1,0 +1,99 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const test = require('node:test');
+const vm = require('node:vm');
+const { anchor } = require('../anchor-browserified');
+
+const { PublicKey } = anchor.web3;
+const owner = new PublicKey(Buffer.alloc(32, 1));
+const profile = new PublicKey(Buffer.alloc(32, 2));
+const delegate = new PublicKey(Buffer.alloc(32, 3));
+const otherDelegate = new PublicKey(Buffer.alloc(32, 4));
+const profileProgram = new PublicKey('pprofELXjL5Kck7Jn5hCpwAL82DpTkSYBENzahVtbc9');
+const sage = new PublicKey('SAGE2HAwep459SNq61LHvjxPk4pLPEJLoMETef7f7EE');
+const points = new PublicKey('Point2iBvz7j5TMVef8nEgpmz4pDr7tU7v3RjAfkQbM');
+const pointsStore = new PublicKey('PsToRxhEPScGt1Bxpm7zNDRzaMk31t8Aox7fyewoVse');
+const source = fs.readFileSync(path.join(__dirname, '..', 'Freelance_System_Core',
+  'SLY_Freelance_System_Core.user.js'), 'utf8');
+
+function profileData(entries) {
+  const header = Buffer.alloc(30);
+  header.writeUInt16LE(entries.length, 28);
+  const keys = entries.map(([key, scope]) => Buffer.concat([
+    key.toBuffer(), scope.toBuffer(), Buffer.alloc(8, 255), Buffer.alloc(8),
+  ]));
+  return Buffer.concat([header, ...keys]);
+}
+
+function loadGrantFlow(entries) {
+  const transactions = [];
+  const context = {
+    BrowserAnchor: { anchor },
+    solanaWeb3: {
+      ...anchor.web3,
+      Connection: class {
+        async getAccountInfo(address) {
+          assert.ok(address.equals(profile));
+          return { owner: profileProgram, data: profileData(entries) };
+        }
+      },
+    },
+    MutationObserver: class {},
+    document: { querySelector: () => ({ value: '' }) },
+    actualOwner: owner,
+    actualProfile: profile,
+    transactions,
+  };
+  const startup = '    observer.observe(document, {childList: true, subtree: true});\n    waitForLabs(null, null);';
+  assert.ok(source.includes(startup));
+  vm.runInNewContext(source.replace(startup, `
+    userPublicKey = actualOwner;
+    userProfilePublicKey = actualProfile;
+    getPermissionedAccounts = async () => {};
+    manageProfileToggle = () => {};
+    txSignAndSend = async instructions => {
+      transactions.push(Array.from(instructions, ({ instruction }) => instruction));
+      return { meta: { err: null } };
+    };
+    globalThis.grant = addKeyToProfile;
+  `), context);
+  return { grant: context.grant, transactions };
+}
+
+test('FLY restores only SAGE access when the signer already has both Points scopes', async () => {
+  const entries = [[owner, profileProgram], [delegate, points], [delegate, pointsStore], [otherDelegate, sage]];
+  const { grant, transactions } = loadGrantFlow(entries);
+  await grant(delegate.toBase58());
+
+  assert.equal(transactions.length, 1);
+  const [instruction] = transactions[0];
+  assert.equal(transactions[0].length, 1);
+  assert.ok(instruction.programId.equals(profileProgram));
+  assert.ok(instruction.keys[0].pubkey.equals(owner));
+  assert.ok(instruction.keys[2].pubkey.equals(profile));
+  assert.ok(instruction.keys[4].pubkey.equals(delegate));
+  assert.ok(instruction.data.subarray(16, 48).equals(sage.toBuffer()));
+  assert.equal(Buffer.from(instruction.data).readBigInt64LE(48), -1n);
+  assert.equal(instruction.data.subarray(56, 64).toString('hex'), '00fcbf0900000000');
+
+  entries.push([delegate, sage]);
+  assert.equal((await grant(delegate.toBase58())).name, 'AccountExists');
+  assert.equal(transactions.length, 1);
+});
+
+test('FLY grants the three standard scopes to a new delegate', async () => {
+  const { grant, transactions } = loadGrantFlow([[owner, profileProgram]]);
+  await grant(delegate.toBase58());
+  assert.deepEqual(Array.from(transactions[0], instruction => instruction.data.subarray(16, 48).toString('hex')),
+    [sage, points, pointsStore].map(scope => scope.toBuffer().toString('hex')));
+});
+
+test('FLY rejects a profile authority and malformed keys before submitting a transaction', async () => {
+  const { grant, transactions } = loadGrantFlow([[owner, profileProgram]]);
+  assert.equal((await grant(owner.toBase58())).name, 'ProfileAuthority');
+  assert.equal((await grant('invalid-key')).name, 'InvalidAccount');
+  assert.equal(transactions.length, 0);
+});
