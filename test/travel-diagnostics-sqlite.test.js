@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
+const { gunzipSync } = require('node:zlib');
 
 const appRoot = path.resolve(__dirname, '..', 'electron-app');
 const vendor = path.join(appRoot, 'vendor', 'node-sqlite3-wasm-0.8.61');
@@ -21,7 +22,8 @@ const payload = {
   fleet: 'CF-05|06',
   runId: '1795428618542:test-fleet',
   moveType: 'warp',
-  forecast: { inventory: { phantom: { electronics: 1_360_000 } } },
+  decisionSource: 'shared_forecast',
+  forecast: { estimated: true, inventory: { phantom: { electronics: 1_360_000 } } },
 };
 
 function loadDiagnostics(overrides = {}) {
@@ -52,6 +54,20 @@ for (const driver of ['bundled', 'built-in']) {
       const databasePath = path.join(directory, 'data', 'automated-travel.sqlite');
       const { createTravelDiagnosticsWriter } = loadDiagnostics();
       const options = { databasePath, instance: 'MUD', resolveBinding: async () => driver === 'bundled' ? bindingPath : null };
+      fs.mkdirSync(path.dirname(databasePath));
+      const legacy = { ...payload, runId: 'legacy-run', forecast: { events: Array(10_000).fill({ mode: 'warp' }) } };
+      const oldDb = new Database(databasePath);
+      try {
+        oldDb.exec(`CREATE TABLE automated_travel_diagnostics (
+          id INTEGER PRIMARY KEY, instance_name TEXT NOT NULL, fleet TEXT NOT NULL,
+          recorded_at TEXT NOT NULL, run_id TEXT, event_type TEXT NOT NULL,
+          move_type TEXT, payload TEXT NOT NULL CHECK (json_valid(payload)))`);
+        oldDb.run('INSERT INTO automated_travel_diagnostics VALUES (1, ?, ?, ?, ?, ?, ?, ?)',
+          ['MUD', legacy.fleet, legacy.timestamp, legacy.runId, legacy.type, legacy.moveType, JSON.stringify(legacy)]);
+      } finally {
+        oldDb.close();
+      }
+      const legacyBytes = fs.statSync(databasePath).size;
       const first = createTravelDiagnosticsWriter(options);
       try {
         assert.equal((await first.write(JSON.stringify(payload))).ok, true);
@@ -67,17 +83,25 @@ for (const driver of ['bundled', 'built-in']) {
         assert.equal((await second.close()).ok, true);
       }
       assert.equal(fs.readFileSync(databasePath).subarray(0, 16).toString(), 'SQLite format 3\0');
+      assert.ok(fs.statSync(databasePath).size < legacyBytes / 2);
       const db = new Database(databasePath);
       try {
         const records = db.all(`
           SELECT instance_name, fleet, recorded_at, event_type, move_type,
-                 json_extract(payload, '$.forecast.inventory.phantom.electronics') AS electronics
+                 json_extract(payload, '$.decisionSource') AS decision_source, payload, forecast_gzip
           FROM automated_travel_diagnostics WHERE run_id = ? ORDER BY id
         `, [payload.runId]);
-        assert.deepEqual(records, ['forecast', 'movement_selected'].map((event_type, index) => ({
+        assert.deepEqual(records.map(({ payload, forecast_gzip, ...record }) => record), ['forecast', 'movement_selected'].map((event_type, index) => ({
           instance_name: 'MUD', fleet: payload.fleet, recorded_at: payload.timestamp,
-          event_type, move_type: index ? 'subwarp' : 'warp', electronics: 1_360_000,
+          event_type, move_type: index ? 'subwarp' : 'warp', decision_source: 'shared_forecast',
         })));
+        const summary = JSON.parse(records[0].payload);
+        assert.deepEqual(summary.forecast, { estimated: true });
+        assert.deepEqual(JSON.parse(gunzipSync(records[0].forecast_gzip)), payload.forecast);
+        assert.equal(records[1].forecast_gzip, null);
+        const migrated = db.get('SELECT id, payload, forecast_gzip FROM automated_travel_diagnostics WHERE run_id = ?', [legacy.runId]);
+        assert.equal(migrated.id, 1);
+        assert.deepEqual({ ...JSON.parse(migrated.payload), forecast: JSON.parse(gunzipSync(migrated.forecast_gzip)) }, legacy);
         assert.deepEqual(db.all('PRAGMA index_list(automated_travel_diagnostics)').map(row => row.name).sort(),
           ['fleet_history', 'forecast_history']);
       } finally {
@@ -86,6 +110,35 @@ for (const driver of ['bundled', 'built-in']) {
     });
   });
 }
+
+test('diagnostic retention evicts the oldest records and reclaims disk space', () => withTemporaryDirectory(async directory => {
+  const { createTravelDiagnosticsWriter } = loadDiagnostics();
+  const databasePath = path.join(directory, 'automated-travel.sqlite');
+  const maxStorageBytes = 128 * 1024;
+  const writer = createTravelDiagnosticsWriter({ databasePath, instance: 'MUD', maxStorageBytes, resolveBinding: async () => bindingPath });
+  const records = Array.from({ length: 12 }, (_, index) => ({ ...payload, runId: `${index}`, forecast: {
+    inventory: crypto.randomBytes(16 * 1024).toString('base64'),
+  } }));
+  try {
+    for (const record of records) {
+      const result = await writer.write(JSON.stringify(record));
+      assert.equal(result.ok, true, result.error);
+      assert.ok(fs.statSync(databasePath).size <= maxStorageBytes);
+    }
+  } finally {
+    assert.equal((await writer.close()).ok, true);
+  }
+  const db = new Database(databasePath);
+  try {
+    const retained = db.all('SELECT run_id, forecast_gzip FROM automated_travel_diagnostics ORDER BY id');
+    assert.ok(retained.length >= 2 && retained.length < records.length);
+    assert.deepEqual(retained.map(record => record.run_id), records.slice(-retained.length).map(record => record.runId));
+    assert.deepEqual(JSON.parse(gunzipSync(retained.at(-1).forecast_gzip)), records.at(-1).forecast);
+    assert.equal(db.get('PRAGMA quick_check').quick_check, 'ok');
+  } finally {
+    db.close();
+  }
+}));
 
 test('older app updates fetch and verify pinned SQLite assets only when needed', () => withTemporaryDirectory(async installation => {
   const downloads = [];

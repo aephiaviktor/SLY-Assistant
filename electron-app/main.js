@@ -120,7 +120,8 @@ async function getTravelSqliteBinding()
 function runTravelDiagnosticsWorker()
 {
 	const { parentPort, workerData } = require('node:worker_threads')
-	const { databasePath, bindingPath, instance } = workerData
+	const { gzipSync } = require('node:zlib')
+	const { databasePath, bindingPath, instance, maxStorageBytes } = workerData
 	const Database = bindingPath ? require(bindingPath).Database : require('node:sqlite').DatabaseSync
 	const db = new Database(databasePath)
 	db.exec([
@@ -128,17 +129,93 @@ function runTravelDiagnosticsWorker()
 		'CREATE TABLE IF NOT EXISTS automated_travel_diagnostics (',
 		'id INTEGER PRIMARY KEY, instance_name TEXT NOT NULL, fleet TEXT NOT NULL,',
 		'recorded_at TEXT NOT NULL, run_id TEXT, event_type TEXT NOT NULL,',
-		'move_type TEXT, payload TEXT NOT NULL CHECK (json_valid(payload)));',
+		'move_type TEXT, payload TEXT NOT NULL CHECK (json_valid(payload)), forecast_gzip BLOB);',
 		'CREATE INDEX IF NOT EXISTS fleet_history ON automated_travel_diagnostics (instance_name, fleet, recorded_at);',
 		'CREATE INDEX IF NOT EXISTS forecast_history ON automated_travel_diagnostics (run_id, recorded_at);'
 	].join('\n'))
+
+	const statements = []
+	const prepare = sql => {
+		const statement = db.prepare(sql)
+		statements.push(statement)
+		return statement
+	}
+	const query = (statement, method, ...values) => {
+		if (!bindingPath) return statement[method](...values)
+		// Exhaust single-row queries on the bundled driver so their cursors cannot block VACUUM.
+		return method === 'get' ? statement.all(values)[0] : statement[method](values)
+	}
+	function transaction(operation) {
+		db.exec('BEGIN IMMEDIATE')
+		try {
+			const result = operation()
+			db.exec('COMMIT')
+			return result
+		} catch (error) {
+			try { db.exec('ROLLBACK') } catch {}
+			throw error
+		}
+	}
+
+	function encode(record, line) {
+		if (record.type !== 'forecast' || !record.forecast) return [line, null]
+		const { nowMs, estimated, routeOnly, requestingFleet, search } = record.forecast
+		const summary = { ...record, forecast: { nowMs, estimated, routeOnly, requestingFleet, search } }
+		return [JSON.stringify(summary), gzipSync(JSON.stringify(record.forecast))]
+	}
+
+	const migrated = transaction(() => {
+		const columns = query(prepare('PRAGMA table_info(automated_travel_diagnostics)'), 'all')
+		if (!columns.some(column => column.name === 'forecast_gzip')) {
+			db.exec('ALTER TABLE automated_travel_diagnostics ADD COLUMN forecast_gzip BLOB')
+		}
+		const next = prepare(`SELECT id, payload FROM automated_travel_diagnostics
+			WHERE id > ? AND forecast_gzip IS NULL AND event_type = 'forecast'
+			AND json_type(payload, '$.forecast') = 'object' ORDER BY id LIMIT 1`)
+		const update = prepare('UPDATE automated_travel_diagnostics SET payload = ?, forecast_gzip = ? WHERE id = ?')
+		let lastId = 0
+		for (let row; (row = query(next, 'get', lastId)); lastId = row.id) {
+			query(update, 'run', ...encode(JSON.parse(row.payload), row.payload), row.id)
+		}
+		return lastId > 0
+	})
+
+	const pageSize = query(prepare('PRAGMA page_size'), 'get').page_size
+	const maxPages = Math.floor(maxStorageBytes / pageSize)
+	const targetPages = Math.floor(maxPages * 0.75)
+	const pageCount = prepare('PRAGMA page_count')
+	const freeCount = prepare('PRAGMA freelist_count')
+	const rowCount = prepare('SELECT COUNT(*) AS count FROM automated_travel_diagnostics')
+	const removeOldest = prepare(`DELETE FROM automated_travel_diagnostics WHERE id IN (
+		SELECT id FROM automated_travel_diagnostics ORDER BY id LIMIT ?)`)
+	const pages = () => query(pageCount, 'get').page_count
+	const freePages = () => query(freeCount, 'get').freelist_count
+	function maintainStorage() {
+		const allocated = pages()
+		if (allocated <= maxPages) return
+		transaction(() => {
+			let used = pages() - freePages()
+			while (used > targetPages) {
+				const { count } = query(rowCount, 'get')
+				if (count <= 1) break
+				const remove = Math.min(count - 1, Math.ceil(count * (used - targetPages) / used))
+				query(removeOldest, 'run', remove)
+				used = pages() - freePages()
+			}
+		})
+		db.exec('VACUUM')
+	}
+	// Compact older databases immediately and recover space if an earlier compaction was interrupted.
+	if (pages() > maxPages) maintainStorage()
+	else if (migrated || freePages() > pages() / 2) db.exec('VACUUM')
+
 	const insertSql = 'INSERT INTO automated_travel_diagnostics ' +
-		'(instance_name, fleet, recorded_at, run_id, event_type, move_type, payload) VALUES (?, ?, ?, ?, ?, ?, ?)'
-	const insert = db.prepare(insertSql)
+		'(instance_name, fleet, recorded_at, run_id, event_type, move_type, payload, forecast_gzip) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+	const insert = prepare(insertSql)
 	parentPort.on('message', ({ id, line }) => {
 		try {
 			if (line === null) {
-				if (bindingPath) insert.finalize()
+				if (bindingPath) for (const statement of statements) statement.finalize()
 				db.close()
 				parentPort.postMessage({ id, ok: true })
 				parentPort.close()
@@ -149,9 +226,12 @@ function runTravelDiagnosticsWorker()
 				typeof record.timestamp !== 'string' || !['forecast', 'movement_selected', 'fuel_preflight'].includes(record.type)) {
 				throw new Error('Invalid automated travel diagnostic')
 			}
-			const values = [instance, record.fleet, record.timestamp, record.runId ?? null, record.type, record.moveType ?? null, line]
-			if (bindingPath) insert.run(values)
-			else insert.run(...values)
+			query(insert, 'run', instance, record.fleet, record.timestamp, record.runId ?? null, record.type, record.moveType ?? null,
+				...encode(record, line))
+			// A temporary reader lock can defer maintenance. The inserted diagnostic is already committed.
+			try { maintainStorage() } catch (error) {
+				console.warn('[SLYA] Travel diagnostics compaction deferred:', error.message)
+			}
 			parentPort.postMessage({ id, ok: true })
 		} catch (error) {
 			parentPort.postMessage({ id, ok: false, error: error.message })
@@ -159,7 +239,7 @@ function runTravelDiagnosticsWorker()
 	})
 }
 
-function createTravelDiagnosticsWriter({ databasePath, instance, resolveBinding = getTravelSqliteBinding })
+function createTravelDiagnosticsWriter({ databasePath, instance, resolveBinding = getTravelSqliteBinding, maxStorageBytes = 32 * 1024 * 1024 })
 {
 	const { Worker } = require('node:worker_threads')
 	let connection
@@ -172,7 +252,7 @@ function createTravelDiagnosticsWriter({ databasePath, instance, resolveBinding 
 				const bindingPath = await resolveBinding()
 				await fs.promises.mkdir(path.dirname(databasePath), { recursive: true })
 				const worker = new Worker('(' + runTravelDiagnosticsWorker.toString() + ')()', {
-					eval: true, workerData: { databasePath, bindingPath, instance }
+					eval: true, workerData: { databasePath, bindingPath, instance, maxStorageBytes }
 				})
 				const pending = new Map()
 				const fail = error => {
