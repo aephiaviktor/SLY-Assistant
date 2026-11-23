@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-325
+// @aephia-version 0.7.35-326
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -12640,109 +12640,6 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return fleet && fleet.automatedTravelPlanPending ? ' | -' : '';
 	}
 
-	function planAutomatedTravelModes(input) {
-		input = input || {};
-		const legs = Array.isArray(input.legs) ? input.legs.filter(Boolean) : [];
-		if(!legs.length) return { modes: [], summary: '', completedLegs: 0, reason: 'no_legs' };
-		const nowMs = Math.max(0, Number(input.nowMs || 0));
-		const currentLegIndex = Math.max(0, Math.floor(Number(input.currentLegIndex || 0))) % legs.length;
-		const horizonLegs = Math.max(1, Math.min(96, Math.floor(Number(input.horizonLegs || 32))));
-		const beamWidth = Math.max(8, Math.min(256, Math.floor(Number(input.beamWidth || 96))));
-		// Without scheduled replenishment, slowing down cannot change a pickup's stock.
-		const productionEvents = input.productionEvents || [];
-		const availableModes = productionEvents.length ? ['warp', 'subwarp'] : ['warp'];
-		const comparePlans = (a, b) => b.warpCount - a.warpCount || a.modeOrder.localeCompare(b.modeOrder) || a.timeMs - b.timeMs;
-		let states = [{
-			timeMs: nowMs,
-			inventory: cloneAutomatedInventory(input.inventory),
-			appliedEventIds: new Set(),
-			modes: [],
-			modeOrder: '',
-			warpCount: 0,
-			warpReadyMs: input.warpReadyMs || 0
-		}];
-		let best = states[0];
-		let warpShortfall = null;
-
-		for(let step = 0; step < horizonLegs; step++) {
-			const legIndex = (currentLegIndex + step) % legs.length;
-			const leg = legs[legIndex] || {};
-			const nextStates = new Map();
-			let bestBlocked = null;
-			for(const state of states) {
-				const prepared = applyAutomatedProductionEvents(state.inventory, productionEvents, state.appliedEventIds, state.timeMs);
-				let departureInventory = prepared.inventory;
-				let carriedManifest = leg.manifest || [];
-				if(step === 0 && input.currentLegLoaded !== false) {
-					if(Array.isArray(input.currentLoadedManifest)) carriedManifest = input.currentLoadedManifest;
-				} else {
-					if(!canWithdrawAutomatedManifest(departureInventory, leg.source, leg.manifest)) {
-						const shortfall = getAutomatedPickupShortfall(departureInventory, leg, state.timeMs, productionEvents, prepared.appliedEventIds);
-						if(!warpShortfall && state.warpCount === state.modes.length) warpShortfall = shortfall;
-						const waitMs = shortfall.replenishment ? shortfall.replenishment.atMs - state.timeMs : Infinity;
-						if(!bestBlocked || waitMs < bestBlocked.waitMs || (waitMs === bestBlocked.waitMs && comparePlans(state, bestBlocked) < 0)) {
-							bestBlocked = {...state, shortfall, waitMs};
-						}
-						continue;
-					}
-					const balances = departureInventory[String(leg.source || '')] || {};
-					carriedManifest = (leg.manifest || []).filter(entry => !entry?.cargoTotal || Number(balances[entry.res] || 0) >= Number(entry.requiredAmount !== undefined ? entry.requiredAmount : entry.amt || 0));
-					departureInventory = adjustAutomatedInventoryForManifest(departureInventory, leg.source, carriedManifest, -1);
-				}
-
-				const stockChoice = input.getStockTravelMode?.(legIndex, departureInventory);
-				for(const mode of stockChoice ? [stockChoice.mode] : availableModes) {
-					const durationMs = Math.max(1, Number(mode === 'warp' ? leg.warpMs : leg.subwarpMs) || 1);
-					const startMs = mode === 'warp' ? Math.max(state.timeMs, state.warpReadyMs) : state.timeMs;
-					const arrivalMs = startMs + durationMs;
-					const warpReadyMs = mode === 'warp' ? arrivalMs + (leg.warpRecoveryMs || 0) : state.warpReadyMs;
-					const arrived = applyAutomatedProductionEvents(departureInventory, productionEvents, prepared.appliedEventIds, arrivalMs);
-					const arrivalInventory = adjustAutomatedInventoryForManifest(arrived.inventory, leg.destination, carriedManifest, 1);
-					const next = {
-						timeMs: arrivalMs,
-						inventory: arrivalInventory,
-						appliedEventIds: arrived.appliedEventIds,
-						warpReadyMs,
-						modes: state.modes.concat(mode),
-						modeOrder: state.modeOrder + (mode === 'warp' ? '0' : '1'),
-						warpCount: state.warpCount + (mode === 'warp' ? 1 : 0),
-						firstSubwarp: state.firstSubwarp || (mode === 'subwarp' ? {leg: step + 1, stock: stockChoice?.stock} : null)
-					};
-					const key = JSON.stringify([arrivalMs, warpReadyMs, arrivalInventory, [...arrived.appliedEventIds].sort()]);
-					const existing = nextStates.get(key);
-					if(!existing || comparePlans(next, existing) < 0) nextStates.set(key, next);
-				}
-			}
-			if(!nextStates.size) {
-				best = bestBlocked || best;
-				break;
-			}
-			const ranked = [...nextStates.values()].sort(comparePlans);
-			best = ranked[0];
-			states = ranked.slice(0, beamWidth);
-			if(ranked.length > beamWidth) {
-				// Preserve enough delay to bridge production, even when faster plans fill the beam.
-				const latestByWarpCount = new Map();
-				for(const state of ranked) {
-					const latest = latestByWarpCount.get(state.warpCount);
-					if(!latest || state.timeMs > latest.timeMs) latestByWarpCount.set(state.warpCount, state);
-				}
-				states = [...new Set([...states, ...latestByWarpCount.values()])];
-			}
-		}
-
-		return {
-			modes: best.modes,
-			summary: compressAutomatedTravelPlan(best.modes),
-			completedLegs: best.modes.length,
-			projectedEndMs: best.timeMs,
-			warpCount: best.warpCount,
-			shortfall: best.shortfall,
-			firstSubwarp: best.firstSubwarp && {...best.firstSubwarp, shortfall: warpShortfall},
-			reason: best.modes.length === horizonLegs ? 'forecast_complete' : 'inventory_horizon'
-		};
-	}
-
 	function hasTransportFuelRequiredLoadRetry(resourceName) {
 		const parts = String(resourceName || '').split(',').map(value => value.trim()).filter(Boolean);
 		if(parts.length < 1) return false;
@@ -12811,6 +12708,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			source,
 			destination,
 			manifest,
+			cargoSizes,
+			keepOne: Boolean(globalSettings.transportKeep1),
 			configuredMode: leg?.moveType || 'automated',
 			roundTrip: Boolean(leg?.roundTrip),
 			warpMs: Math.max(1000, Math.ceil((calculateWarpTime(fleet, distance) + (warpJumps - 1) * warpCooldown) * 1000)),
@@ -12835,6 +12734,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const speedMultiplier = Math.max(0.01, Number(input.speedMultiplier || 1));
 		const numberValue = value => Math.max(0, Number(value && value.toNumber ? value.toNumber() : value || 0));
 		const mintValue = value => value && value.toString ? value.toString() : String(value || '');
+		let firstStage = null;
 
 		function craft(recipe, runs, stack) {
 			if(!recipe || !(runs > 0)) return { durationSeconds: 0, stages: 0, unavailable: !recipe };
@@ -12864,7 +12764,12 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			}
 			const outputMint = mintValue(recipe.output && recipe.output.mint);
 			const outputAmount = numberValue(recipe.output && recipe.output.amount) * runs;
-			durationSeconds += numberValue(recipe.duration) * runs / crew / speedMultiplier;
+			const stageSeconds = numberValue(recipe.duration) * runs / crew / speedMultiplier;
+			if(!firstStage) firstStage = {
+				res: outputMint, amount: outputAmount, durationSeconds: stageSeconds, final: recipe === input.targetRecipe,
+				ingredients: (recipe.input || []).map(entry => ({res: mintValue(entry.mint), amount: numberValue(entry.amount) * runs}))
+			};
+			durationSeconds += stageSeconds;
 			stages += 1;
 			if(outputMint) inventory[outputMint] = Math.max(0, Number(inventory[outputMint] || 0)) + outputAmount;
 			return { durationSeconds, stages, unavailable: false };
@@ -12876,21 +12781,79 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return {
 			...result,
 			outputAmount: targetRuns * numberValue(outputValue),
+			firstStage,
 			inventory
 		};
 	}
 
-	async function readAutomatedRouteInventory(legs) {
-		const inventory = {};
-		const requirementsByLocation = {};
-		for(const leg of (legs || [])) {
-			const location = String(leg.source || '');
-			if(!requirementsByLocation[location]) requirementsByLocation[location] = new Set();
-			for(const entry of getAutomatedRequiredManifest(leg.manifest)) requirementsByLocation[location].add(entry.res);
+	async function readAutomatedCraftConfigs() {
+		const configs = [];
+		for(let index = 1; index <= Math.max(0, Number(globalSettings.craftingJobs || 0)); index++) {
+			try {
+				const raw = await GM.getValue('craft' + index, '{}');
+				const config = typeof raw === 'string' ? JSON.parse(raw || '{}') : raw;
+				if(config && config.item && Number(config.amount || 0) > 0 && Number(config.crew || 0) > 0) {
+					configs.push({...config, label: config.label || 'craft' + index});
+				}
+			} catch(error) {}
 		}
-		for(const [location, resources] of Object.entries(requirementsByLocation)) {
+		return configs;
+	}
+
+	function getAutomatedCraftIngredientMints(recipe, recipes, mints = new Set()) {
+		for(const ingredient of recipe.input || []) {
+			const mint = String(ingredient.mint);
+			if(mints.has(mint)) continue;
+			mints.add(mint);
+			const producer = recipes.find(candidate => String(candidate.output?.mint) === mint);
+			if(producer) getAutomatedCraftIngredientMints(producer, recipes, mints);
+		}
+		return mints;
+	}
+
+	function getAutomatedCraftIngredientsByLocation(legs, configs, locations = new Set()) {
+		const result = new Map();
+		if(!configs.length) return result;
+		const requirements = getInventoryForecastRequirements(legs, locations);
+		for(const config of configs) {
+			const location = getTransportCoordKey(config.coordinates);
+			const recipe = craftRecipes.find(candidate => candidate.name === config.item);
+			const output = String(recipe?.output?.mint || '');
+			if(!output || (!locations.has(location) && !requirements.get(location)?.has(output))) continue;
+			const mints = result.get(location) || new Set();
+			getAutomatedCraftIngredientMints(recipe, craftRecipes, mints);
+			result.set(location, mints);
+		}
+		return result;
+	}
+
+	function getInventoryForecastRequirements(legs, locations = new Set()) {
+		const requirements = new Map(Array.from(locations, location => [location, null]));
+		for(const leg of legs || []) {
+			if(!leg.source || requirements.get(leg.source) === null) continue;
+			const resources = requirements.get(leg.source) || new Set();
+			const manifest = leg.trackAllCargo ? leg.manifest : getAutomatedRequiredManifest(leg.manifest);
+			for(const entry of manifest || []) {
+				if(entry?.res && (!leg.trackAllCargo || Number(entry.amt) > 0)) resources.add(entry.res);
+			}
+			requirements.set(leg.source, resources);
+		}
+		return requirements;
+	}
+
+	async function readAutomatedRouteInventory(legs, craftIngredients = new Map(), locations = new Set()) {
+		const inventory = {};
+		const requirements = getInventoryForecastRequirements(legs, locations);
+		for(const leg of legs || []) {
+			const resources = requirements.get(leg.source);
+			if(!resources) continue;
+			for(const entry of leg.manifest || []) {
+				if(entry.res && (leg.trackAllCargo || craftIngredients.get(leg.destination)?.has(entry.res))) resources.add(entry.res);
+			}
+		}
+		for(const [location, resources] of requirements) {
 			inventory[location] = {};
-			if(!location || resources.size < 1) continue;
+			if(resources?.size === 0) continue;
 			const coords = ConvertCoords(location);
 			const starbase = await getStarbaseFromCoords(coords[0], coords[1], true);
 			const starbasePlayer = starbase && await getStarbasePlayer(userProfileAcct, starbase.publicKey);
@@ -12904,17 +12867,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return inventory;
 	}
 
-	async function collectAutomatedCraftingProductionEvents(legs, nowMs = Date.now()) {
+	async function collectAutomatedCraftingProductionEvents(legs, nowMs = Date.now(), locations = new Set()) {
 		const events = [];
 		const seen = new Set();
-		const requirementsByLocation = {};
-		for(const leg of (legs || [])) {
-			const location = String(leg.source || '');
-			if(!requirementsByLocation[location]) requirementsByLocation[location] = new Set();
-			for(const entry of getAutomatedRequiredManifest(leg.manifest)) requirementsByLocation[location].add(entry.res);
-		}
-		for(const [location, resources] of Object.entries(requirementsByLocation)) {
-			if(!location || resources.size < 1) continue;
+		for(const [location, resources] of getInventoryForecastRequirements(legs, locations)) {
+			if(resources?.size === 0) continue;
 			const coords = ConvertCoords(location);
 			const starbase = await getStarbaseFromCoords(coords[0], coords[1], true);
 			const starbasePlayerAcct = starbase && await getStarbasePlayer(userProfileAcct, starbase.publicKey);
@@ -12931,7 +12888,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					const recipe = craftRecipes.find(item => item.publicKey.toString() === process.account.recipe.toString());
 					const res = recipe && recipe.output && recipe.output.mint ? recipe.output.mint.toString() : '';
 					const status = maybeBnToNumber(process.account.status, process.account.status);
-					if(!recipe || !resources.has(res) || ![0, 1, 2, 3].includes(status)) continue;
+					if(!recipe || (resources && !resources.has(res)) || ![0, 1, 2, 3].includes(status)) continue;
 					const outputAmount = getAutomatedCraftOutputAmount(process, recipe);
 					if(!outputAmount) continue;
 					const endTime = Number(process.account.endTime && process.account.endTime.toNumber ? process.account.endTime.toNumber() : process.account.endTime || 0);
@@ -12945,24 +12902,21 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return events;
 	}
 
-	async function collectAutomatedEstimatedCraftingProductionEvents(legs, inventory, nowMs = Date.now()) {
+	async function collectAutomatedEstimatedCraftingProductionEvents(legs, inventory, nowMs = Date.now(), configs, locations = new Set()) {
 		const events = [];
-		const requirementsByLocation = {};
-		for(const leg of (legs || [])) {
-			const location = String(leg.source || '');
-			if(!requirementsByLocation[location]) requirementsByLocation[location] = new Set();
-			for(const entry of getAutomatedRequiredManifest(leg.manifest)) requirementsByLocation[location].add(entry.res);
+		configs = configs || await readAutomatedCraftConfigs();
+		const inboundByLocation = new Map();
+		for(const leg of legs) {
+			const mints = inboundByLocation.get(leg.destination) || new Set();
+			for(const entry of leg.manifest || []) if(entry.res && Number(entry.amt) > 0) mints.add(String(entry.res));
+			inboundByLocation.set(leg.destination, mints);
 		}
-		const configs = [];
-		for(let index = 1; index <= Math.max(0, Number(globalSettings.craftingJobs || 0)); index++) {
-			try {
-				const raw = await GM.getValue('craft' + index, '{}');
-				const config = typeof raw === 'string' ? JSON.parse(raw || '{}') : raw;
-				if(config && config.item && Number(config.amount || 0) > 0 && Number(config.crew || 0) > 0) configs.push({...config, label: config.label || 'craft' + index});
-			} catch(error) {}
-		}
-		for(const [location, resources] of Object.entries(requirementsByLocation)) {
-			if(!location || resources.size < 1) continue;
+		for(const [location, requestedResources] of getInventoryForecastRequirements(legs, locations)) {
+			const localConfigs = configs.filter(config => getTransportCoordKey(config.coordinates) === location);
+			if(!localConfigs.length) continue;
+			const resources = requestedResources || new Set(localConfigs.map(config =>
+				String(craftRecipes.find(recipe => recipe.name === config.item)?.output?.mint || '')).filter(Boolean));
+			if(!resources.size) continue;
 			const coords = ConvertCoords(location);
 			const starbase = await getStarbaseFromCoords(coords[0], coords[1], true);
 			const starbasePlayerAcct = starbase && await getStarbasePlayer(userProfileAcct, starbase.publicKey);
@@ -12983,27 +12937,40 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const speedMultiplier = craftTime && Number(craftTime.resRemaining || 0) > 0 ? 1 : ([0, .2, .275, .35, .425, .5, .5][Math.max(0, Number(starbase.account.level || 0))] || 1);
 			for(const resource of resources) {
 				let bestEvent = null;
-				for(const config of configs) {
-					if(getTransportCoordKey(config.coordinates) !== location) continue;
+				for(const config of localConfigs) {
 					const targetRecipe = craftRecipes.find(recipe => recipe.name === config.item && recipe.output && recipe.output.mint && recipe.output.mint.toString() === resource);
 					if(!targetRecipe) continue;
 					const projectedInventory = {...((inventory || {})[location] || {})};
 					let activeRemainingMs = 0;
 					let activeStages = 0;
+					let pendingOutput = null;
 					const active = processesByCraftingId.get(Number(config.craftingId || 0));
 					if(active) {
 						const activeMint = active.recipe.output && active.recipe.output.mint ? active.recipe.output.mint.toString() : '';
 						const activeOutput = getAutomatedCraftOutputAmount(active.process, active.recipe);
-						if(activeMint && activeOutput > 0) projectedInventory[activeMint] = Number(projectedInventory[activeMint] || 0) + activeOutput;
+						if(activeMint && activeOutput > 0) {
+							projectedInventory[activeMint] = Number(projectedInventory[activeMint] || 0) + activeOutput;
+							const processKey = active.process.publicKey?.toBase58();
+							pendingOutput = {res: activeMint, amount: activeOutput, final: activeMint === resource,
+								eventId: processKey ? 'craft:' + processKey : null};
+						}
 						const endValue = active.process.account.endTime;
 						const endTime = Number(endValue && endValue.toNumber ? endValue.toNumber() : endValue || 0);
 						activeRemainingMs = Math.max(0, endTime - Number(craftTime && craftTime.starbaseTime || 0)) * 1000 / speedMultiplier;
 						activeStages = 1;
 					}
-					const estimate = estimateAutomatedCraftChain({ targetRecipe, targetRuns: Number(config.amount || 0), crew: Number(config.crew || 0), inventory: projectedInventory, recipes: craftRecipes, speedMultiplier });
-					if(estimate.unavailable || !(estimate.outputAmount > 0) || !Number.isFinite(estimate.durationSeconds)) continue;
+					const job = {targetRecipe, targetRuns: Number(config.amount || 0), crew: Number(config.crew || 0), recipes: craftRecipes, speedMultiplier};
+					const estimate = estimateAutomatedCraftChain({...job, inventory: projectedInventory});
+					const canEstimate = !estimate.unavailable && estimate.outputAmount > 0 && Number.isFinite(estimate.durationSeconds);
+					const inbound = inboundByLocation.get(location);
+					const usesProjectedInputs = locations.has(location) || legs.some(leg => leg.trackAllCargo && leg.source === location) ||
+						(inbound && [...getAutomatedCraftIngredientMints(targetRecipe, craftRecipes)].some(mint => inbound.has(mint)));
+					if(!canEstimate && !usesProjectedInputs) continue;
 					const stages = activeStages + estimate.stages;
-					const event = { id: 'craft-estimate:' + config.label + ':' + resource, atMs: nowMs + activeRemainingMs + estimate.durationSeconds * 1000 + Math.max(1, stages) * 60000, location, res: resource, amount: estimate.outputAmount, source: 'craft-estimate' };
+					const event = {id: 'craft-estimate:' + config.label + ':' + location + ':' + resource,
+						atMs: canEstimate ? nowMs + activeRemainingMs + estimate.durationSeconds * 1000 + Math.max(1, stages) * 60000 : Infinity,
+						location, res: resource, amount: estimate.outputAmount, source: 'craft-estimate'};
+					if(usesProjectedInputs) event.job = {...job, readyAtMs: nowMs + activeRemainingMs + activeStages * 60000, pendingOutput};
 					if(!bestEvent || event.atMs < bestEvent.atMs) bestEvent = event;
 				}
 				if(bestEvent) events.push(bestEvent);
@@ -13012,7 +12979,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return events;
 	}
 
-	async function collectAutomatedMiningProductionEvents(legs, nowMs = Date.now()) {
+	async function collectAutomatedMiningProductionEvents(legs, nowMs = Date.now(), locations = new Set()) {
 		const events = [];
 		const requirementsByLocation = {};
 		for(const leg of (legs || [])) {
@@ -13023,7 +12990,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		for(const miner of (userFleets || [])) {
 			const location = getTransportCoordKey(miner && miner.starbaseCoord);
 			const res = String(miner && miner.mineResource || '');
-			const requiredAmount = Number(requirementsByLocation[location] && requirementsByLocation[location].get(res) || 0);
+			const requiredAmount = locations.has(location) || legs.some(leg => leg.trackAllCargo && leg.source === location &&
+				leg.manifest.some(entry => entry?.res === res && Number(entry.amt) > 0))
+				? Infinity : Number(requirementsByLocation[location]?.get(res) || 0);
 			if(!requiredAmount || !['Mine', 'Cargo / Mine'].includes(String(miner.assignment || '')) || !(Number(miner.mineEnd || 0) > nowMs)) continue;
 			const cargoSize = Math.max(1, Number(cargoItems.find(item => item.token === res)?.size || 1));
 			const conservativeAmount = Math.min(requiredAmount, Math.max(0, Math.floor(Number(miner.cargoCapacity || 0) / cargoSize)));
@@ -13048,17 +13017,94 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return inventoryAmount < 10 * cargoCapacity ? 'subwarp' : 'warp';
 	}
 
-	function planSharedAutomatedTravel(fleets, inventory, productionEvents, nowMs, horizonLegs = 48) {
-		let states = [{inventory, appliedEventIds: new Set(), fleets, completed: 0, warps: 0, modeOrder: '', shortfallMs: 0, timeMs: nowMs}];
+	function getAutomatedArrivalManifest(cargo) {
+		return (cargo || []).map(entry => entry.unloadAmount === undefined
+			? entry : {res: entry.res, amt: entry.unloadAmount, cargoTotal: true});
+	}
+
+	function projectAutomatedIngredientCargo(fleet, leg, balances, checkedCargo) {
+		const ingredients = leg.craftIngredients;
+		if(!leg.trackAllCargo && !ingredients?.size) return checkedCargo;
+		const sizes = leg.cargoSizes || {};
+		const unitSize = entry => Math.max(1, Number(sizes[entry.res] || 1));
+		const cargo = checkedCargo.slice();
+		const available = {...balances};
+		let free = Math.max(0, Number(fleet.cargoCapacity || 0));
+		for(const entry of getAutomatedRequiredManifest(checkedCargo)) {
+			free = Math.max(0, free - entry.amount * unitSize(entry));
+			available[entry.res] = Math.max(0, Number(available[entry.res] || 0) - entry.amount);
+		}
+		for(const entry of leg.manifest) {
+			if(!entry?.res || entry.cargoTotal || !(Number(entry.amt) > 0)) continue;
+			const size = unitSize(entry);
+			const amount = Math.min(Number(entry.amt), Math.floor(free / size), Number(available[entry.res] || 0));
+			if(!(amount > 0)) continue;
+			free -= amount * size;
+			available[entry.res] -= amount;
+			if(leg.trackAllCargo || ingredients.has(entry.res)) cargo.push({res: entry.res, amt: amount, cargoTotal: true,
+				unloadAmount: Math.max(0, amount - (leg.keepOne ? 1 : 0))});
+		}
+		return cargo;
+	}
+
+	function advanceAutomatedTravelProduction(state, events, atMs) {
+		if(state.jobs.every(job => job.done)) return applyAutomatedProductionEvents(state.inventory, events, state.appliedEventIds, atMs);
+		const jobs = state.jobs.map(job => ({...job}));
+		const craftOutputs = state.craftOutputs.slice();
+		let inventory = state.inventory;
+		let appliedEventIds = state.appliedEventIds;
+		let timeMs = state.timeMs;
+		for(;;) {
+			({inventory, appliedEventIds} = applyAutomatedProductionEvents(inventory, events, appliedEventIds, timeMs));
+			for(const job of jobs) {
+				if(!job.pendingOutput || job.readyAtMs > timeMs) continue;
+				const {res, amount, final, eventId} = job.pendingOutput;
+				if(!eventId || !appliedEventIds.has(eventId)) {
+					const balances = inventory[job.location] ||= {};
+					balances[res] = Number(balances[res] || 0) + amount;
+					if(eventId) appliedEventIds.add(eventId);
+				}
+				job.pendingOutput = null;
+				job.done = final;
+			}
+			if(timeMs >= atMs) break;
+			// Fleet unloads at this timestamp are already credited before any new stage can start.
+			for(const job of jobs) {
+				if(job.done || job.pendingOutput || job.readyAtMs > timeMs) continue;
+				const balances = inventory[job.location] ||= {};
+				const {firstStage: next} = estimateAutomatedCraftChain({...job, inventory: balances});
+				if(!next?.res || !(next.amount > 0) || !Number.isFinite(next.durationSeconds)) continue;
+				for(const entry of next.ingredients) balances[entry.res] = Number(balances[entry.res] || 0) - entry.amount;
+				job.pendingOutput = {res: next.res, amount: next.amount, final: next.final};
+				job.readyAtMs = timeMs + next.durationSeconds * 1000 + 60000;
+				if(next.final) craftOutputs.push({id: job.id, location: job.location, res: next.res, amount: next.amount,
+					atMs: job.readyAtMs, source: 'craft-estimate'});
+			}
+			// Follow craft and production events between fleet stops in chronological order.
+			let nextMs = atMs;
+			for(const event of events) if(event.atMs > timeMs && event.atMs < nextMs) nextMs = event.atMs;
+			for(const job of jobs) if(!job.done && job.readyAtMs > timeMs && job.readyAtMs < nextMs) nextMs = job.readyAtMs;
+			timeMs = nextMs;
+		}
+		return {inventory, appliedEventIds, jobs, craftOutputs};
+	}
+
+	function planSharedAutomatedTravel(fleets, inventory, productionEvents, nowMs, horizonLegs = 48, beamWidth = 96) {
+		return simulateInventoryForecast(fleets, inventory, productionEvents, nowMs, horizonLegs, beamWidth).plans;
+	}
+
+	function simulateInventoryForecast(fleets, inventory, productionEvents, nowMs, horizonLegs, beamWidth, endAtMs = Infinity) {
+		const events = productionEvents.filter(event => !event.job);
+		const jobs = productionEvents.filter(event => event.job).map(({id, location, job}) => ({id, location, ...job}));
+		let states = [{inventory, appliedEventIds: new Set(), fleets, jobs, craftOutputs: [], completed: 0, warps: 0, modeOrder: '', shortfallMs: 0, timeMs: nowMs}];
 		let best;
 		const compare = (a, b) => b.completed - a.completed || a.shortfallMs - b.shortfallMs || b.warps - a.warps
 			|| a.modeOrder.localeCompare(b.modeOrder) || a.timeMs - b.timeMs;
 		const pickups = new Set(fleets.flatMap(fleet => fleet.legs.flatMap(leg =>
 			getAutomatedRequiredManifest(leg.manifest).map(entry => leg.source + ':' + entry.res))));
-		const hasDelivery = fleets.some(fleet => fleet.legs.some(leg =>
+		const hasDelivery = fleets.length > 1 && fleets.some(fleet => fleet.legs.some(leg =>
 			getAutomatedRequiredManifest(leg.manifest).some(entry => pickups.has(leg.destination + ':' + entry.res))));
 		const availableModes = productionEvents.length || hasDelivery ? ['warp', 'subwarp'] : ['warp'];
-		const beamWidth = 64;
 		while(states.length) {
 			const nextStates = new Map();
 			for(const state of states) {
@@ -13069,36 +13115,38 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					const first = state.fleets[index];
 					if(!first || candidate.atMs < first.atMs || (candidate.atMs === first.atMs && candidate.arriving && !first.arriving)) index = i;
 				}
-				if(index < 0) {
+				if(index < 0 || state.fleets[index].atMs > endAtMs) {
 					if(!best || compare(state, best) < 0) best = state;
 					continue;
 				}
 				const fleet = state.fleets[index];
 				const leg = fleet.legs[fleet.legIndex];
 				const atMs = fleet.atMs;
-				const prepared = applyAutomatedProductionEvents(state.inventory, productionEvents, state.appliedEventIds, atMs);
+				const prepared = advanceAutomatedTravelProduction(state, events, atMs);
 				const save = (nextFleet, balances, mode = null, shortfallMs = 0) => {
 					const nextFleets = state.fleets.slice();
 					nextFleets[index] = nextFleet;
 					const next = {
 						inventory: balances, appliedEventIds: prepared.appliedEventIds, fleets: nextFleets, timeMs: atMs,
+						jobs: prepared.jobs || state.jobs, craftOutputs: prepared.craftOutputs || state.craftOutputs,
 						completed: state.completed + (mode ? 1 : 0), warps: state.warps + (mode === 'warp' ? 1 : 0),
 						modeOrder: mode ? state.modeOrder + (mode === 'warp' ? '0' : '1') : state.modeOrder,
 						shortfallMs: state.shortfallMs + shortfallMs
 					};
-					const key = JSON.stringify([balances, [...prepared.appliedEventIds].sort(), nextFleets.map(item =>
+					const key = JSON.stringify([balances, [...prepared.appliedEventIds].sort(), next.jobs.map(job =>
+						[job.readyAtMs, job.pendingOutput, job.done]), nextFleets.map(item =>
 						[item.legIndex, item.atMs, item.arriving, item.done, item.modes.length, item.warpReadyMs, item.cargo])]);
 					const previous = nextStates.get(key);
 					if(!previous || compare(next, previous) < 0) nextStates.set(key, next);
 				};
 				if(fleet.arriving) {
-					const balances = adjustAutomatedInventoryForManifest(prepared.inventory, leg.destination, fleet.cargo, 1);
+					const balances = adjustAutomatedInventoryForManifest(prepared.inventory, leg.destination, getAutomatedArrivalManifest(fleet.cargo), 1);
 					save({...fleet, legIndex: (fleet.legIndex + 1) % fleet.legs.length, arriving: false, cargo: null,
 						done: fleet.modes.length >= horizonLegs}, balances);
 					continue;
 				}
 				if(leg.blocked) {
-					save({...fleet, done: true}, prepared.inventory);
+					save({...fleet, done: true, fuelLimited: true}, prepared.inventory);
 					continue;
 				}
 				let balances = prepared.inventory;
@@ -13106,10 +13154,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				if(cargo === null && !canWithdrawAutomatedManifest(balances, leg.source, leg.manifest)) {
 					const incoming = fleet.plannedModes ? state.fleets.flatMap(other =>
 						other.arriving && other.atMs > atMs && other.legs[other.legIndex].destination === leg.source
-							? getAutomatedRequiredManifest(other.cargo).map(entry => ({
+							? getAutomatedRequiredManifest(getAutomatedArrivalManifest(other.cargo)).map(entry => ({
 								atMs: other.atMs, location: leg.source, res: entry.res, amount: entry.amount, source: 'fleet delivery'
 							})) : []) : [];
-					const shortfall = getAutomatedPickupShortfall(balances, leg, atMs, productionEvents.concat(incoming), prepared.appliedEventIds);
+					const shortfall = getAutomatedPickupShortfall(balances, leg, atMs, events.concat(prepared.craftOutputs || [], incoming), prepared.appliedEventIds);
 					save({...fleet, done: true, shortfall}, balances, null,
 						shortfall.replenishment ? shortfall.replenishment.atMs - atMs : 0);
 					continue;
@@ -13119,7 +13167,9 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					continue;
 				}
 				if(cargo === null) {
-					cargo = leg.manifest.filter(entry => entry?.cargoTotal && Number(balances[leg.source]?.[entry.res] || 0) >= Number(entry.requiredAmount ?? entry.amt ?? 0));
+					const stocked = balances[leg.source] || {};
+					const checkedCargo = leg.manifest.filter(entry => entry?.cargoTotal && Number(stocked[entry.res] || 0) >= Number(entry.requiredAmount ?? entry.amt ?? 0));
+					cargo = projectAutomatedIngredientCargo(fleet.fleet, leg, stocked, checkedCargo);
 					balances = adjustAutomatedInventoryForManifest(balances, leg.source, cargo, -1);
 				}
 				const stockChoice = !fleet.fixedMode && !leg.fixedMode && fleet.getStockTravelMode?.(fleet.legIndex, balances);
@@ -13128,8 +13178,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				const modes = fixedMode || plannedMode ? [fixedMode || plannedMode] : availableModes;
 				for(const mode of modes) {
 					const startMs = mode === 'warp' ? Math.max(atMs, fleet.warpReadyMs || 0) : atMs;
-					const arrivalMs = startMs + (mode === 'warp' ? leg.warpMs : leg.subwarpMs);
-					const warpReadyMs = mode === 'warp' ? arrivalMs + (leg.warpRecoveryMs || 0) : fleet.warpReadyMs;
+					const durationMs = Math.max(1, Number(mode === 'warp' ? leg.warpMs : leg.subwarpMs) || 1);
+					const arrivalMs = startMs + durationMs;
+					const warpReadyMs = mode === 'warp' ? arrivalMs + (leg.warpRecoveryMs || 0)
+						: (fleet.warpReadyMs > arrivalMs ? fleet.warpReadyMs : 0);
 					const firstSubwarp = fleet.firstSubwarp || (mode === 'subwarp' ? {
 						leg: fleet.modes.length + 1, stock: stockChoice?.stock, reason: leg.subwarpReason
 					} : null);
@@ -13141,18 +13193,36 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			if(!ranked.length) break;
 			states = ranked.slice(0, beamWidth);
 			if(ranked.length > beamWidth) {
-				// Keep slower schedules that can span the time until a batch becomes available.
-				const late = ranked.sort((a, b) => b.timeMs - a.timeMs || compare(a, b)).slice(0, beamWidth);
-				states = [...new Set([...states, ...late])];
+				// Keep delayed schedules at every Warp count so a narrow search can still bridge production.
+				const latestByWarpCount = new Map();
+				for(const candidate of ranked) {
+					const latest = Math.max(...candidate.fleets.map(fleet => fleet.atMs));
+					const previous = latestByWarpCount.get(candidate.warps);
+					if(!previous || latest > previous.latest) latestByWarpCount.set(candidate.warps, {candidate, latest});
+				}
+				const delayed = [...latestByWarpCount.values()];
+				if(fleets.length > 1) delayed.sort((a, b) => b.latest - a.latest).splice(beamWidth);
+				states = [...new Set([...states, ...delayed.map(entry => entry.candidate)])];
 			}
 		}
-		return best.fleets.map(({modes, firstSubwarp, shortfall}) => ({
-			modes, summary: compressAutomatedTravelPlan(modes), completedLegs: modes.length, firstSubwarp, shortfall
+		const projection = Number.isFinite(endAtMs) ? advanceAutomatedTravelProduction(best, events, endAtMs) : best;
+		const plans = best.fleets.map(({modes, firstSubwarp, shortfall}) => ({
+			modes, summary: compressAutomatedTravelPlan(modes), completedLegs: modes.length, firstSubwarp, shortfall, craftOutputs: best.craftOutputs,
+			reason: modes.length === horizonLegs ? 'forecast_complete' : 'inventory_horizon'
 		}));
+		return {
+			plans, projectedInventory: projection.inventory, craftOutputs: projection.craftOutputs || best.craftOutputs,
+			limitedFleets: best.fleets.flatMap(fleet => fleet.shortfall || fleet.fuelLimited ||
+				(fleet.done && fleet.modes.length >= horizonLegs && fleet.atMs < endAtMs) ? [{
+					fleet: fleet.fleet?.label, atMs: fleet.atMs,
+					reason: fleet.shortfall ? 'pickup_shortfall' : fleet.fuelLimited ? 'fuel_capacity' : 'leg_limit'
+				}] : [])
+		};
 	}
 
 	function getAutomatedCssStockSelector(fleet, legs) {
-		if(typeof getStarbaseNameFromCoords !== 'function') return undefined;
+		// The CSS threshold covers a round trip. Other stops in a longer loop have their own stock.
+		if(legs.length !== 2 || typeof getStarbaseNameFromCoords !== 'function') return undefined;
 		const pickups = legs.map(leg => ({
 			source: leg.source,
 			sourceStarbaseName: getStarbaseNameFromCoords(...leg.source.split(',').map(Number)),
@@ -13173,7 +13243,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		};
 	}
 
-	function explainSharedAutomatedSubwarp(participants, plans, index, inventory, productionEvents, nowMs) {
+	function explainSharedAutomatedSubwarp(participants, plans, index, inventory, productionEvents, nowMs, horizonLegs) {
 		const decision = plans[index].firstSubwarp;
 		if(!decision || decision.reason || decision.stock) return decision;
 		// Try Warp on this leg with the other planned departures held constant.
@@ -13182,7 +13252,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			if(i === index) plannedModes[decision.leg - 1] = 'warp';
 			return {...participant, plannedModes};
 		});
-		const replay = planSharedAutomatedTravel(alternative, inventory, productionEvents, nowMs);
+		const replay = planSharedAutomatedTravel(alternative, inventory, productionEvents, nowMs, horizonLegs);
 		const dryPickups = replay.flatMap((plan, i) => plan.shortfall &&
 			(!plans[i].shortfall || plan.shortfall.atMs < plans[i].shortfall.atMs || plan.completedLegs < plans[i].completedLegs)
 			? [{...plan.shortfall, fleetLabel: participants[i].fleet.label}] : []);
@@ -13190,18 +13260,21 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return {...decision, shortfall: dryPickups[0], reason: dryPickups.length ? undefined : 'shared schedule preference'};
 	}
 
-	async function getAutomatedLoadedManifest(fleet, leg, loadedCargo) {
+	async function getAutomatedLoadedManifest(fleet, leg, loadedCargo, ingredients) {
 		const loadedAmounts = Object.create(null);
 		for(const { mint, amount } of loadedCargo || []) {
 			if(mint) loadedAmounts[mint] = (loadedAmounts[mint] || 0) + Math.max(0, Number(amount || 0));
 		}
-		const checkedMints = new Set(getAutomatedRequiredManifest(leg.manifest).map(entry => entry.res));
-		if(!checkedMints.size) return [];
+		const trackedMints = new Set(getAutomatedRequiredManifest(leg.manifest).map(entry => entry.res));
+		for(const entry of leg.manifest || []) {
+			if(entry?.res && (leg.trackAllCargo || ingredients?.has(entry.res))) trackedMints.add(entry.res);
+		}
+		if(!trackedMints.size) return [];
 		const ammoMint = sageGameAcct.account.mints.ammo.toString();
-		const ammoBankAmount = checkedMints.has(ammoMint) ? await getTransportAmmoBankAmount(fleet) : 0;
+		const ammoBankAmount = trackedMints.has(ammoMint) ? await getTransportAmmoBankAmount(fleet) : 0;
 		const unloadPlan = planTransportCargoUnload(leg.manifest, loadedAmounts, ammoBankAmount, ammoMint, globalSettings.transportKeep1);
 		return unloadPlan.entries
-			.filter(entry => checkedMints.has(entry.res))
+			.filter(entry => trackedMints.has(entry.res))
 			.map(({ res, amount }) => ({ res, amt: amount + (res === ammoMint ? unloadPlan.ammoToUnload : 0), cargoTotal: true }))
 			.filter(entry => entry.amt > 0);
 	}
@@ -13233,7 +13306,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		});
 	}
 
-	async function getAutomatedPeerStart(fleet, config, legs, nowMs) {
+	async function getAutomatedPeerStart(fleet, config, legs, nowMs, craftIngredients = new Map()) {
 		const account = await getAccountInfo(fleet.label, 'shared travel forecast', fleet.publicKey);
 		if(!account) return null;
 		const [state, extra] = getFleetState(account);
@@ -13245,11 +13318,13 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const matchesLeg = predicate => legs[routeIndex] && predicate(legs[routeIndex]) ? routeIndex : legs.findIndex(predicate);
 		const base = {fleet, legs, warpReadyMs, modes: [], cargo: null, atMs: nowMs};
 		const readCargo = async leg => {
-			if(!getAutomatedRequiredManifest(leg.manifest).length) return [];
+			const ingredients = craftIngredients.get(leg.destination);
+			if(!leg.trackAllCargo && !getAutomatedRequiredManifest(leg.manifest).length
+				&& !leg.manifest.some(entry => ingredients?.has(entry.res))) return [];
 			const tokens = await solanaReadConnection.getParsedTokenAccountsByOwner(fleet.cargoHold, {programId: tokenProgramPK});
 			return getAutomatedLoadedManifest(fleet, leg, tokens.value.map(item => ({
 				mint: item.account.data.parsed.info.mint, amount: item.account.data.parsed.info.tokenAmount.uiAmount
-			})));
+			})), ingredients);
 		};
 		if(state === 'MoveWarp' || state === 'MoveSubwarp') {
 			const from = getTransportCoordKey(extra.fromSector);
@@ -13291,95 +13366,144 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			atMs: Math.max(nowMs, Number(fleet.transportLoadRetryAt || 0))};
 	}
 
-	async function collectSharedAutomatedFleets(fleet, legs, nowMs) {
+	async function collectSharedAutomatedFleets(fleet, legs, nowMs, configs = [], locations = new Set()) {
 		const peers = userFleets.filter(peer => peer !== fleet && !peer.stopping && !/STOPPED|ERROR/.test(peer.state || '')
 			&& ['Transport', 'Supply Chain', 'Cargo / Mine'].includes(peer.assignment));
-		const pickupKeys = route => route.flatMap(leg => getAutomatedRequiredManifest(leg.manifest).map(entry => `${leg.source}:${entry.res}`));
-		const sharedKeys = new Set(pickupKeys(legs));
+		const routeStockKeys = (route, stop) => route.flatMap(leg => {
+			const manifest = leg.trackAllCargo ? leg.manifest.filter(entry => entry?.res && Number(entry.amt) > 0)
+				: getAutomatedRequiredManifest(leg.manifest);
+			return manifest.map(entry => `${leg[stop]}:${entry.res}`);
+		});
+		const pickups = new Set(routeStockKeys(legs, 'source'));
+		const deliveries = new Set(routeStockKeys(legs, 'destination'));
+		const suppliesCraft = (route, ingredients) => route.some(leg => leg.manifest.some(entry => Number(entry.amt) > 0
+			&& ingredients.get(leg.destination)?.has(entry.res)));
+		const involvedLegs = legs.slice();
+		let craftIngredients = getAutomatedCraftIngredientsByLocation(involvedLegs, configs, locations);
 		const candidates = await Promise.all(peers.map(async peer => {
 			const config = JSON.parse(await GM.getValue(peer.publicKey.toString(), '{}'));
 			if(!['Transport', 'Supply Chain', 'Cargo / Mine'].includes(config.assignment)) return null;
-			const route = getAutomatedPeerRoute(peer, config).map(leg => getAutomatedRouteLeg(peer, leg)).filter(leg => leg.source && leg.destination);
-			return {peer, config, route, keys: pickupKeys(route)};
+			const route = getAutomatedPeerRoute(peer, config)
+				.map(leg => ({...getAutomatedRouteLeg(peer, leg), trackAllCargo: locations.size > 0}))
+				.filter(leg => leg.source && leg.destination);
+			return {peer, config, route, pickups: routeStockKeys(route, 'source'), deliveries: routeStockKeys(route, 'destination'),
+				craftIngredients: getAutomatedCraftIngredientsByLocation(route, configs)};
 		}));
-		const participants = [];
-		// Include a peer's other shared pickups so connected routes use the same balances.
+		const connected = [];
+		// A pickup can depend on another fleet's withdrawals, deliveries or craft ingredients.
 		for(let added = true; added;) {
 			added = false;
 			for(let i = 0; i < candidates.length; i++) {
 				const candidate = candidates[i];
-				if(!candidate?.keys.some(key => sharedKeys.has(key))) continue;
+				if(!candidate) continue;
+				const servesRequestedBase = candidate.route.some(leg => locations.has(leg.source) || locations.has(leg.destination));
+				if(!servesRequestedBase && !suppliesCraft(candidate.route, craftIngredients) && !suppliesCraft(involvedLegs, candidate.craftIngredients)
+					&& !candidate.pickups.some(key => pickups.has(key) || deliveries.has(key))
+					&& !candidate.deliveries.some(key => pickups.has(key))) continue;
 				candidates[i] = null;
-				const start = await getAutomatedPeerStart(candidate.peer, candidate.config, candidate.route, nowMs);
-				if(!start) continue;
-				participants.push(start);
-				for(const key of candidate.keys) sharedKeys.add(key);
+				connected.push(candidate);
+				involvedLegs.push(...candidate.route);
+				craftIngredients = getAutomatedCraftIngredientsByLocation(involvedLegs, configs, locations);
+				for(const key of candidate.pickups) pickups.add(key);
+				for(const key of candidate.deliveries) deliveries.add(key);
 				added = true;
 			}
 		}
-		return participants;
+		const participants = await Promise.all(connected.map(({peer, config, route}) =>
+			getAutomatedPeerStart(peer, config, route, nowMs, craftIngredients)));
+		return participants.filter(Boolean);
+	}
+
+	async function prepareInventoryForecast(legs, nowMs, fleet = null, locations = new Set()) {
+		const configs = await readAutomatedCraftConfigs();
+		const peers = await collectSharedAutomatedFleets(fleet, legs, nowMs, configs, locations);
+		const allLegs = legs.concat(peers.flatMap(peer => peer.legs));
+		const craftIngredients = getAutomatedCraftIngredientsByLocation(allLegs, configs, locations);
+		const inventory = await readAutomatedRouteInventory(allLegs, craftIngredients, locations);
+		const directEvents = (await collectAutomatedCraftingProductionEvents(allLegs, nowMs, locations))
+			.concat(await collectAutomatedMiningProductionEvents(allLegs, nowMs, locations));
+		const covered = new Set(directEvents.map(event => String(event.location) + ':' + String(event.res)));
+		const estimatedEvents = (await collectAutomatedEstimatedCraftingProductionEvents(allLegs, inventory, nowMs, configs, locations))
+			.filter(event => !covered.has(String(event.location) + ':' + String(event.res)));
+		return {peers, craftIngredients, inventory, productionEvents: directEvents.concat(estimatedEvents), estimated: estimatedEvents.length > 0};
+	}
+
+	function prepareInventoryForecastFleets(fleets, inventory, productionEvents, craftIngredients) {
+		// Resolve simultaneous pickups consistently regardless of who refreshes the plan.
+		return fleets.slice().sort((a, b) => String(a.fleet.publicKey).localeCompare(String(b.fleet.publicKey))).map(participant => {
+			const hasProduction = participant.legs.some(leg => getAutomatedRequiredManifest(leg.manifest).some(entry =>
+				productionEvents.some(event => event.location === leg.source && event.res === entry.res)));
+			const select = hasProduction ? undefined : getAutomatedCssStockSelector(participant.fleet, participant.legs);
+			return {...participant, getStockTravelMode: select?.(participant.legIndex, inventory) ? select : undefined,
+				legs: getSharedAutomatedRoute(participant.fleet, participant.legs)
+					.map(leg => ({...leg, craftIngredients: craftIngredients.get(leg.destination)}))};
+		});
+	}
+
+	// Read-only forecast for a caller-supplied set of coordinates or all bases for this profile.
+	async function buildStarbaseInventoryForecast(starbaseCoords, hours = 24) {
+		const requested = starbaseCoords ?? validTargets.map(base => [base.x, base.y].join(','));
+		const locations = new Set((Array.isArray(requested) ? requested : [requested]).map(coords => {
+			const key = getTransportCoordKey(coords);
+			if(!/^-?\d+,-?\d+$/.test(key)) throw new RangeError('Invalid starbase coordinates: ' + key);
+			return key.split(',').map(Number).join(',');
+		}));
+		if(!Number.isFinite(hours) || hours <= 0) throw new RangeError('Inventory forecast hours must be positive');
+		const nowMs = Date.now();
+		const endAtMs = nowMs + hours * 3600000;
+		if(!Number.isFinite(endAtMs)) throw new RangeError('Inventory forecast end time is invalid');
+		if(!locations.size) return {nowMs, endAtMs, starbases: {}, productionEvents: [], limitedFleets: []};
+		const {peers, craftIngredients, inventory, productionEvents} = await prepareInventoryForecast([], nowMs, null, locations);
+		const routes = prepareInventoryForecastFleets(peers, inventory, productionEvents, craftIngredients);
+		const projection = simulateInventoryForecast(routes, inventory, productionEvents, nowMs, 192, 24, endAtMs);
+		const events = productionEvents.filter(event => !event.job).concat(projection.craftOutputs)
+			.filter(event => locations.has(event.location) && event.atMs <= endAtMs).sort((a, b) => a.atMs - b.atMs);
+		const starbases = Object.fromEntries(Array.from(locations, location => [location, {
+			current: inventory[location] || {}, projected: projection.projectedInventory[location] || {}
+		}]));
+		return {nowMs, endAtMs, starbases, productionEvents: events, limitedFleets: projection.limitedFleets};
 	}
 
 	async function buildAutomatedTravelForecast(fleet, routeLegs, currentLegIndex, loadedCargo = []) {
 		const legs = (routeLegs || []).map(leg => getAutomatedRouteLeg(fleet, leg)).filter(leg => leg.source && leg.destination);
 		if(!legs.length || !legs.some(leg => getAutomatedRequiredManifest(leg.manifest).length > 0)) return null;
 		const nowMs = Date.now();
-		const peers = await collectSharedAutomatedFleets(fleet, legs, nowMs);
-		const allLegs = legs.concat(peers.flatMap(peer => peer.legs));
-		const inventory = await readAutomatedRouteInventory(allLegs);
-		const directEvents = (await collectAutomatedCraftingProductionEvents(allLegs, nowMs)).concat(await collectAutomatedMiningProductionEvents(allLegs, nowMs));
-		const covered = new Set(directEvents.map(event => String(event.location) + ':' + String(event.res)));
-		const estimatedEvents = (await collectAutomatedEstimatedCraftingProductionEvents(allLegs, inventory, nowMs)).filter(event => !covered.has(String(event.location) + ':' + String(event.res)));
-		const productionEvents = directEvents.concat(estimatedEvents);
+		const {peers, craftIngredients, inventory, productionEvents, estimated} = await prepareInventoryForecast(legs, nowMs, fleet);
 		const legIndex = Math.max(0, Math.floor(Number(currentLegIndex || 0))) % legs.length;
-		const currentLoadedManifest = await getAutomatedLoadedManifest(fleet, legs[legIndex], loadedCargo);
-		const stockSelector = (owner, route, atIndex) => {
-			const hasProduction = route.some(leg => getAutomatedRequiredManifest(leg.manifest).some(entry =>
-				productionEvents.some(event => event.location === leg.source && event.res === entry.res)));
-			if(hasProduction) return undefined;
-			const select = getAutomatedCssStockSelector(owner, route);
-			return select?.(atIndex, inventory) ? select : undefined;
-		};
-		const getStockTravelMode = stockSelector(fleet, legs, legIndex);
+		const currentLoadedManifest = await getAutomatedLoadedManifest(fleet, legs[legIndex], loadedCargo, craftIngredients.get(legs[legIndex].destination));
 		let warpReadyMs = 0;
 		if(peers.length || productionEvents.length) {
 			const account = await getAccountInfo(fleet.label, 'travel forecast warp cooldown', fleet.publicKey);
 			if(account) warpReadyMs = maybeBnToNumber(sageProgram.coder.accounts.decode('fleet', account.data).warpCooldownExpiresAt) * 1000;
 		}
-		if(peers.length) {
-			const participants = [{fleet, legs, legIndex, atMs: nowMs, modes: [], cargo: currentLoadedManifest, warpReadyMs, getStockTravelMode},
-				...peers.map(peer => ({...peer, getStockTravelMode: stockSelector(peer.fleet, peer.legs, peer.legIndex)}))];
-			// Use the same tie order regardless of which fleet is refreshing its forecast.
-			participants.sort((a, b) => a.fleet.publicKey.toString().localeCompare(b.fleet.publicKey.toString()));
-			const routes = participants.map(participant => ({
-				...participant, legs: getSharedAutomatedRoute(participant.fleet, participant.legs)
-			}));
-			const shared = planSharedAutomatedTravel(routes, inventory, productionEvents, nowMs);
-			const index = participants.findIndex(participant => participant.fleet === fleet);
-			const subwarpDecision = i => explainSharedAutomatedSubwarp(routes, shared, i, inventory, productionEvents, nowMs);
-			return {...shared[index], firstSubwarp: subwarpDecision(index), productionEvents, estimated: estimatedEvents.length > 0,
-				sharedPlans: participants.flatMap((participant, i) => i !== index && participant.legs.some(leg => leg.configuredMode === 'automated')
-					? [{fleet: participant.fleet, modes: shared[i].modes, firstSubwarp: subwarpDecision(i)}] : [])};
-		}
-		// Plan past the displayed legs when a later estimated batch may affect today's departure.
+		const participants = [{fleet, legs, legIndex, atMs: nowMs, modes: [], cargo: currentLoadedManifest, warpReadyMs}, ...peers];
+		const routes = prepareInventoryForecastFleets(participants, inventory, productionEvents, craftIngredients);
 		const displayLegs = 48;
-		const plan = planAutomatedTravelModes({nowMs, legs, currentLegIndex: legIndex, currentLegLoaded: true,
-			currentLoadedManifest, inventory, productionEvents, horizonLegs: estimatedEvents.length ? 96 : displayLegs,
-			getStockTravelMode, warpReadyMs});
-		if(!plan || !plan.modes.length) return null;
-		if(!productionEvents.length && !getStockTravelMode && plan.completedLegs < displayLegs) {
+		const horizonLegs = estimated ? 96 : displayLegs;
+		const plans = planSharedAutomatedTravel(routes, inventory, productionEvents, nowMs, horizonLegs);
+		const index = routes.findIndex(participant => participant.fleet === fleet);
+		const plan = plans[index];
+		if(!plan.modes.length) return null;
+		if(!peers.length && !productionEvents.length && !routes[index].getStockTravelMode && plan.shortfall && plan.completedLegs < displayLegs) {
 			return {modes: [], summary: '', completedLegs: 0, reason: 'awaiting_final_output', productionEvents: [], shortfall: plan.shortfall};
 		}
-		if(plan.modes.length > displayLegs) {
-			plan.modes = plan.modes.slice(0, displayLegs);
-			plan.summary = compressAutomatedTravelPlan(plan.modes);
-			plan.completedLegs = plan.modes.length;
-			plan.reason = 'forecast_complete';
-		}
-		if(plan.firstSubwarp?.leg > displayLegs) plan.firstSubwarp = null;
-		plan.productionEvents = productionEvents;
-		plan.estimated = estimatedEvents.length > 0;
-		return plan;
+		const visiblePlan = i => {
+			const {modes, firstSubwarp, shortfall} = plans[i];
+			const visibleModes = modes.slice(0, displayLegs);
+			return {
+				modes: visibleModes,
+				summary: compressAutomatedTravelPlan(visibleModes),
+				completedLegs: visibleModes.length,
+				reason: visibleModes.length === displayLegs ? 'forecast_complete' : 'inventory_horizon',
+				firstSubwarp: firstSubwarp?.leg <= displayLegs
+					? explainSharedAutomatedSubwarp(routes, plans, i, inventory, productionEvents, nowMs, horizonLegs) : null,
+				shortfall
+			};
+		};
+		const reportedEvents = productionEvents.filter(event => !event.job).concat(plan.craftOutputs || []).sort((a, b) => a.atMs - b.atMs);
+		return {...visiblePlan(index), productionEvents: reportedEvents, estimated,
+			sharedPlans: routes.flatMap((participant, i) => i !== index && participant.legs.some(leg => leg.configuredMode === 'automated')
+				? [{fleet: participant.fleet, ...visiblePlan(i)}] : [])};
 	}
 
 	function logAutomatedSubwarpDecision(fleet, decision) {
@@ -14632,8 +14756,18 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				let routeMoveType = document.createElement('select');
 				routeMoveType.classList.add('transport-plus-movetype');
 				routeMoveType.style.width = '110px';
-				routeMoveType.innerHTML = '<option value="5">Warp Smart</option><option value="4">Automated</option><option value="0">Warp</option><option value="1">Subwarp</option><option value="2">Warp(SB) / Subwarp</option><option value="3">Warp, Subwarp, Warp, ...</option>';
+				routeMoveType.innerHTML = '<option value="5">Warp Smart</option><option value="0">Warp</option><option value="1">Subwarp</option><option value="2">Warp(SB) / Subwarp</option><option value="3">Warp, Subwarp, Warp, ...</option>';
+				// Keep existing mixed routes editable until the user chooses the route-wide setting.
+				if(routeData.moveType === 'automated') {
+					const savedMode = document.createElement('option');
+					savedMode.value = '4';
+					savedMode.textContent = 'Saved Automated';
+					savedMode.disabled = true;
+					routeMoveType.appendChild(savedMode);
+				}
 				routeMoveType.value = routeData.subwarpPref || 0;
+				routeMoveTypeLabel.hidden = transportPlusAutomatedInput.checked;
+				routeMoveType.hidden = transportPlusAutomatedInput.checked;
 
 				routeHeader.appendChild(routeLabel);
 				routeHeader.appendChild(routeDirection);
@@ -14726,6 +14860,14 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			transportPlusLocationWrapper.appendChild(transportPlusTargetCountLabel);
 			transportPlusLocationWrapper.appendChild(transportPlusTargetCountInput);
 			transportPlusLocationWrapper.appendChild(transportPlusTargetNote);
+			const transportPlusAutomatedLabel = document.createElement('label');
+			const transportPlusAutomatedInput = document.createElement('input');
+			transportPlusAutomatedInput.type = 'checkbox';
+			transportPlusAutomatedInput.classList.add('transport-plus-automated');
+			transportPlusAutomatedInput.checked = fleetParsedData?.transportPlusAutomated ??
+				transportPlusRoutes.every(route => route.moveType === 'automated');
+			transportPlusAutomatedLabel.append(transportPlusAutomatedInput, ' Automated travel');
+			transportPlusLocationWrapper.appendChild(transportPlusAutomatedLabel);
 
 			let transportPlusTargetsWrapper = document.createElement('div');
 			transportPlusTargetsWrapper.classList.add('transport-plus-targets');
@@ -14782,6 +14924,15 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				transportPlusTargetCount = this.value;
 				renderTransportPlusConfig();
 				transportPlusTargetCountInput.value = transportPlusTargetCount;
+			};
+			transportPlusAutomatedInput.onchange = () => {
+				syncTransportPlusEditorState();
+				// Legs formerly set to Automated use Warp when returning to manual settings.
+				if(!transportPlusAutomatedInput.checked) {
+					transportPlusRoutes = transportPlusRoutes.map(route => route.moveType === 'automated'
+						? {...route, subwarpPref: 0, moveType: 'warp'} : route);
+				}
+				renderTransportPlusConfig();
 			};
 
 			transportPlusTd.appendChild(transportPlusLocationWrapper);
@@ -15766,6 +15917,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			const destCoords = ConvertCoords(fleetDestCoord);
 			const starbaseCoords = ConvertCoords(fleetStarbaseCoord);
 			let transportPlusTargetCount = Math.max(1, Math.min(20, parseInt(transportPlusRows[i].querySelector('.transport-plus-target-count').value) || 1));
+			const transportPlusAutomated = transportPlusRows[i].querySelector('.transport-plus-automated').checked;
 			let transportPlusTargetValues = [fleetDestCoord];
 			transportPlusRows[i].querySelectorAll('.transport-plus-target-select').forEach((selectElem, targetIndex) => {
 				transportPlusTargetValues[targetIndex + 1] = selectElem.value;
@@ -15839,13 +15991,16 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					route: transportPlusRoutes[transportPlusTargetCoords.length]
 				});
 				for(const routeCheck of routeChecks) {
-					const validation = validateTransportLegFuel(userFleets[userFleetIndex], routeCheck.source, routeCheck.dest, routeCheck.route.moveType, routeCheck.roundTrip);
+					const configuredMode = transportPlusAutomated ? 'automated' : routeCheck.route.moveType;
+					const validation = validateTransportLegFuel(userFleets[userFleetIndex], routeCheck.source, routeCheck.dest, configuredMode, routeCheck.roundTrip);
 					if(!validation.valid) {
 						inputError('ERROR: Supply Chain route exceeds fuel capacity', 'ERROR: Distance exceeds fuel capacity', 1, extraTargetElems);
 						break;
 					}
-					routeCheck.route.moveType = validation.moveType;
-					routeCheck.route.subwarpPref = transportMoveTypeToSubwarpPref(validation.moveType);
+					if(!transportPlusAutomated) {
+						routeCheck.route.moveType = validation.moveType;
+						routeCheck.route.subwarpPref = transportMoveTypeToSubwarpPref(validation.moveType);
+					}
 				}
 			}
 
@@ -15945,8 +16100,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						});
 					}
 					const activeTransportPlusRoute = activeTransportPlusRouteIndex !== null && activeTransportPlusRouteIndex > -1 ? transportPlusRoutes[activeTransportPlusRouteIndex] : transportPlusRoutes[0];
-					subwarpPref = activeTransportPlusRoute.subwarpPref;
-					moveType = activeTransportPlusRoute.moveType;
+					moveType = transportPlusAutomated ? 'automated' : activeTransportPlusRoute.moveType;
+					subwarpPref = transportMoveTypeToSubwarpPref(moveType);
 				}
 				let scanBlock = buildScanBlock(destCoords[0], destCoords[1], scanPattern, scanPatternLength);
 
@@ -15987,6 +16142,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					moveType: moveType,
 					subwarpPref: subwarpPref,
 					moveTarget: fleetMoveTarget,
+					transportEffectiveMoveType: fleetMoveTarget && !assignmentChanged ? fleetParsedData.transportEffectiveMoveType : undefined,
 					cargoMineTargetResource: fleetAssignment === 'Cargo / Mine' ? cargoMineTargetResource : '',
 					cargoMineStarbaseResource: fleetAssignment === 'Cargo / Mine' ? cargoMineStarbaseResource : '',
 					cargoMineFallbackActive: fleetAssignment === 'Cargo / Mine' && !assignmentChanged ? !!fleetParsedData.cargoMineFallbackActive : false,
@@ -16048,6 +16204,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					transportPlusTargetCount: transportPlusTargetCount,
 					transportPlusTarget2: transportPlusTargetValues[1] || '',
 					transportPlusTargets: transportPlusTargetValues,
+					transportPlusAutomated,
 					transportPlusRoutes: transportPlusRoutes,
 					transportPlusRouteIndex: fleetTransportPlusRouteIndex,
 					scanBlock: scanBlock,
@@ -17316,7 +17473,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-325', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-326', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -19407,7 +19564,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				destCoord: destCoord,
 				currentManifest: cloneTransportManifest(transportPlusRoutes[previousRouteIndex].manifest),
 				destinationManifest: cloneTransportManifest(transportPlusRoutes[routeIndex].manifest),
-				moveType: transportPlusRoutes[routeIndex].moveType,
+				moveType: fleetParsedData.transportPlusAutomated ? 'automated' : transportPlusRoutes[routeIndex].moveType,
 				roundTrip: routeIndex === 0
 			});
 		}
@@ -19679,7 +19836,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				}
 				if(!activeLeg) activeLeg = transportPlusLegs.find(route => CoordsEqual(ConvertCoords(route.destCoord), activeMoveTargetCoords));
 				if(activeLeg) {
-					if(activeLeg.moveType == 'automated') userFleets[i].moveType = userFleets[i].automatedTravelMoveType || 'subwarp';
+					if(activeLeg.moveType == 'automated') {
+						const savedMode = activeTransportPlusRouteIndex === activeLeg.routeIndex ? fleetParsedData.transportEffectiveMoveType : null;
+						userFleets[i].moveType = userFleets[i].automatedTravelMoveType ||
+							(['warp', 'subwarp'].includes(savedMode) ? savedMode : fleetState === 'MoveWarp' ? 'warp' : 'subwarp');
+					}
 					else if(activeLeg.moveType == 'warp-smart') {
 						const persistedEffectiveMoveType = String(fleetParsedData.transportEffectiveMoveType || '');
 						userFleets[i].moveType = ['warp', 'subwarp'].includes(userFleets[i].moveType)
@@ -19708,7 +19869,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					destCoord: leg.destCoord,
 					moveType: leg.moveType,
 					routeIndex: leg.routeIndex,
-					destinationManifest: leg.destinationManifest
+					destinationManifest: leg.destinationManifest,
+					forecastContext: {legs: transportPlusLegs, currentLegIndex: leg.routeIndex}
 				})), activeTransportPlusRouteIndex);
 				if(recovery.recovered) {
 					await recoverTransportMovement(i, fleetCoords, recovery, 'Supply Chain');

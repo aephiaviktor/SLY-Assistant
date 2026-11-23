@@ -46,11 +46,13 @@ test('Warp Smart is preference 5 and resolves only a completed required-load wai
   assert.equal(resolveWarpSmartTravelMode('subwarp', true), 'subwarp');
 });
 
-test('Warp Smart is the first travel choice before Automated in Transport and Supply Chain', () => {
+test('Transport lists Automated in its selector and Supply Chain has one route-wide control', () => {
   for (const sourcePath of ['SLY_Assistant.user.js', path.join('electron-app', 'app', 'SLY_Assistant.user.js')]) {
     const source = readSource(sourcePath);
     const options = '<option value="5">Warp Smart</option><option value="4">Automated</option>';
-    assert.equal(source.split(options).length - 1, 2);
+    assert.equal(source.split(options).length - 1, 1);
+    assert.match(source, /transportPlusAutomatedInput\.classList\.add\('transport-plus-automated'\)/);
+    assert.match(source, /routeMoveType\.hidden = transportPlusAutomatedInput\.checked/);
   }
 });
 
