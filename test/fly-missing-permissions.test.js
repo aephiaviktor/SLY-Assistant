@@ -28,13 +28,27 @@ function profileData(entries) {
   return Buffer.concat([header, ...keys]);
 }
 
-function loadGrantFlow(entries) {
+function loadGrantFlow(entries, settings = new Map()) {
   const transactions = [];
+  const endpoints = [];
+  const fields = {
+    '#walletModal': { style: { display: 'none' } },
+    '#walletSelection': { value: 'phantom' },
+    '#starAtlasRpcKey': {},
+    '#selectWalletBtn': {},
+  };
   const context = {
+    URL,
+    GM_getValue: (key, fallback) => settings.get(key) ?? fallback,
+    GM_setValue: (key, value) => settings.set(key, value),
+    solana: {},
     BrowserAnchor: { anchor },
     solanaWeb3: {
       ...anchor.web3,
       Connection: class {
+        constructor(endpoint) {
+          endpoints.push(new URL(endpoint));
+        }
         async getAccountInfo(address) {
           assert.ok(address.equals(profile));
           return { owner: profileProgram, data: profileData(entries) };
@@ -42,7 +56,7 @@ function loadGrantFlow(entries) {
       },
     },
     MutationObserver: class {},
-    document: { querySelector: () => ({ value: '' }) },
+    document: { querySelector: selector => fields[selector] ?? { value: '' } },
     actualOwner: owner,
     actualProfile: profile,
     transactions,
@@ -59,8 +73,9 @@ function loadGrantFlow(entries) {
       return { meta: { err: null } };
     };
     globalThis.grant = addKeyToProfile;
+    globalThis.selectWallet = selectWalletToggle;
   `), context);
-  return { grant: context.grant, transactions };
+  return { grant: context.grant, transactions, endpoints, fields, selectWallet: context.selectWallet };
 }
 
 test('FLY restores only SAGE access when the signer already has both Points scopes', async () => {
@@ -96,4 +111,21 @@ test('FLY rejects a profile authority and malformed keys before submitting a tra
   assert.equal((await grant(owner.toBase58())).name, 'ProfileAuthority');
   assert.equal((await grant('invalid-key')).name, 'InvalidAccount');
   assert.equal(transactions.length, 0);
+});
+
+test('FLY saves an optional Star Atlas RPC key locally and reuses it on startup', async () => {
+  const settings = new Map();
+  const { endpoints, fields, selectWallet } = loadGrantFlow([], settings);
+  assert.equal(endpoints[0].hostname, 'api.mainnet-beta.solana.com');
+  const pendingSelection = selectWallet();
+  fields['#starAtlasRpcKey'].value = ' test+key&value ';
+  await fields['#selectWalletBtn'].onclick();
+  assert.equal(await pendingSelection, 'phantom');
+  assert.equal(fields['#starAtlasRpcKey'].value, '');
+  assert.equal(settings.get('starAtlasRpcApiKey'), 'test+key&value');
+  assert.equal(endpoints[1].origin + endpoints[1].pathname, 'https://mainnet-rpc.staratlas.com/mainnet');
+  assert.equal(endpoints[1].searchParams.get('apiKey'), 'test+key&value');
+
+  const restarted = loadGrantFlow([], settings);
+  assert.equal(restarted.endpoints[0].href, endpoints[1].href);
 });
