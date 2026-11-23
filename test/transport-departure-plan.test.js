@@ -174,7 +174,10 @@ for (const { name, capacity, roundTrip, expectedMode, reserve, startingFuel = 10
     persistFleetTransportRouteState: async (_index, effectiveMode, _destination, _route, configuredMode) => {
       saved = { effectiveMode, configuredMode };
     },
-    resolveAutomatedTravelMode: async () => { events.push('forecast'); return 'warp'; },
+    resolveAutomatedTravelMode: async (_fleet, _manifest, context) => {
+      events.push('forecast');
+      return context.forcedMoveType || 'warp';
+    },
     updateFleetState: (_fleet, state) => { fleet.state = state; },
     applyTransportLoadedTotals() {}, persistTransportPlusRouteManifestTotals() {},
     logTransportCrewDecision() {}, clearTransportLoadRetry() {}, cLog() {}, FleetTimeStamp: () => '',
@@ -201,9 +204,9 @@ for (const { name, capacity, roundTrip, expectedMode, reserve, startingFuel = 10
   if (startingFuel < reserve) {
     assert.deepEqual(events.slice(0, 3), ['dock', reserve - startingFuel, 'undock']);
   } else {
-    assert.deepEqual(events, []);
+    assert.deepEqual(events, ['forecast']);
   }
   assert.equal(tank, Math.max(startingFuel, reserve));
-  assert.equal(events.includes('forecast'), expectedMode === 'warp');
+  assert.equal(events.includes('forecast'), true);
   assert.deepEqual(saved, { effectiveMode: expectedMode, configuredMode: 'automated' });
 });

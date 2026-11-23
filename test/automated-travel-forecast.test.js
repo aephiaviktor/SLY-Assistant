@@ -47,7 +47,7 @@ function loadFunctions(names, globals = {}) {
   if (names.includes('simulateInventoryForecast') || names.includes('planSharedAutomatedTravel') || dependencies.includes('planSharedAutomatedTravel')) {
     dependencies.push('getAutomatedPickupShortfall', 'advanceAutomatedTravelProduction', 'estimateAutomatedCraftChain',
       'getAutomatedArrivalManifest', 'projectAutomatedIngredientCargo', 'simulateInventoryForecast',
-      'replaySharedAutomatedTravel', 'getEarlierAutomatedPickupShortfalls');
+      'replaySharedAutomatedTravel', 'getEarlierAutomatedPickupShortfalls', 'getAutomatedTravelInventorySnapshot');
   }
   if (names.includes('resolveAutomatedTravelMode')) {
     dependencies.push('getTransportCoordKey', 'logAutomatedSubwarpDecision', 'clearAutomatedTravelPlan',
@@ -312,7 +312,7 @@ test('Automated logs the shared timeline for fleets with different roundtrip len
       makeSharedFleet(chain, { fleet: peer, legIndex: 0, atMs: nowMs + 12, modes: ['subwarp'], arriving: true,
         cargo: chain[0].manifest }),
     ],
-    readAutomatedRouteInventory: async () => ({ A: { ore: 2_000 } }),
+    readAutomatedRouteInventory: async () => ({ A: { ore: 2_000, unrelated: 99 }, C: { unrelated: 50 } }),
     collectAutomatedCraftingProductionEvents: async () => [],
     collectAutomatedMiningProductionEvents: async () => [],
     collectAutomatedEstimatedCraftingProductionEvents: async () => [],
@@ -333,15 +333,66 @@ test('Automated logs the shared timeline for fleets with different roundtrip len
   assert.equal(record.decisionSource, 'shared_forecast');
   assert.equal(record.cargoCheck.loadedCargo[0].amount, 10);
   assert.equal(record.forecast.inventory.A.ore, 2_000);
+  assert.equal(record.forecast.inventory.A.unrelated, 99);
   assert.deepEqual(record.forecast.participants.map(item => item.horizonLegs), [96, 144]);
   assert.deepEqual(record.forecast.finalSchedules.map(item => item.modes.length), [96, 144]);
   const departure = record.forecast.events.find(event => event.type === 'departure' && event.fleet === 0 && event.leg === 1);
   assert.equal(departure.mode, 'warp');
   assert.equal(departure.arrivalMs - departure.startMs, 10);
   assert.equal(departure.required[0].amount, 10);
+  assert.deepEqual(departure.inventoryBefore, { ore: 2_000 });
+  assert.deepEqual(departure.inventoryAfter, { ore: 2_000 });
   const inFlightArrival = record.forecast.events.find(event => event.type === 'arrival' && event.fleet === 1 && event.leg === 1);
   assert.equal(inFlightArrival.atMs, record.forecast.participants[1].atMs);
-  assert.equal(inFlightArrival.inventoryAfter.ore, 10);
+  assert.deepEqual(inFlightArrival.inventoryAfter, { ore: 10 });
+});
+
+test('an optional-cargo Supply Chain can forecast 48 full roundtrips while observing fuel limits', async () => {
+  const stops = ['CSS', 'Station', 'CSS', 'Phantom'];
+  const legs = stops.map((source, index) => ({
+    source, destination: stops[(index + 1) % stops.length], warpMs: 10, subwarpMs: 30, configuredMode: 'automated',
+    manifest: index === 2 ? [{ res: 'frameworks', amt: 100, cargoTotal: false }] : [],
+  }));
+  const fleet = { publicKey: 'css', label: 'CF-CSS|Phantom', assignment: 'Supply Chain', cargoCapacity: 100 };
+  let inventoryUnavailable = false;
+  const { resolveAutomatedTravelMode, calculateAutomatedTravelMode } = loadFunctions([
+    'buildAutomatedTravelForecast', 'resolveAutomatedTravelMode', 'planTransportCargoUnload', 'calculateAutomatedTravelMode',
+  ], {
+    cargoItems: [{ token: 'frameworks', size: 1 }],
+    globalSettings: {},
+    sageGameAcct: { account: { mints: { ammo: 'ammo', fuel: 'fuel' } } },
+    tokenProgramPK: 'token',
+    solanaReadConnection: { getParsedTokenAccountsByOwner: async () => ({ value: [] }) },
+    getAutomatedRouteLeg: (_fleet, leg) => leg,
+    readAutomatedRouteInventory: async () => {
+      if (inventoryUnavailable) throw new Error('Inventory unavailable');
+      return {};
+    },
+    collectAutomatedCraftingProductionEvents: async () => [],
+    collectAutomatedMiningProductionEvents: async () => [],
+    collectAutomatedEstimatedCraftingProductionEvents: async () => [],
+    updateAssistStatus: () => {},
+    FleetTimeStamp: () => '',
+    cLog: () => {},
+  });
+  assert.equal(calculateAutomatedTravelMode({ manifest: legs[2].manifest, cargoCapacity: 100 }).moveType, 'subwarp');
+  const context = { legs, currentLegIndex: 2 };
+  assert.equal(await resolveAutomatedTravelMode(fleet, legs[2].manifest, context), 'warp');
+  assert.equal(fleet.automatedTravelCycleLegs, 4);
+  assert.equal(fleet.automatedTravelPlan.length, 192);
+  assert.ok(fleet.automatedTravelPlan.every(mode => mode === 'warp'));
+  assert.equal(fleet.automatedTravelPlanEstimated, true);
+
+  assert.equal(await resolveAutomatedTravelMode(fleet, legs[2].manifest, { ...context, forcedMoveType: 'subwarp' }), 'subwarp');
+  assert.equal(fleet.automatedTravelPlan.length, 192);
+  assert.deepEqual(Array.from(fleet.automatedTravelPlan.slice(0, 2)), ['subwarp', 'warp']);
+
+  inventoryUnavailable = true;
+  assert.equal(await resolveAutomatedTravelMode(fleet, legs[2].manifest, context), 'warp');
+  assert.equal(fleet.automatedTravelPlan.length, 0);
+  assert.equal(await resolveAutomatedTravelMode(fleet, legs[2].manifest, { ...context, forcedMoveType: 'subwarp' }), 'subwarp');
+  legs[3].manifest.push({ res: 'frameworks', amt: 100, cargoTotal: true });
+  assert.equal(await resolveAutomatedTravelMode(fleet, legs[2].manifest, context), 'subwarp');
 });
 
 test('two fleets stagger their returns to use separate production batches', () => {

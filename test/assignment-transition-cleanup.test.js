@@ -76,17 +76,20 @@ test('Automated movement reconciles cleanup and fuel fallback with the displayed
   ].map(name => readFunctionSource(name)).join('\n');
   const cleanup = 'async ' + readFunctionSource('handleAssignmentTransitionCleanup');
   const submitted = new Error('movement submission reached');
-  for (const [cleanupPending, fuel, expectedMode, expectedSuffix] of [
+  for (const [cleanupPending, fuel, expectedMode, expectedSuffix, requestedMode = 'warp', savedMode] of [
     [true, 30_000, 'warp', ''],
     [true, 10_000, 'subwarp', ''],
     [false, 10_000, 'subwarp', ' | -'],
+    [false, 30_000, 'warp', ' | 48w', 'automated'],
+    [false, 30_000, 'subwarp', ' | 48w', 'automated', 'subwarp'],
   ]) {
-    const config = { assignment: 'Supply Chain', assignmentCleanupPending: cleanupPending, starbase: '0,-39', moveType: 'automated' };
+    const config = { assignment: 'Supply Chain', assignmentCleanupPending: cleanupPending, starbase: '0,-39', moveType: 'automated',
+      moveTarget: '0,-39', transportEffectiveMoveType: savedMode };
     const fleet = {
       label: 'CF-CSS|Phantom', publicKey: 'fleet', cargoHold: 'hold', fuelTank: 'tank', exitSubwarpWillBurnFuel: 0,
-      starbaseCoord: config.starbase, moveType: cleanupPending ? 'automated' : 'warp',
+      starbaseCoord: config.starbase, moveType: cleanupPending ? 'automated' : requestedMode,
       automatedTravelPlan: Array(48).fill('warp'), automatedTravelMoveType: 'warp',
-      automatedDeparture: { destination: '0,-39', mode: 'warp' },
+      automatedDeparture: { destination: '0,-39', mode: savedMode || 'warp' },
     };
     let departure;
     const submit = mode => async (_fleet, x, y) => {
