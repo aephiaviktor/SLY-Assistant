@@ -33,6 +33,7 @@ function loadGrantFlow(entries, settings = new Map()) {
   const endpoints = [];
   const fields = {
     '#walletModal': { style: { display: 'none' } },
+    '#walletModal .assist-modal-error': {},
     '#walletSelection': { value: 'phantom' },
     '#starAtlasRpcKey': {},
     '#selectWalletBtn': {},
@@ -72,7 +73,10 @@ function loadGrantFlow(entries, settings = new Map()) {
       transactions.push(Array.from(instructions, ({ instruction }) => instruction));
       return { meta: { err: null } };
     };
-    globalThis.grant = addKeyToProfile;
+    globalThis.grant = key => {
+      if (!solanaConnection) configureRpc('test-key');
+      return addKeyToProfile(key);
+    };
     globalThis.selectWallet = selectWalletToggle;
   `), context);
   return { grant: context.grant, transactions, endpoints, fields, selectWallet: context.selectWallet };
@@ -113,19 +117,27 @@ test('FLY rejects a profile authority and malformed keys before submitting a tra
   assert.equal(transactions.length, 0);
 });
 
-test('FLY saves an optional Star Atlas RPC key locally and reuses it on startup', async () => {
+test('FLY requires a Star Atlas RPC key and reuses it from local storage', async () => {
   const settings = new Map();
   const { endpoints, fields, selectWallet } = loadGrantFlow([], settings);
-  assert.equal(endpoints[0].hostname, 'api.mainnet-beta.solana.com');
+  assert.equal(endpoints.length, 0);
   const pendingSelection = selectWallet();
+  await fields['#selectWalletBtn'].onclick();
+  assert.equal(endpoints.length, 0);
+  assert.match(fields['#walletModal .assist-modal-error'].textContent, /Enter your Star Atlas RPC API key/);
+  assert.equal(fields['#walletModal'].style.display, 'block');
+
   fields['#starAtlasRpcKey'].value = ' test+key&value ';
   await fields['#selectWalletBtn'].onclick();
   assert.equal(await pendingSelection, 'phantom');
   assert.equal(fields['#starAtlasRpcKey'].value, '');
   assert.equal(settings.get('starAtlasRpcApiKey'), 'test+key&value');
-  assert.equal(endpoints[1].origin + endpoints[1].pathname, 'https://mainnet-rpc.staratlas.com/mainnet');
-  assert.equal(endpoints[1].searchParams.get('apiKey'), 'test+key&value');
+  assert.equal(endpoints[0].origin + endpoints[0].pathname, 'https://mainnet-rpc.staratlas.com/mainnet');
+  assert.equal(endpoints[0].searchParams.get('apiKey'), 'test+key&value');
 
   const restarted = loadGrantFlow([], settings);
-  assert.equal(restarted.endpoints[0].href, endpoints[1].href);
+  const restartedSelection = restarted.selectWallet();
+  await restarted.fields['#selectWalletBtn'].onclick();
+  assert.equal(await restartedSelection, 'phantom');
+  assert.equal(restarted.endpoints[0].href, endpoints[0].href);
 });
