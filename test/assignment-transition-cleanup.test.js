@@ -67,6 +67,79 @@ test('dedicated fuel and ammo stores are not part of assignment cleanup cargo', 
   ]))), { action: 'unload-docked', cargo: [{ mint: 'food', amount: 5 }] });
 });
 
+test('Automated movement reconciles cleanup and fuel fallback with the displayed plan', async () => {
+  const source = readSource();
+  const movement = source.slice(source.indexOf('\tasync function handleMovement('), source.indexOf('\tasync function saveScanEnd('));
+  const functions = [
+    'getAssignmentTransitionCleanupPlan', 'clearAutomatedTravelPlan', 'getTransportCoordKey',
+    'compressAutomatedTravelPlan', 'getAutomatedTravelPlanSuffix',
+  ].map(name => readFunctionSource(name)).join('\n');
+  const cleanup = 'async ' + readFunctionSource('handleAssignmentTransitionCleanup');
+  const submitted = new Error('movement submission reached');
+  for (const [cleanupPending, fuel, expectedMode, expectedSuffix] of [
+    [true, 30_000, 'warp', ''],
+    [true, 10_000, 'subwarp', ''],
+    [false, 10_000, 'subwarp', ' | -'],
+  ]) {
+    const config = { assignment: 'Supply Chain', assignmentCleanupPending: cleanupPending, starbase: '0,-39', moveType: 'automated' };
+    const fleet = {
+      label: 'CF-CSS|Phantom', publicKey: 'fleet', cargoHold: 'hold', fuelTank: 'tank', exitSubwarpWillBurnFuel: 0,
+      starbaseCoord: config.starbase, moveType: cleanupPending ? 'automated' : 'warp',
+      automatedTravelPlan: Array(48).fill('warp'), automatedTravelMoveType: 'warp',
+      automatedDeparture: { destination: '0,-39', mode: 'warp' },
+    };
+    let departure;
+    const submit = mode => async (_fleet, x, y) => {
+      departure = { mode, x: Number(x), y: Number(y) };
+      throw submitted;
+    };
+    const { handleAssignmentTransitionCleanup, handleMovement, getAutomatedTravelPlanSuffix } = vm.runInNewContext(
+      functions + '\n' + cleanup + '\n' + movement + '\n({handleAssignmentTransitionCleanup, handleMovement, getAutomatedTravelPlanSuffix})',
+      {
+        userFleets: [fleet],
+        clearTransportLoadRetry() {},
+        clearTransportUnloadRetry() {},
+        ConvertCoords: value => value.split(',').map(Number),
+        calculateMovementDistance: (from, to) => Math.hypot(from[0] - to[0], from[1] - to[1]),
+        updateFleetState() {},
+        completePendingScanningMovementTransaction: async () => {},
+        getAccountInfo: async () => ({ data: [] }),
+        getFleetState: () => ['Idle', [0, -29]],
+        calcWarpFuelReq: () => 20_147,
+        calculateSubwarpFuelBurn: () => 5_536,
+        cLog() {},
+        logAutomatedSubwarpDecision() {},
+        FleetTimeStamp: () => '',
+        tokenProgramPK: 'token',
+        solanaReadConnection: {
+          getParsedTokenAccountsByOwner: async account => ({ value: account === 'tank' ? [
+            { account: { data: { parsed: { info: { mint: 'fuel', tokenAmount: { uiAmount: fuel } } } } } },
+          ] : [] }),
+        },
+        sageGameAcct: { account: { mints: { fuel: 'fuel' } } },
+        globalSettings: { subwarpShortDist: false },
+        sageProgram: { coder: { accounts: { decode: () => ({ warpCooldownExpiresAt: { toNumber: () => 0 } }) } } },
+        GM: { getValue: async () => JSON.stringify(config) },
+        wait: async () => {},
+        WARP_COOLDOWN_RETRY_BUFFER_MS: 0,
+        calculateWarpTime: () => 100,
+        calculateSubwarpTime: () => 2_632,
+        calculateScanningMovementOpportunityCost: () => ({}),
+        reserveFleetTelemetryMovementEvent: async () => {},
+        execWarp: submit('warp'),
+        execSubwarp: submit('subwarp'),
+      },
+    );
+    const movementResult = cleanupPending
+      ? handleAssignmentTransitionCleanup(0, config, 'Idle', [0, -29])
+      : handleMovement(0, 10, 0, -39);
+    await assert.rejects(movementResult, error => error === submitted);
+    assert.deepEqual(departure, { mode: expectedMode, x: 0, y: -39 });
+    assert.equal(getAutomatedTravelPlanSuffix(fleet), expectedSuffix);
+    assert.equal(fleet.automatedDeparture?.mode, cleanupPending ? undefined : expectedMode);
+  }
+});
+
 test('assignment cleanup is persisted on config change and gates assignment dispatch', () => {
   const source = readSource();
   assert.match(source, /const assignmentChanged = previousAssignment && fleetAssignment && previousAssignment !== fleetAssignment;/);

@@ -46,9 +46,12 @@ function loadFunctions(names, globals = {}) {
       || dependencies.includes('getAutomatedCraftIngredientsByLocation')) dependencies.push('getAutomatedCraftIngredientMints');
   if (names.includes('simulateInventoryForecast') || names.includes('planSharedAutomatedTravel') || dependencies.includes('planSharedAutomatedTravel')) {
     dependencies.push('getAutomatedPickupShortfall', 'advanceAutomatedTravelProduction', 'estimateAutomatedCraftChain',
-      'getAutomatedArrivalManifest', 'projectAutomatedIngredientCargo', 'simulateInventoryForecast');
+      'getAutomatedArrivalManifest', 'projectAutomatedIngredientCargo', 'simulateInventoryForecast',
+      'replaySharedAutomatedTravel', 'getEarlierAutomatedPickupShortfalls');
   }
-  if (names.includes('resolveAutomatedTravelMode')) dependencies.push('getTransportCoordKey', 'logAutomatedSubwarpDecision');
+  if (names.includes('resolveAutomatedTravelMode')) {
+    dependencies.push('getTransportCoordKey', 'logAutomatedSubwarpDecision', 'clearAutomatedTravelPlan');
+  }
   names = [...new Set([...names, ...dependencies])];
   const context = vm.createContext({
     automatedTravelForecastQueue: Promise.resolve(),
@@ -285,6 +288,31 @@ test('two fleets stagger their returns to use separate production batches', () =
   assert.equal(oneBatch.reduce((total, plan) => total + (plan.completedLegs === 2), 0), 1);
   const plans = planSharedAutomatedTravel(fleets, {}, [firstBatch, laterBatch], 0, 2);
   assert.deepEqual(Array.from(plans, plan => plan.summary).sort(), ['1sw1w', '2w']);
+});
+
+test('shared forecasts replay unnecessary Subwarp and keep the delays the other fleet needs', () => {
+  const { planSharedAutomatedTravel, explainSharedAutomatedSubwarp } = loadFunctions([
+    ...sharedPlannerFunctions, 'explainSharedAutomatedSubwarp',
+  ]);
+  const minute = 60_000;
+  const route = (warpMinutes, subwarpMinutes) => makeTwoLegRoute({
+    amount: 100_000, warpMs: warpMinutes * minute, subwarpMs: subwarpMinutes * minute,
+  }).map(leg => ({ ...leg, manifest: leg.manifest.map(entry => ({ ...entry, res: 'electronics' })) }));
+  const fleets = [
+    makeSharedFleet(route(5, 40), { fleet: { label: 'Transport 1' } }),
+    makeSharedFleet(route(4, 30), { fleet: { label: 'Transport 2' } }),
+  ];
+  const inventory = { A: { electronics: 1_360_000 } };
+  const events = [{ id: 'craft', location: 'A', res: 'electronics', atMs: 90 * minute, amount: 10_000_000 }];
+  const plans = planSharedAutomatedTravel(fleets, inventory, events, 0);
+
+  assert.deepEqual(Array.from(plans, plan => plan.summary), ['10w1sw37w', '16w1sw31w']);
+  for (let i = 0; i < fleets.length; i++) {
+    assert.equal(plans[i].completedLegs, 48);
+    const decision = explainSharedAutomatedSubwarp(fleets, plans, i, inventory, events, 0);
+    assert.equal(decision.shortfall.requirements[0].available, 60_000);
+    assert.equal(decision.shortfall.replenishment.atMs, 90 * minute);
+  }
 });
 
 test('a shared Subwarp reports the fleet and pickup that would go short if it Warped', () => {
@@ -557,6 +585,7 @@ test('Automated forecast suffix distinguishes estimates and shows a dash when no
   assert.equal(getAutomatedTravelPlanSuffix({ automatedTravelPlan: ['warp', 'warp', 'subwarp'], automatedTravelPlanEstimated: true }), ' | ~2w1sw');
   assert.equal(getAutomatedTravelPlanSuffix({ automatedTravelPlan: [], automatedTravelPlanPending: true }), ' | -');
   assert.equal(getAutomatedTravelPlanSuffix({ automatedTravelPlan: [] }), '');
+  assert.equal(getAutomatedTravelPlanSuffix({ automatedTravelPlan: ['warp'], assignmentCleanupPending: true }), '');
   assert.deepEqual(
     JSON.parse(JSON.stringify(getAssistStatusRowModel({ publicKey: 'fleet', label: 'Hauler', state: 'Warp [28,21] 14:32', automatedTravelPlan: ['warp', 'warp', 'subwarp'] }, []))),
     { section: 'fleet', cells: ['Hauler', 'Warp [28,21] 14:32 | 2w1sw'] },
