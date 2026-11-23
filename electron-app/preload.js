@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     updateToLatestSwift: () => ipcRenderer.send('updateToLatestSwift', ''),
     updateToLatestAep: () => ipcRenderer.send('updateToLatestAep', ''),
     appendUpgradeAutomationLogFile: (line) => ipcRenderer.invoke('appendUpgradeAutomationLogFile', line),
+    automatedTravelDiagnosticsEnabled: () => ipcRenderer.invoke('automatedTravelDiagnostics:enabled'),
+    enqueueAutomatedTravelDiagnostic: (line) => ipcRenderer.invoke('automatedTravelDiagnostics:enqueue', line),
     testUpgradeAutomationLogFile: () => ipcRenderer.invoke('appendUpgradeAutomationLogFile', '[ELECTRON] preload test call'),
     snapshotLeveldbToBackup: () => ipcRenderer.invoke('snapshotLeveldbToBackup'),
     writeSlyaStateBackup: (payload) => ipcRenderer.invoke('writeSlyaStateBackup', payload),

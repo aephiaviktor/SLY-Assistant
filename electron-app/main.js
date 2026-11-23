@@ -75,6 +75,176 @@ const APP_INSTANCE_NAME = String(instanceConfig.instanceName || getInstallInstan
 const APP_NAME = APP_INSTANCE_NAME ? `SLYA - ${APP_INSTANCE_NAME}` : 'SLYA'
 const APP_ID = APP_INSTANCE_NAME ? `slya.${APP_INSTANCE_NAME.toLowerCase().replace(/[^a-z0-9]+/g, '')}` : 'slya'
 
+const TRAVEL_SQLITE_VENDOR_DIR = 'vendor/node-sqlite3-wasm-0.8.61'
+const TRAVEL_SQLITE_VENDOR_FILES = {
+	'LICENSE': '9759019dbfadea5c126a4e3c70fb5a316bfc22894f7d4c4c24d0b17e3a53f4b6',
+	'node-sqlite3-wasm.js': 'c69e2d5015a19ba98a073cda9a4c01a112064fc4bcb3d220f9dd1f53b96b1998',
+	'node-sqlite3-wasm.wasm': '5ce628dcb9bbb6cf7d22a5ed44685607c657e56eeeb51635e1c8ba18df1e22d4'
+}
+
+async function getTravelSqliteBinding()
+{
+	try {
+		require('node:sqlite')
+		return null
+	} catch (error) {
+		if (error.code !== 'ERR_UNKNOWN_BUILTIN_MODULE') throw error
+	}
+	// Older in-app updaters replace the wrapper files first. Install its pinned assets on first use.
+	const root = path.join(APP_ROOT, TRAVEL_SQLITE_VENDOR_DIR)
+	const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex')
+	for (const [name, expected] of Object.entries(TRAVEL_SQLITE_VENDOR_FILES)) {
+		const filename = path.join(root, name)
+		const local = await fs.promises.readFile(filename).catch(error => {
+			if (error.code !== 'ENOENT') throw error
+			return null
+		})
+		if (local && hash(local) === expected) continue
+		const url = AEP_UPDATE_BASE_URL + '/electron-app/' + TRAVEL_SQLITE_VENDOR_DIR + '/' + name
+		const response = await fetch(url, { signal: AbortSignal.timeout(15000) })
+		if (!response.ok) throw new Error('SQLite asset download returned HTTP ' + response.status)
+		const bytes = Buffer.from(await response.arrayBuffer())
+		if (hash(bytes) !== expected) throw new Error('SQLite asset checksum does not match: ' + name)
+		await fs.promises.mkdir(root, { recursive: true })
+		const temporary = filename + '.' + crypto.randomUUID() + '.tmp'
+		try {
+			await fs.promises.writeFile(temporary, bytes, { flag: 'wx' })
+			await fs.promises.rename(temporary, filename)
+		} finally {
+			await fs.promises.rm(temporary, { force: true }).catch(() => {})
+		}
+	}
+	return path.join(root, 'node-sqlite3-wasm.js')
+}
+
+function runTravelDiagnosticsWorker()
+{
+	const { parentPort, workerData } = require('node:worker_threads')
+	const { databasePath, bindingPath, instance } = workerData
+	const Database = bindingPath ? require(bindingPath).Database : require('node:sqlite').DatabaseSync
+	const db = new Database(databasePath)
+	db.exec([
+		'PRAGMA busy_timeout = 2000;',
+		'CREATE TABLE IF NOT EXISTS automated_travel_diagnostics (',
+		'id INTEGER PRIMARY KEY, instance_name TEXT NOT NULL, fleet TEXT NOT NULL,',
+		'recorded_at TEXT NOT NULL, run_id TEXT, event_type TEXT NOT NULL,',
+		'move_type TEXT, payload TEXT NOT NULL CHECK (json_valid(payload)));',
+		'CREATE INDEX IF NOT EXISTS fleet_history ON automated_travel_diagnostics (instance_name, fleet, recorded_at);',
+		'CREATE INDEX IF NOT EXISTS forecast_history ON automated_travel_diagnostics (run_id, recorded_at);'
+	].join('\n'))
+	const insertSql = 'INSERT INTO automated_travel_diagnostics ' +
+		'(instance_name, fleet, recorded_at, run_id, event_type, move_type, payload) VALUES (?, ?, ?, ?, ?, ?, ?)'
+	const insert = db.prepare(insertSql)
+	parentPort.on('message', ({ id, line }) => {
+		try {
+			if (line === null) {
+				if (bindingPath) insert.finalize()
+				db.close()
+				parentPort.postMessage({ id, ok: true })
+				parentPort.close()
+				return
+			}
+			const record = JSON.parse(line)
+			if (record?.schema !== 'slya.automated-travel.v1' || typeof record.fleet !== 'string' ||
+				typeof record.timestamp !== 'string' || !['forecast', 'movement_selected', 'fuel_preflight'].includes(record.type)) {
+				throw new Error('Invalid automated travel diagnostic')
+			}
+			const values = [instance, record.fleet, record.timestamp, record.runId ?? null, record.type, record.moveType ?? null, line]
+			if (bindingPath) insert.run(values)
+			else insert.run(...values)
+			parentPort.postMessage({ id, ok: true })
+		} catch (error) {
+			parentPort.postMessage({ id, ok: false, error: error.message })
+		}
+	})
+}
+
+function createTravelDiagnosticsWriter({ databasePath, instance, resolveBinding = getTravelSqliteBinding })
+{
+	const { Worker } = require('node:worker_threads')
+	let connection
+	let nextId = 0
+	let queuedBytes = 0
+
+	function getConnection() {
+		if (!connection) {
+			const opening = (async () => {
+				const bindingPath = await resolveBinding()
+				await fs.promises.mkdir(path.dirname(databasePath), { recursive: true })
+				const worker = new Worker('(' + runTravelDiagnosticsWorker.toString() + ')()', {
+					eval: true, workerData: { databasePath, bindingPath, instance }
+				})
+				const pending = new Map()
+				const fail = error => {
+					if (connection === opening) connection = null
+					for (const respond of pending.values()) respond({ ok: false, error: error.message })
+					pending.clear()
+				}
+				worker.on('message', ({ id, ok, error }) => {
+					pending.get(id)?.({ ok, error })
+					pending.delete(id)
+					if (!pending.size) worker.unref()
+				})
+				worker.on('error', fail)
+				worker.on('exit', code => fail(new Error('SQLite worker exited with code ' + code)))
+				worker.unref()
+				return { worker, pending }
+			})().catch(error => {
+				connection = null
+				throw error
+			})
+			connection = opening
+		}
+		return connection
+	}
+
+	function submit({ worker, pending }, line) {
+		const id = ++nextId
+		return new Promise((resolve, reject) => {
+			pending.set(id, resolve)
+			worker.ref()
+			try {
+				worker.postMessage({ id, line })
+			} catch (error) {
+				pending.delete(id)
+				if (!pending.size) worker.unref()
+				reject(error)
+			}
+		})
+	}
+
+	async function write(line) {
+		const bytes = typeof line === 'string' ? Buffer.byteLength(line, 'utf8') : 0
+		if (!bytes || bytes > 16 * 1024 * 1024) return { ok: false, error: 'Invalid automated travel diagnostic size' }
+		if (queuedBytes + bytes > 64 * 1024 * 1024) return { ok: false, error: 'Automated travel diagnostics queue is full' }
+		queuedBytes += bytes
+		try {
+			return await submit(await getConnection(), line)
+		} catch (error) {
+			return { ok: false, error: error.message }
+		} finally {
+			queuedBytes -= bytes
+		}
+	}
+
+	async function close() {
+		if (connection) return submit(await connection, null)
+	}
+
+	return { write, close }
+}
+
+function startTravelDiagnostics()
+{
+	const writer = createTravelDiagnosticsWriter({
+		databasePath: path.join(APP_ROOT, 'data', 'automated-travel.sqlite'),
+		instance: APP_INSTANCE_NAME || 'SLYA'
+	})
+	ipcMain.handle('automatedTravelDiagnostics:enabled', () => true)
+	ipcMain.handle('automatedTravelDiagnostics:enqueue', (_event, line) => writer.write(line))
+	app.once('will-quit', () => writer.close().catch(() => {}))
+}
+
 function createMainProcessDiagnostics(options)
 {
 	if (!options.enabled) {
@@ -1151,6 +1321,7 @@ function maybeAutoRestoreLeveldb()
 installCrashEventLogging()
 
 app.whenReady().then(async () => {
+startTravelDiagnostics()
 const powerSaveBlockerId = powerSaveBlocker.start('prevent-app-suspension')
 logToUpgradeLog(`[ELECTRON][POWER] prevent-app-suspension blocker=${powerSaveBlockerId} active=${powerSaveBlocker.isStarted(powerSaveBlockerId)}`)
 // Wrapper-level leveldb audit and auto-restore (before any SLYA save could overwrite evidence)

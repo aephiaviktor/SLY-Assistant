@@ -50,11 +50,14 @@ function loadFunctions(names, globals = {}) {
       'replaySharedAutomatedTravel', 'getEarlierAutomatedPickupShortfalls');
   }
   if (names.includes('resolveAutomatedTravelMode')) {
-    dependencies.push('getTransportCoordKey', 'logAutomatedSubwarpDecision', 'clearAutomatedTravelPlan');
+    dependencies.push('getTransportCoordKey', 'logAutomatedSubwarpDecision', 'clearAutomatedTravelPlan',
+      'areAutomatedTravelDiagnosticsEnabled', 'writeAutomatedTravelDiagnostic');
   }
+  if (names.includes('getAutomatedTravelPlanSuffix')) dependencies.push('summarizeAutomatedRoundtrips');
   names = [...new Set([...names, ...dependencies])];
   const context = vm.createContext({
     automatedTravelForecastQueue: Promise.resolve(),
+    automatedTravelDiagnosticsStatus: null,
     collectSharedAutomatedFleets: async () => [],
     readAutomatedCraftConfigs: async () => [],
     getAccountInfo: async () => null,
@@ -232,7 +235,7 @@ test('Supply Chain resumes a saved Automated Warp at an intermediate waypoint af
   assert.equal(fleet.transportPlusRouteIndex, 0);
 });
 
-test('shared CSS forecast spends stock once across both fleets and gives each up to 48 legs', async () => {
+test('shared CSS forecast spends stock once across both fleets and gives each up to 48 roundtrips', async () => {
   const legs = makeTwoLegRoute().map((leg, index) => ({
     ...leg,
     source: index ? '1,0' : '0,0',
@@ -241,7 +244,7 @@ test('shared CSS forecast spends stock once across both fleets and gives each up
   }));
   const fleetA = { publicKey: 'a', cargoCapacity: 10 };
   const fleetB = { publicKey: 'b', cargoCapacity: 10 };
-  let stock = 600;
+  let stock = 1200;
   let inventoryReads = 0;
   const { buildAutomatedTravelForecast } = loadFunctions([
     ...sharedPlannerFunctions, 'buildAutomatedTravelForecast', 'getAutomatedCssTravelMode', 'planTransportCargoUnload',
@@ -262,8 +265,9 @@ test('shared CSS forecast spends stock once across both fleets and gives each up
     collectAutomatedEstimatedCraftingProductionEvents: async () => [],
   });
   const full = await buildAutomatedTravelForecast(fleetA, legs, 1);
-  assert.equal(full.summary, '48w');
-  assert.equal(full.sharedPlans[0].modes.length, 48);
+  assert.equal(full.summary, '96w');
+  assert.equal(full.cycleLegs, 2);
+  assert.equal(full.sharedPlans[0].modes.length, 96);
   assert.ok(full.sharedPlans[0].modes.every(mode => mode === 'warp'));
 
   stock = 120;
@@ -276,6 +280,68 @@ test('shared CSS forecast spends stock once across both fleets and gives each up
   assert.deepEqual(Array.from(limited.modes), Array.from(other.sharedPlans[0].modes));
   assert.deepEqual(Array.from(other.modes), Array.from(limited.sharedPlans[0].modes));
   assert.equal(inventoryReads, 3);
+});
+
+test('Automated logs the shared timeline for fleets with different roundtrip lengths', async () => {
+  const transport = makeTwoLegRoute().map(leg => ({...leg, configuredMode: 'automated'}));
+  const chain = [
+    {...transport[0], destination: 'C'},
+    {...transport[1], source: 'C', destination: 'D'},
+    {...transport[1], source: 'D'},
+  ];
+  const owner = { publicKey: 'a', label: 'Transport', cargoCapacity: 10 };
+  const peer = { publicKey: 'b', label: 'Supply Chain', cargoCapacity: 10 };
+  const records = [];
+  const { resolveAutomatedTravelMode } = loadFunctions([
+    'buildAutomatedTravelForecast', 'resolveAutomatedTravelMode', 'planTransportCargoUnload', 'calculateAutomatedTravelMode',
+  ], {
+    Date,
+    window: { electronAPI: {
+      automatedTravelDiagnosticsEnabled: async () => true,
+      enqueueAutomatedTravelDiagnostic: async line => { records.push(JSON.parse(line)); return { ok: true }; },
+    } },
+    cargoItems: [{ token: 'ore', size: 1 }],
+    globalSettings: {},
+    sageGameAcct: { account: { mints: { ammo: 'ammo', fuel: 'fuel' } } },
+    tokenProgramPK: 'token',
+    solanaReadConnection: { getParsedTokenAccountsByOwner: async () => ({ value: [
+      { account: { data: { parsed: { info: { mint: 'ore', tokenAmount: { uiAmount: 10 } } } } } },
+    ] }) },
+    getAutomatedRouteLeg: (_fleet, leg) => leg,
+    collectSharedAutomatedFleets: async (_fleet, _legs, nowMs) => [
+      makeSharedFleet(chain, { fleet: peer, legIndex: 0, atMs: nowMs + 12, modes: ['subwarp'], arriving: true,
+        cargo: chain[0].manifest }),
+    ],
+    readAutomatedRouteInventory: async () => ({ A: { ore: 2_000 } }),
+    collectAutomatedCraftingProductionEvents: async () => [],
+    collectAutomatedMiningProductionEvents: async () => [],
+    collectAutomatedEstimatedCraftingProductionEvents: async () => [],
+    updateAssistStatus: () => {},
+    FleetTimeStamp: () => '',
+    cLog: () => {},
+  });
+  assert.equal(await resolveAutomatedTravelMode(owner, transport[0].manifest, { legs: transport, currentLegIndex: 0 }), 'warp');
+  assert.equal(owner.automatedTravelPlan.length, 96);
+  assert.equal(owner.automatedTravelCycleLegs, 2);
+  assert.equal(peer.automatedTravelPlan.length, 144);
+  assert.equal(peer.automatedTravelCycleLegs, 3);
+  assert.equal(peer.automatedTravelPlan[0], 'subwarp');
+
+  assert.equal(records.length, 1);
+  const [record] = records;
+  assert.equal(record.runId, owner.automatedTravelDiagnosticId);
+  assert.equal(record.decisionSource, 'shared_forecast');
+  assert.equal(record.cargoCheck.loadedCargo[0].amount, 10);
+  assert.equal(record.forecast.inventory.A.ore, 2_000);
+  assert.deepEqual(record.forecast.participants.map(item => item.horizonLegs), [96, 144]);
+  assert.deepEqual(record.forecast.finalSchedules.map(item => item.modes.length), [96, 144]);
+  const departure = record.forecast.events.find(event => event.type === 'departure' && event.fleet === 0 && event.leg === 1);
+  assert.equal(departure.mode, 'warp');
+  assert.equal(departure.arrivalMs - departure.startMs, 10);
+  assert.equal(departure.required[0].amount, 10);
+  const inFlightArrival = record.forecast.events.find(event => event.type === 'arrival' && event.fleet === 1 && event.leg === 1);
+  assert.equal(inFlightArrival.atMs, record.forecast.participants[1].atMs);
+  assert.equal(inFlightArrival.inventoryAfter.ore, 10);
 });
 
 test('two fleets stagger their returns to use separate production batches', () => {
@@ -463,7 +529,7 @@ test('a multi-stop route keeps the CSS stock threshold from choosing modes for u
   assert.equal(getAutomatedCssStockSelector({}, [{}, {}, {}]), undefined);
 });
 
-test('CSS Automated fallback projects up to 48 stock-funded legs from either direction', async () => {
+test('CSS Automated fallback projects up to 48 stock-funded roundtrips from either direction', async () => {
   const capacity = 201_428;
   const legs = makeTwoLegRoute({ amount: capacity });
   let stock = 16_754_612;
@@ -489,8 +555,8 @@ test('CSS Automated fallback projects up to 48 stock-funded legs from either dir
   const loadedCargo = [{ mint: 'ore', amount: capacity }];
   for (const [legIndex, cargo] of [[0, loadedCargo], [1, []]]) {
     const plan = await buildAutomatedTravelForecast(fleet, legs, legIndex, cargo);
-    assert.equal(plan.summary, '48w');
-    assert.equal(plan.completedLegs, 48);
+    assert.equal(plan.summary, '96w');
+    assert.equal(plan.completedLegs, 96);
     assert.equal(plan.estimated, false);
   }
 
@@ -586,6 +652,11 @@ test('Automated forecast suffix distinguishes estimates and shows a dash when no
   assert.equal(getAutomatedTravelPlanSuffix({ automatedTravelPlan: [], automatedTravelPlanPending: true }), ' | -');
   assert.equal(getAutomatedTravelPlanSuffix({ automatedTravelPlan: [] }), '');
   assert.equal(getAutomatedTravelPlanSuffix({ automatedTravelPlan: ['warp'], assignmentCleanupPending: true }), '');
+  assert.equal(getAutomatedTravelPlanSuffix({ automatedTravelPlan: Array(96).fill('warp'), automatedTravelCycleLegs: 2 }), ' | 48w rt');
+  assert.equal(getAutomatedTravelPlanSuffix({
+    automatedTravelPlan: ['warp', 'warp', 'warp', 'warp', 'subwarp', 'warp', 'subwarp'],
+    automatedTravelCycleLegs: 3, automatedTravelPlanEstimated: true,
+  }), ' | ~1w1(1w1sw1w) rt + 1sw leg');
   assert.deepEqual(
     JSON.parse(JSON.stringify(getAssistStatusRowModel({ publicKey: 'fleet', label: 'Hauler', state: 'Warp [28,21] 14:32', automatedTravelPlan: ['warp', 'warp', 'subwarp'] }, []))),
     { section: 'fleet', cells: ['Hauler', 'Warp [28,21] 14:32 | 2w1sw'] },
@@ -799,7 +870,7 @@ test('an optional Polymer feeder joins a forecast for Electronics at its destina
   assert.deepEqual(suppliedAt, [true]);
 });
 
-test('Automated keeps Warp through a missing mining ETA only when stock covers the full forecast', async () => {
+test('extending the display to roundtrips preserves the missing-ETA departure policy', async () => {
   const capacity = 91_081;
   let copperStock = 66_169_918;
   const legs = [
@@ -835,15 +906,15 @@ test('Automated keeps Warp through a missing mining ETA only when stock covers t
   const fleet = { cargoCapacity: capacity, cargoHold: 'hold' };
   const loaded = [{ mint: 'food', amount: 3_500 }];
   const context = { legs, currentLegIndex: 1 };
-  for (const stock of [copperStock, 24 * capacity]) {
+  for (const [stock, legs] of [[copperStock, 96], [24 * capacity, 49]]) {
     copperStock = stock;
-    const plan = await buildAutomatedTravelForecast(fleet, legs, 1, loaded);
-    assert.equal(plan.summary, '48w');
-    assert.equal(plan.completedLegs, 48);
+    const plan = await buildAutomatedTravelForecast(fleet, context.legs, 1, loaded);
+    assert.equal(plan.summary, legs + 'w');
+    assert.equal(plan.completedLegs, legs);
     assert.equal(plan.estimated, false);
     assert.deepEqual(Array.from(plan.productionEvents), []);
-    assert.equal(await resolveAutomatedTravelMode(fleet, legs[1].manifest, context), 'warp');
-    assert.equal(fleet.automatedTravelPlan.length, 48);
+    assert.equal(await resolveAutomatedTravelMode(fleet, context.legs[1].manifest, context), 'warp');
+    assert.equal(fleet.automatedTravelPlan.length, legs);
   }
 
   copperStock = 24 * capacity - 1;
@@ -857,7 +928,7 @@ test('Automated keeps Warp through a missing mining ETA only when stock covers t
 test('estimated final-craft ETA puts the Subwarp bridge after stock-funded Warp legs', async () => {
   const route = makeTwoLegRoute({ warpMs: 10, subwarpMs: 30, amount: 10 });
   let eta = 95;
-  let batch = 300;
+  let batch = 1000;
   const { buildAutomatedTravelForecast } = loadFunctions([
     'cloneAutomatedInventory',
     'applyAutomatedProductionEvents',
@@ -881,12 +952,12 @@ test('estimated final-craft ETA puts the Subwarp bridge after stock-funded Warp 
   const plan = await buildAutomatedTravelForecast({}, route, 0, [{ mint: 'ore', amount: 10 }]);
 
   assert.equal(plan.estimated, true);
-  assert.equal(plan.modes.length, 48);
-  assert.equal(plan.summary, '4w2sw42w');
+  assert.equal(plan.modes.length, 96);
+  assert.equal(plan.summary, '4w2sw90w');
 
   eta = 60;
   const stocked = await buildAutomatedTravelForecast({}, route, 0, [{ mint: 'ore', amount: 10 }]);
-  assert.equal(stocked.summary, '48w');
+  assert.equal(stocked.summary, '96w');
 
   batch = 10;
   const shortfall = await buildAutomatedTravelForecast({}, route, 0, [{ mint: 'ore', amount: 10 }]);
@@ -894,7 +965,7 @@ test('estimated final-craft ETA puts the Subwarp bridge after stock-funded Warp 
   assert.equal(shortfall.reason, 'inventory_horizon');
 });
 
-test('estimated production keeps 48w for the observed MUD and ONI stock examples', async () => {
+test('estimated production forecasts through 48 roundtrips for the observed MUD and ONI stock examples', async () => {
   const { buildAutomatedTravelForecast } = loadFunctions([
     ...sharedPlannerFunctions, 'buildAutomatedTravelForecast', 'planTransportCargoUnload',
   ], {
@@ -917,8 +988,9 @@ test('estimated production keeps 48w for the observed MUD and ONI stock examples
     const route = makeTwoLegRoute(example);
     Object.assign(route[0], { stock: example.stock, eta: example.eta });
     const plan = await buildAutomatedTravelForecast({}, route, 0, [{ mint: 'ore', amount: example.amount }]);
-    assert.equal(plan.summary, example.stock === 230 ? '47w1sw' : '48w');
-    assert.equal(plan.completedLegs, 48);
+    const expected = { 1_694_201: '85w1sw10w', 10_854_322: '96w', 230: '47w1sw48w' };
+    assert.equal(plan.summary, expected[example.stock]);
+    assert.equal(plan.completedLegs, 96);
     assert.equal(plan.estimated, true);
   }
 });

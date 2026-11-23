@@ -109,6 +109,7 @@ test('Automated movement reconciles cleanup and fuel fallback with the displayed
         calculateSubwarpFuelBurn: () => 5_536,
         cLog() {},
         logAutomatedSubwarpDecision() {},
+        writeAutomatedTravelDiagnostic() {},
         FleetTimeStamp: () => '',
         tokenProgramPK: 'token',
         solanaReadConnection: {

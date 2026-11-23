@@ -1,0 +1,3 @@
+LICENSE -text
+node-sqlite3-wasm.js -text
+node-sqlite3-wasm.wasm binary
