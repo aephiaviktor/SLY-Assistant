@@ -30,6 +30,7 @@ function profileData(entries) {
 
 function loadGrantFlow(entries, settings = new Map()) {
   const transactions = [];
+  const transactionLookups = [];
   const endpoints = [];
   const fields = {
     '#walletModal': { style: { display: 'none' } },
@@ -40,9 +41,16 @@ function loadGrantFlow(entries, settings = new Map()) {
   };
   const context = {
     URL,
+    setTimeout: callback => callback(),
     GM_getValue: (key, fallback) => settings.get(key) ?? fallback,
     GM_setValue: (key, value) => settings.set(key, value),
     solana: {},
+    solflare: {
+      async signAllTransactions([transaction]) {
+        transactions.push(transaction.instructions);
+        return [{ serialize: () => Uint8Array.of(1) }];
+      },
+    },
     BrowserAnchor: { anchor },
     solanaWeb3: {
       ...anchor.web3,
@@ -54,40 +62,54 @@ function loadGrantFlow(entries, settings = new Map()) {
           assert.ok(address.equals(profile));
           return { owner: profileProgram, data: profileData(entries) };
         }
+        async getLatestBlockhash() {
+          return { blockhash: 'blockhash', lastValidBlockHeight: 42 };
+        }
+        async sendRawTransaction() {
+          return 'signature';
+        }
+        async confirmTransaction() {
+          return { value: { err: null } };
+        }
+        async getTransaction(signature, options) {
+          assert.equal(signature, 'signature');
+          transactionLookups.push({ ...options });
+          return transactionLookups.length === 1 ? null : { meta: { err: null } };
+        }
       },
     },
     MutationObserver: class {},
     document: { querySelector: selector => fields[selector] ?? { value: '' } },
     actualOwner: owner,
     actualProfile: profile,
-    transactions,
   };
   const startup = '    observer.observe(document, {childList: true, subtree: true});\n    waitForLabs(null, null);';
   assert.ok(source.includes(startup));
   vm.runInNewContext(source.replace(startup, `
     userPublicKey = actualOwner;
     userProfilePublicKey = actualProfile;
+    wallet = 'solflare';
     getPermissionedAccounts = async () => {};
     manageProfileToggle = () => {};
-    txSignAndSend = async instructions => {
-      transactions.push(Array.from(instructions, ({ instruction }) => instruction));
-      return { meta: { err: null } };
-    };
     globalThis.grant = key => {
       if (!solanaConnection) configureRpc('test-key');
       return addKeyToProfile(key);
     };
     globalThis.selectWallet = selectWalletToggle;
   `), context);
-  return { grant: context.grant, transactions, endpoints, fields, selectWallet: context.selectWallet };
+  return { grant: context.grant, transactions, transactionLookups, endpoints, fields, selectWallet: context.selectWallet };
 }
 
 test('FLY restores only SAGE access when the signer already has both Points scopes', async () => {
   const entries = [[owner, profileProgram], [delegate, points], [delegate, pointsStore], [otherDelegate, sage]];
-  const { grant, transactions } = loadGrantFlow(entries);
+  const { grant, transactions, transactionLookups } = loadGrantFlow(entries);
   await grant(delegate.toBase58());
 
   assert.equal(transactions.length, 1);
+  assert.deepEqual(transactionLookups, [
+    { commitment: 'confirmed', maxSupportedTransactionVersion: 1 },
+    { commitment: 'confirmed', maxSupportedTransactionVersion: 1 },
+  ]);
   const [instruction] = transactions[0];
   assert.equal(transactions[0].length, 1);
   assert.ok(instruction.programId.equals(profileProgram));
