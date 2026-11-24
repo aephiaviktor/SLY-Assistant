@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-331
+// @aephia-version 0.7.35-332
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -12613,7 +12613,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const summary = fleet?.automatedTravelCycleLegs
 			? summarizeAutomatedRoundtrips(fleet.automatedTravelPlan, fleet.automatedTravelCycleLegs)
 			: compressAutomatedTravelPlan(fleet?.automatedTravelPlan);
-		if(summary) return ' | ' + (fleet.automatedTravelPlanEstimated ? '~' : '') + summary;
+		if(summary) return ' | ' + (fleet.automatedTravelPlanEstimated ? '~' : '') + summary
+			+ (fleet.automatedTravelPlanStockLimited ? ' (stock limit)' : '');
 		return fleet && fleet.automatedTravelPlanPending ? ' | -' : '';
 	}
 
@@ -12638,6 +12639,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		fleet.automatedTravelPlan = [];
 		fleet.automatedTravelCycleLegs = 0;
 		fleet.automatedTravelPlanEstimated = false;
+		fleet.automatedTravelPlanStockLimited = false;
 		fleet.automatedTravelPlanPending = pending;
 	}
 
@@ -13608,12 +13610,24 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const plan = plans[index];
 		if(diagnostic) diagnostic.forecastStatus = plan.reason;
 		if(!plan.modes.length) return null;
-		if(!peers.length && !productionEvents.length && !routes[index].getStockTravelMode && plan.shortfall && plan.completedLegs < Math.min(displayLegs, 48)) {
-			if(diagnostic) diagnostic.forecastStatus = 'awaiting_final_output';
-			return {modes: [], summary: '', completedLegs: 0, reason: 'awaiting_final_output', productionEvents: [], shortfall: plan.shortfall};
+		const awaitingFinalOutput = !peers.length && !productionEvents.length && !routes[index].getStockTravelMode
+			&& plan.shortfall && plan.completedLegs < Math.min(displayLegs, 48);
+		if(awaitingFinalOutput) {
+			// Forecast the conservative departure policy through the last pickup the current stock can support.
+			const route = {...routes[index], plannedModes: Array(routes[index].horizonLegs).fill('subwarp')};
+			const events = diagnostic ? [] : null;
+			const [limitedPlan] = simulateInventoryForecast([route], inventory, productionEvents, nowMs, 48, 1, Infinity,
+				events ? event => events.push(event) : null).plans;
+			plans[index] = {...limitedPlan, reason: 'awaiting_final_output'};
+			if(diagnostic) {
+				diagnostic.forecastStatus = 'awaiting_final_output';
+				diagnostic.forecast.events = events;
+				diagnostic.forecast.finalSchedules = [{modes: limitedPlan.modes, shortfall: limitedPlan.shortfall,
+					craftOutputs: limitedPlan.craftOutputs, reason: 'awaiting_final_output'}];
+			}
 		}
 		const visiblePlan = i => {
-			const {modes, firstSubwarp, shortfall} = plans[i];
+			const {modes, firstSubwarp, shortfall, reason} = plans[i];
 			const visibleLimit = routes[i].displayLegs;
 			const visibleModes = modes.slice(0, visibleLimit);
 			return {
@@ -13621,9 +13635,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				cycleLegs: routes[i].legs.length,
 				summary: compressAutomatedTravelPlan(visibleModes),
 				completedLegs: visibleModes.length,
-				reason: visibleModes.length === visibleLimit ? 'forecast_complete' : 'inventory_horizon',
+				reason: reason === 'awaiting_final_output' ? reason : visibleModes.length === visibleLimit ? 'forecast_complete' : 'inventory_horizon',
+				stockLimited: Boolean(shortfall && visibleModes.length < visibleLimit),
 				firstSubwarp: firstSubwarp?.leg <= visibleLimit
-					? explainSharedAutomatedSubwarp(routes, plans, i, inventory, productionEvents, nowMs, 48) : null,
+					? (reason === 'awaiting_final_output' ? {...firstSubwarp, shortfall, reason: 'no replenishment ETA for the projected pickup shortfall'}
+						: explainSharedAutomatedSubwarp(routes, plans, i, inventory, productionEvents, nowMs, 48)) : null,
 				shortfall
 			};
 		};
@@ -13718,6 +13734,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						owner.automatedTravelPlan = ownerPlan.modes;
 						owner.automatedTravelCycleLegs = ownerPlan.cycleLegs;
 						owner.automatedTravelPlanEstimated = Boolean(plan.estimated);
+						owner.automatedTravelPlanStockLimited = Boolean(ownerPlan.stockLimited);
 						owner.automatedTravelPlanPending = false;
 						owner.automatedTravelForecastAt = Date.now();
 					};
@@ -13729,16 +13746,15 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 						updateAssistStatus(peer.fleet);
 					}
 					moveType = forcedMoveType || plan.modes[0];
-					decisionSource = forcedMoveType ? 'fuel_capacity' : plan.routeOnly ? 'route_forecast' : 'shared_forecast';
-					if(diagnostic) diagnostic.firstSubwarp = plan.firstSubwarp;
+					decisionSource = forcedMoveType ? 'fuel_capacity' : plan.reason === 'awaiting_final_output' ? plan.reason
+						: plan.routeOnly ? 'route_forecast' : 'shared_forecast';
+					if(diagnostic) {
+						diagnostic.firstSubwarp = plan.firstSubwarp;
+						if(plan.stockLimited) diagnostic.shortfall = plan.shortfall;
+					}
 					const eventSummary = (plan.productionEvents || []).slice(0, 3).map(event => event.source + ':' + event.res + '@' + TimeToStr(new Date(event.atMs))).join(',');
 					cLog(1, `${FleetTimeStamp(fleet.label)} Automated forecast -> ${moveType == 'warp' ? 'Warp' : 'Subwarp'} | ${plan.summary} | production ${eventSummary || 'none'}`);
 					if(plan.firstSubwarp || moveType === 'subwarp') logAutomatedSubwarpDecision(fleet, plan.firstSubwarp || {shortfall: plan.shortfall});
-				} else if(plan?.reason === 'awaiting_final_output') {
-					moveType = forcedMoveType || 'subwarp';
-					decisionSource = forcedMoveType ? 'fuel_capacity' : plan.reason;
-					if(diagnostic) diagnostic.shortfall = plan.shortfall;
-					logAutomatedSubwarpDecision(fleet, {reason: 'no replenishment ETA for the projected pickup shortfall', shortfall: plan.shortfall});
 				} else if(moveType === 'subwarp' && !forcedMoveType) {
 					logAutomatedSubwarpDecision(fleet, {reason: 'loaded cargo below the Warp threshold'});
 				}
@@ -17660,7 +17676,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-331', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-332', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -20133,6 +20149,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			}
 			fleet.automatedTravelPlan = [];
 			fleet.automatedTravelPlanEstimated = false;
+			fleet.automatedTravelPlanStockLimited = false;
 			fleet.automatedTravelPlanPending = false;
 			cLog(1, `${FleetTimeStamp(fleet.label)} Automated Travel Mode -> Subwarp (fuel capacity, tank ${fuelData.capacity}, Warp leg ${fuelData.warpCost}, Subwarp reserve ${fuelData.fuelNeeded})`);
 			return { ...fuelData, forcedMoveType: 'subwarp' };

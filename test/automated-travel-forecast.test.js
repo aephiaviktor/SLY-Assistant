@@ -704,6 +704,8 @@ test('Automated forecast suffix distinguishes estimates and shows a dash when no
   assert.equal(getAutomatedTravelPlanSuffix({ automatedTravelPlan: [] }), '');
   assert.equal(getAutomatedTravelPlanSuffix({ automatedTravelPlan: ['warp'], assignmentCleanupPending: true }), '');
   assert.equal(getAutomatedTravelPlanSuffix({ automatedTravelPlan: Array(96).fill('warp'), automatedTravelCycleLegs: 2 }), ' | 48w rt');
+  assert.equal(getAutomatedTravelPlanSuffix({ automatedTravelPlan: Array(10).fill('subwarp'), automatedTravelCycleLegs: 8,
+    automatedTravelPlanStockLimited: true }), ' | 1sw rt + 2sw legs (stock limit)');
   assert.equal(getAutomatedTravelPlanSuffix({
     automatedTravelPlan: ['warp', 'warp', 'warp', 'warp', 'subwarp', 'warp', 'subwarp'],
     automatedTravelCycleLegs: 3, automatedTravelPlanEstimated: true,
@@ -969,11 +971,19 @@ test('extending the display to roundtrips preserves the missing-ETA departure po
   }
 
   copperStock = 24 * capacity - 1;
-  const plan = await buildAutomatedTravelForecast(fleet, legs, 1, loaded);
-  assert.deepEqual(Array.from(plan.modes), []);
+  const diagnostic = {};
+  const plan = await buildAutomatedTravelForecast(fleet, legs, 1, loaded, diagnostic);
+  assert.deepEqual(Array.from(plan.modes), Array(47).fill('subwarp'));
   assert.equal(plan.reason, 'awaiting_final_output');
+  assert.equal(plan.stockLimited, true);
+  assert.equal(plan.shortfall.requirements[0].available, capacity - 1);
+  assert.equal(diagnostic.forecast.events.find(event => event.type === 'departure').mode, 'subwarp');
+  assert.equal(diagnostic.forecast.events.find(event => event.type === 'pickup_shortfall').leg, 48);
+  assert.equal(diagnostic.forecast.finalSchedules[0].reason, 'awaiting_final_output');
   assert.deepEqual(Array.from(plan.productionEvents), []);
   assert.equal(await resolveAutomatedTravelMode(fleet, legs[1].manifest, context), 'subwarp');
+  assert.equal(fleet.automatedTravelPlan.length, 47);
+  assert.equal(fleet.automatedTravelPlanStockLimited, true);
 });
 
 test('estimated final-craft ETA puts the Subwarp bridge after stock-funded Warp legs', async () => {
@@ -1250,7 +1260,7 @@ test('Automated falls back to conservative Subwarp and a dash when the forecast 
   assert.equal(statusUpdates, 1);
 });
 
-test('Automated uses conservative Subwarp and a dash when no craft ETA is available', async () => {
+test('Automated uses conservative Subwarp and displays the stock-limited plan when no craft ETA is available', async () => {
   let statusUpdates = 0;
   const fleet = { cargoHold: 'cargo', label: 'Eagle Fleet' };
   const { resolveAutomatedTravelMode } = loadFunctions(['resolveAutomatedTravelMode'], {
@@ -1260,7 +1270,8 @@ test('Automated uses conservative Subwarp and a dash when no craft ETA is availa
     calculateAutomatedTravelMode: () => ({ moveType: 'subwarp', loadedCargoVolume: 0, requiredVolume: 10, thresholdVolume: 9.5 }),
     globalSettings: { transportUseAmmoBank: false },
     sageGameAcct: { account: { mints: { ammo: { toString: () => 'ammo' }, fuel: { toString: () => 'fuel' } } } },
-    buildAutomatedTravelForecast: async () => ({ modes: [], reason: 'awaiting_final_output', productionEvents: [] }),
+    buildAutomatedTravelForecast: async () => ({ modes: ['subwarp', 'subwarp'], cycleLegs: 2, stockLimited: true,
+      reason: 'awaiting_final_output', productionEvents: [] }),
     updateAssistStatus: () => { statusUpdates += 1; },
     cLog: () => {},
     FleetTimeStamp: () => '',
@@ -1270,8 +1281,9 @@ test('Automated uses conservative Subwarp and a dash when no craft ETA is availa
   const moveType = await resolveAutomatedTravelMode(fleet, [], { legs: [{}] });
 
   assert.equal(moveType, 'subwarp');
-  assert.deepEqual(Array.from(fleet.automatedTravelPlan), []);
-  assert.equal(fleet.automatedTravelPlanPending, true);
+  assert.deepEqual(Array.from(fleet.automatedTravelPlan), ['subwarp', 'subwarp']);
+  assert.equal(fleet.automatedTravelPlanStockLimited, true);
+  assert.equal(fleet.automatedTravelPlanPending, false);
   assert.equal(statusUpdates, 1);
 });
 
