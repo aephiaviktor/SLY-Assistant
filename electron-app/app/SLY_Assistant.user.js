@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-330
+// @aephia-version 0.7.35-331
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -8259,55 +8259,41 @@ window.addEventListener('beforeunload', () => toolkitCollector.stop(), {once:tru
         let solanaTime = solanaClock.data.readBigInt64LE(8 * 4);
     }
 
-    let influxLastStarbaseCargoHoldUpdates = [];
-    async function influxStarbaseCargoHold(starbaseX,starbaseY,cargoHoldKeyOrTokens) {
-
-	if(!globalSettings.influxURL.length) return;
-
-	let cargoHoldTokens = null;
-
-	let starbaseName = validTargets.find(target => (target.x + ',' + target.y) == (starbaseX + ',' + starbaseY))?.name;
-
-	let lastUpdate = influxLastStarbaseCargoHoldUpdates.find(item => item.x == starbaseX && item.y == starbaseY);
-	let lastUpdateTimestamp = 0;
-
-	if(!lastUpdate) {
-		lastUpdateTimestamp = 0;
-		influxLastStarbaseCargoHoldUpdates.push({ x: starbaseX, y: starbaseY, timestamp: Date.now() });
-	}
-	else
-	{
-		lastUpdateTimestamp = lastUpdate.timestamp;
-	}
-
-	if(lastUpdateTimestamp < Date.now() - 60*15*1000) { // log new data after 15 minutes
-
-		if(lastUpdate) lastUpdate.timestamp = Date.now();
-
-		if(cargoHoldKeyOrTokens.constructor == solanaWeb3.PublicKey) {
-			// we got public key of the cargo hold and read the token accounts by ourselves
-			cargoHoldTokens = await solanaReadConnection.getParsedTokenAccountsByOwner(cargoHoldKeyOrTokens, {programId: tokenProgramPK});
-		} else {
-			// we got an object, so we got the full token accounts
-			cargoHoldTokens = cargoHoldKeyOrTokens;
-		}
-
-		let influxStr = '';
-		let starbaseName = validTargets.find(target => (target.x + ',' + target.y) == starbaseX + ',' + starbaseY )?.name;
-
-		let count=0;
-		for(let curToken of cargoHoldTokens.value) {
-			let mint = curToken.account.data.parsed.info.mint;
-			let rssName = cargoItems.find(r => r.token == mint)?.name;
-			let amount = curToken.account.data.parsed.info.tokenAmount.uiAmount ? curToken.account.data.parsed.info.tokenAmount.uiAmount : 0;
-			if(rssName) {
-				influxStr += (count ? "\n" : "") + `starbase,starbase=${influxEscape(starbaseName)},sectorX=${starbaseX},sectorY=${starbaseY},rss=${influxEscape(rssName)} curAmount=${amount}`;
-				count++;
+	const influxNextStarbaseInventoryUpdate = new Map();
+	async function influxStarbaseInventory(starbaseX, starbaseY, readCargoHolds) {
+		if(!globalSettings.influxURL) return;
+		const location = getTransportCoordKey([starbaseX, starbaseY]);
+		const starbaseName = validTargets.find(target => `${target.x},${target.y}` === location)?.name;
+		if(!starbaseName) return;
+		const nextUpdate = influxNextStarbaseInventoryUpdate.get(location);
+		// A null entry reserves the snapshot while the reads and write are in flight.
+		if(nextUpdate === null || nextUpdate > Date.now()) return;
+		influxNextStarbaseInventoryUpdate.set(location, null);
+		try {
+			const cargoHolds = await readCargoHolds();
+			const namesByMint = new Map();
+			for(const {token, name} of cargoItems) {
+				if(token && name && !namesByMint.has(token)) namesByMint.set(token, name);
 			}
+			// Include absent resources so an older positive reading is superseded by zero.
+			const balances = new Map(Array.from(namesByMint.values(), name => [name, 0]));
+			for(const {cargoHoldTokens} of cargoHolds) {
+				for(const {mint, amount} of cargoHoldTokens) {
+					const name = namesByMint.get(mint);
+					if(name) balances.set(name, balances.get(name) + Number(amount || 0));
+				}
+			}
+			const tags = `starbase,starbase=${influxEscape(starbaseName)},sectorX=${starbaseX},sectorY=${starbaseY}`;
+			const lines = Array.from(balances, ([name, amount]) => `${tags},rss=${influxEscape(name)} curAmount=${amount}`);
+			if(lines.length && await sendToInflux(lines.join('\n'))) {
+				influxNextStarbaseInventoryUpdate.set(location, Date.now() + 15 * 60 * 1000);
+			}
+		} catch(error) {
+			cLog(1, `Influx starbase inventory snapshot failed for ${starbaseName}:`, error?.message || error);
+		} finally {
+			if(influxNextStarbaseInventoryUpdate.get(location) === null) influxNextStarbaseInventoryUpdate.delete(location);
 		}
-		if(count) await sendToInflux(influxStr);
 	}
-    }
 
 /*
     async function getCargoTypeSize(cargoType) {
@@ -11208,7 +11194,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 					starbasePlayerCargoHold = starbasePlayerCargoHold ? starbasePlayerCargoHold.publicKey : starbasePlayerCargoHolds.length > 0 ? starbasePlayerCargoHolds[0].publicKey : await execCreateCargoPod(fleet, dockCoords);
 
 					if(!fleet.state.includes('ERROR')) {
-						await influxStarbaseCargoHold(starbaseX,starbaseY,starbasePlayerCargoHold);
+						await influxStarbaseInventory(starbaseX, starbaseY,
+							() => getStarbasePlayerCargoHolds(starbasePlayer.publicKey, starbasePlayerCargoHolds));
 					}
 
 					let [starbaseCargoToken] = await BrowserAnchor.anchor.web3.PublicKey.findProgramAddressSync(
@@ -11318,14 +11305,10 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		await getAccountInfo(fleet.label, 'fleet fuel token', fleet.fuelToken) || await createPDA(fleet.fuelToken, fleet.fuelTank, new solanaWeb3.PublicKey(fuelItem.token), fleet);
 	}
 
-	function collectStarbaseCargoSources(cargoPod, parsedTokenAccounts, tokenMint) {
-		return ((parsedTokenAccounts && parsedTokenAccounts.value) || [])
-			.filter(item => item && item.account && item.account.data && item.account.data.parsed && item.account.data.parsed.info && item.account.data.parsed.info.mint === tokenMint)
-			.map(item => ({
-				cargoPod,
-				token: item.pubkey,
-				amount: item.account.data.parsed.info.tokenAmount.uiAmount
-			}));
+	function collectStarbaseCargoSources(cargoHolds, tokenMint) {
+		return cargoHolds.flatMap(({starbasePlayerCargoHold, cargoHoldTokens}) => cargoHoldTokens
+			.filter(token => token.mint === tokenMint)
+			.map(({cargoHoldToken, amount}) => ({cargoPod: starbasePlayerCargoHold, token: cargoHoldToken, amount})));
 	}
 
 	function planStarbaseCargoLoads(sources, requestedAmount, keepOne, reservedAmount) {
@@ -11360,26 +11343,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			let starbaseY = dockCoords.split(',')[1].trim();
 			let starbase = await getStarbaseFromCoords(starbaseX, starbaseY);
 			let starbasePlayer = await getStarbasePlayer(userProfileAcct,starbase.publicKey);
-			let starbasePlayerCargoHolds = await cargoProgram.account.cargoPod.all([
-				{
-						memcmp: {
-								offset: 41,
-								bytes: starbasePlayer.publicKey.toBase58(),
-						},
-				},
-			]);
-			const cargoSources = [];
-            for (let cargoHold of starbasePlayerCargoHolds) {
-                if (cargoHold.account && cargoHold.account.openTokenAccounts > 0) {
-                    let cargoHoldTokens = await solanaReadConnection.getParsedTokenAccountsByOwner(cargoHold.publicKey, {programId: tokenProgramPK});
-
-                    if(!fleet.state.includes('ERROR')) {
-			await influxStarbaseCargoHold(starbaseX,starbaseY,cargoHoldTokens);
-                    }
-
-					cargoSources.push(...collectStarbaseCargoSources(cargoHold.publicKey, cargoHoldTokens, tokenMint));
-                }
-            }
+			const cargoHolds = await getStarbasePlayerCargoHolds(starbasePlayer.publicKey);
+			if(!fleet.state.includes('ERROR')) {
+				await influxStarbaseInventory(starbaseX, starbaseY, () => cargoHolds);
+			}
+			const cargoSources = collectStarbaseCargoSources(cargoHolds, tokenMint);
 
 			const orgAmount = Math.max(0, Math.floor(Number(amount || 0)));
 			const sortedSources = cargoSources.slice().sort((left, right) => Number(right.amount || 0) - Number(left.amount || 0));
@@ -17692,7 +17660,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-330', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-331', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -21098,8 +21066,8 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		}
 	}
 
-    async function getStarbasePlayerCargoHolds(starbasePlayer) {
-        let starbasePlayerCargoHolds = await cargoProgram.account.cargoPod.all([
+    async function getStarbasePlayerCargoHolds(starbasePlayer, knownCargoHolds) {
+        const starbasePlayerCargoHolds = knownCargoHolds ?? await cargoProgram.account.cargoPod.all([
             {
                 memcmp: {
                     offset: 41,

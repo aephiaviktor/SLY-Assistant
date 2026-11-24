@@ -393,27 +393,87 @@ test('fuel and ammo loading account for the amount actually available', () => {
 
 test('starbase cargo discovery keeps every matching token account in the same cargo pod', () => {
   const collectStarbaseCargoSources = loadFunction('collectStarbaseCargoSources');
-  const result = collectStarbaseCargoSources('pod-a', {
-    value: [
-      {
-        pubkey: 'copper-small',
-        account: { data: { parsed: { info: { mint: 'copper', tokenAmount: { uiAmount: 17522 } } } } },
-      },
-      {
-        pubkey: 'carbon',
-        account: { data: { parsed: { info: { mint: 'carbon', tokenAmount: { uiAmount: 1 } } } } },
-      },
-      {
-        pubkey: 'copper-large',
-        account: { data: { parsed: { info: { mint: 'copper', tokenAmount: { uiAmount: 79000 } } } } },
-      },
-    ],
-  }, 'copper');
+  const result = collectStarbaseCargoSources([
+    { starbasePlayerCargoHold: 'pod-a', cargoHoldTokens: [
+      { cargoHoldToken: 'copper-small', mint: 'copper', amount: 17522 },
+      { cargoHoldToken: 'carbon', mint: 'carbon', amount: 1 },
+      { cargoHoldToken: 'copper-large', mint: 'copper', amount: 79000 },
+    ] },
+    { starbasePlayerCargoHold: 'pod-b', cargoHoldTokens: [
+      { cargoHoldToken: 'copper-other', mint: 'copper', amount: 22 },
+    ] },
+  ], 'copper');
 
   assert.deepEqual(JSON.parse(JSON.stringify(result)), [
     { cargoPod: 'pod-a', token: 'copper-small', amount: 17522 },
     { cargoPod: 'pod-a', token: 'copper-large', amount: 79000 },
+    { cargoPod: 'pod-b', token: 'copper-other', amount: 22 },
   ]);
+});
+
+test('starbase inventory publishes all cargo pods together and clears missing balances', async () => {
+  const writes = [];
+  const reads = [];
+  let now = 1_000_000;
+  let rejectWrite = true;
+  const pods = ['pod-a', 'pod-b', 'empty'].map((publicKey, index) => ({
+    publicKey, account: { openTokenAccounts: index === 2 ? 0 : 2 },
+  }));
+  const items = { 'pod-a': [['electronics', 100], ['fuel', 40]], 'pod-b': [['electronics', 240], ['electromagnet', 25]] };
+  const context = vm.createContext({
+    Date: { now: () => now },
+    globalSettings: { influxURL: 'configured' },
+    validTargets: [{ x: 40, y: 30, name: 'UST-1' }],
+    cargoItems: [
+      { token: 'electronics', name: 'Electronics' }, { token: 'fuel', name: 'Fuel' },
+      { token: 'electromagnet', name: 'Electromagnet' }, { token: 'field', name: 'Field Stabilizer' },
+      { token: 'titanium-ore', name: 'Titanium Ore' },
+    ],
+    tokenProgramPK: 'token-program',
+    solanaReadConnection: { async getParsedTokenAccountsByOwner(pod) {
+      reads.push(pod);
+      return { value: items[pod].map(([mint, uiAmount]) => ({
+        account: { data: { parsed: { info: { mint, tokenAmount: { uiAmount } } } } },
+      })) };
+    } },
+    cLog() {},
+    async sendToInflux(line) { writes.push(line); return !rejectWrite; },
+  });
+  vm.runInContext([
+    'const influxNextStarbaseInventoryUpdate = new Map();',
+    readFunctionSource('getTransportCoordKey'),
+    readFunctionSource('influxEscape'),
+    `async ${readFunctionSource('getStarbasePlayerCargoHolds')}`,
+    `async ${readFunctionSource('influxStarbaseInventory')}`,
+  ].join('\n'), context);
+  const readCargoHolds = () => context.getStarbasePlayerCargoHolds(null, pods);
+
+  await context.influxStarbaseInventory('40', '30', async () => { throw new Error('RPC unavailable'); });
+  assert.equal(writes.length, 0);
+
+  await Promise.all([
+    context.influxStarbaseInventory('40', '30', readCargoHolds),
+    context.influxStarbaseInventory(40, 30, readCargoHolds),
+  ]);
+  assert.deepEqual(reads, ['pod-a', 'pod-b']);
+  assert.equal(writes.length, 1);
+
+  rejectWrite = false;
+  await context.influxStarbaseInventory(40, 30, readCargoHolds);
+  const prefix = 'starbase,starbase=UST-1,sectorX=40,sectorY=30,';
+  assert.deepEqual(writes[1].split('\n'), [
+    'rss=Electronics curAmount=340', 'rss=Fuel curAmount=40', 'rss=Electromagnet curAmount=25',
+    'rss=Field\\ Stabilizer curAmount=0', 'rss=Titanium\\ Ore curAmount=0',
+  ].map(line => prefix + line));
+
+  now += 15 * 60 * 1000 - 1;
+  await context.influxStarbaseInventory(40, 30, readCargoHolds);
+  assert.equal(writes.length, 2);
+  assert.deepEqual(reads, ['pod-a', 'pod-b', 'pod-a', 'pod-b']);
+  now++;
+  await context.influxStarbaseInventory(40, 30, () => []);
+  assert.equal(writes.length, 3);
+  assert.match(writes[2], /rss=Electronics curAmount=0/);
 });
 
 test('required transport load can satisfy the remaining amount across multiple starbase cargo pods', () => {
