@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-332
+// @aephia-version 0.7.35-333
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -13111,17 +13111,24 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			diagnostic.initialSchedules = plans.map(({modes, shortfall}) => ({modes, shortfall}));
 			diagnostic.warpReplays = [];
 		}
-		const replay = (index, offset, delayOffset) => {
+		const replay = (index, offset, delayOffset, warpBlockLength = 0) => {
 			const schedules = plans.map(plan => plan.modes.slice());
-			schedules[index][offset] = 'warp';
-			if(delayOffset !== undefined) schedules[index][delayOffset] = 'subwarp';
+			const schedule = schedules[index];
+			if(warpBlockLength) {
+				const block = schedule.splice(delayOffset, warpBlockLength);
+				schedule.splice(offset, 0, ...block);
+			} else {
+				schedule[offset] = 'warp';
+				if(delayOffset !== undefined) schedule[delayOffset] = 'subwarp';
+			}
 			const candidate = replaySharedAutomatedTravel(fleets, schedules, inventory, productionEvents, nowMs, horizonLegs);
 			const shortfalls = getEarlierAutomatedPickupShortfalls(fleets, plans, candidate);
 			const changedSchedules = candidate.flatMap((plan, i) => plan.modes.length !== schedules[i].length
 				|| plan.modes.some((mode, j) => mode !== schedules[i][j])
 				? [{fleet: i, completedLegs: plan.completedLegs, expectedLegs: schedules[i].length}] : []);
 			if(diagnostic) diagnostic.warpReplays.push({fleet: index, leg: offset + 1,
-				delayLeg: delayOffset === undefined ? null : delayOffset + 1, shortfalls, changedSchedules,
+				delayLeg: delayOffset === undefined ? null : delayOffset + 1,
+				...(warpBlockLength ? {warpBlockLength} : {}), shortfalls, changedSchedules,
 				accepted: !shortfalls.length && !changedSchedules.length});
 			if(shortfalls.length || changedSchedules.length) return false;
 			plans = candidate;
@@ -13140,11 +13147,30 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 				if(laterWarp >= 0) replay(index, offset, laterWarp);
 			}
 		}
-		// A later change can bring a delivery forward and make a peer's first delay unnecessary.
+		// Revisit the first delay after the other legs have moved. Moving a whole Warp
+		// block can preserve the cooldown and pickup timing that a single swap changes.
 		for(let index = 0; index < plans.length;) {
-			const offset = plans[index].flexibleSubwarps?.[0];
-			if(offset !== undefined && offset < visibleLegs[index] && replay(index, offset)) index = 0;
-			else index++;
+			const {modes, flexibleSubwarps} = plans[index];
+			const offset = flexibleSubwarps?.[0];
+			if(offset === undefined || offset >= visibleLegs[index]) {
+				index++;
+				continue;
+			}
+			if(replay(index, offset)) {
+				index = 0;
+				continue;
+			}
+			const laterWarp = modes.indexOf('warp', offset + 1);
+			if(laterWarp >= 0) {
+				const nextSubwarp = modes.indexOf('subwarp', laterWarp);
+				const blockLength = (nextSubwarp < 0 ? modes.length : nextSubwarp) - laterWarp;
+				const allDelaysFlexible = modes.slice(offset, laterWarp).every((_, i) => flexibleSubwarps.includes(offset + i));
+				if((blockLength > 1 && allDelaysFlexible && replay(index, offset, laterWarp, blockLength)) || replay(index, offset, laterWarp)) {
+					index = 0;
+					continue;
+				}
+			}
+			index++;
 		}
 		if(diagnostic) {
 			diagnostic.events = [];
@@ -13343,9 +13369,18 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 	}
 
 	function getEarlierAutomatedPickupShortfalls(participants, plans, replay) {
-		return replay.flatMap((plan, i) => plan.shortfall &&
-			(!plans[i].shortfall || plan.shortfall.atMs < plans[i].shortfall.atMs || plan.completedLegs < plans[i].completedLegs)
-			? [{...plan.shortfall, fleetLabel: participants[i].fleet?.label}] : []);
+		return replay.flatMap(({shortfall, completedLegs}, i) => {
+			if(!shortfall) return [];
+			const previous = plans[i];
+			const limit = previous.shortfall;
+			// Reaching the same terminal stock limit sooner leaves every planned pickup intact.
+			const sameStockLimit = limit && completedLegs === previous.completedLegs && !limit.replenishment && !shortfall.replenishment
+				&& limit.location === shortfall.location && limit.requirements.length === shortfall.requirements.length
+				&& shortfall.requirements.every(({res, required, available}) => limit.requirements.some(item =>
+					item.res === res && item.required === required && available >= item.available));
+			return !limit || completedLegs < previous.completedLegs || (shortfall.atMs < limit.atMs && !sameStockLimit)
+				? [{...shortfall, fleetLabel: participants[i].fleet?.label}] : [];
+		});
 	}
 
 	async function getAutomatedLoadedManifest(fleet, leg, loadedCargo, ingredients) {
@@ -17676,7 +17711,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-332', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-333', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),

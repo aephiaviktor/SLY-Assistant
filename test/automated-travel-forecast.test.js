@@ -432,6 +432,52 @@ test('shared forecasts replay unnecessary Subwarp and keep the delays the other 
   }
 });
 
+test('shared forecasts move a whole Warp block ahead of flexible Subwarp while preserving peer pickups', () => {
+  const { planSharedAutomatedTravel } = loadFunctions(sharedPlannerFunctions);
+  const transportRoute = makeTwoLegRoute({ warpMs: 6, subwarpMs: 17 })
+    .map(leg => ({ ...leg, warpRecoveryMs: 11 }));
+  const peerRoute = transportRoute.map(leg => ({
+    ...leg,
+    source: leg.source === 'B' ? 'C' : leg.source,
+    destination: leg.destination === 'B' ? 'C' : leg.destination,
+    manifest: leg.manifest.map(entry => ({ ...entry, res: 'copper' })),
+  }));
+  const fleets = [
+    makeSharedFleet(transportRoute, { legIndex: 0, cargo: transportRoute[0].manifest, warpReadyMs: 0 }),
+    makeSharedFleet(peerRoute, { legIndex: 1, atMs: 6, modes: ['warp'], arriving: true, cargo: [], warpReadyMs: 17 }),
+  ];
+  const inventory = { A: { ore: 31, copper: 21 } };
+  const events = [
+    { id: 'craft', location: 'A', res: 'ore', atMs: 119, amount: 81 },
+    { id: 'mine', location: 'A', res: 'copper', atMs: 93, amount: 300 },
+  ];
+  const diagnostic = {};
+  const plans = planSharedAutomatedTravel(fleets, inventory, events, 0, 18, 12, diagnostic);
+
+  assert.equal(plans[0].summary, '18w');
+  assert.equal(plans[1].summary, '5w');
+  assert.deepEqual(plans[1].shortfall, diagnostic.initialSchedules[1].shortfall);
+  assert.ok(diagnostic.warpReplays.some(replay => replay.leg === 1 && replay.warpBlockLength > 1 && replay.accepted));
+});
+
+test('a faster replay may reach the same terminal stock limit sooner after every planned pickup', () => {
+  const { getEarlierAutomatedPickupShortfalls } = loadFunctions(['getEarlierAutomatedPickupShortfalls']);
+  const fleets = [{ fleet: { label: 'Transport' } }];
+  const shortfall = { location: 'A', atMs: 260, requirements: [{ res: 'electronics', required: 10, available: 3 }] };
+  const plans = [{ completedLegs: 18, shortfall }];
+  const earlier = { ...shortfall, atMs: 240 };
+
+  assert.equal(getEarlierAutomatedPickupShortfalls(fleets, plans, [{ completedLegs: 18, shortfall: earlier }]).length, 0);
+  for (const replay of [
+    { completedLegs: 16, shortfall: earlier },
+    { completedLegs: 18, shortfall: { ...earlier, location: 'B' } },
+    { completedLegs: 18, shortfall: { ...earlier, replenishment: { atMs: 250 } } },
+    { completedLegs: 18, shortfall: { ...earlier, requirements: [{ res: 'electronics', required: 10, available: 2 }] } },
+  ]) {
+    assert.equal(getEarlierAutomatedPickupShortfalls(fleets, plans, [replay])[0]?.fleetLabel, 'Transport');
+  }
+});
+
 test('a shared Subwarp reports the fleet and pickup that would go short if it Warped', () => {
   const { planSharedAutomatedTravel, explainSharedAutomatedSubwarp } = loadFunctions([
     ...sharedPlannerFunctions, 'explainSharedAutomatedSubwarp',
