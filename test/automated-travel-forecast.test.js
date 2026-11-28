@@ -53,7 +53,7 @@ function loadFunctions(names, globals = {}) {
     dependencies.push('getTransportCoordKey', 'logAutomatedSubwarpDecision', 'clearAutomatedTravelPlan',
       'areAutomatedTravelDiagnosticsEnabled', 'writeAutomatedTravelDiagnostic');
   }
-  if (names.includes('getAutomatedTravelPlanSuffix')) dependencies.push('summarizeAutomatedRoundtrips');
+  if (names.includes('getAutomatedTravelPlanDisplay')) dependencies.push('summarizeAutomatedRoundtrips');
   names = [...new Set([...names, ...dependencies])];
   const context = vm.createContext({
     automatedTravelForecastQueue: Promise.resolve(),
@@ -738,11 +738,12 @@ test('Automated planner preserves checked cargo OR alternatives', () => {
 });
 
 test('Automated forecast suffix distinguishes estimates and shows a dash when no plan is available', () => {
-  const { compressAutomatedTravelPlan, getAutomatedTravelPlanSuffix, getAssistStatusRowModel } = loadFunctions([
+  const { compressAutomatedTravelPlan, getAutomatedTravelPlanDisplay, getAssistStatusRowModel } = loadFunctions([
     'compressAutomatedTravelPlan',
-    'getAutomatedTravelPlanSuffix',
+    'getAutomatedTravelPlanDisplay',
     'getAssistStatusRowModel',
   ]);
+  const getAutomatedTravelPlanSuffix = fleet => getAutomatedTravelPlanDisplay(fleet).suffix;
   assert.equal(compressAutomatedTravelPlan(['warp', 'warp', 'subwarp', 'subwarp', 'subwarp', 'warp']), '2w3sw1w');
   assert.equal(getAutomatedTravelPlanSuffix({ automatedTravelPlan: ['warp', 'warp', 'subwarp'] }), ' | 2w1sw');
   assert.equal(getAutomatedTravelPlanSuffix({ automatedTravelPlan: ['warp', 'warp', 'subwarp'], automatedTravelPlanEstimated: true }), ' | ~2w1sw');
@@ -755,7 +756,23 @@ test('Automated forecast suffix distinguishes estimates and shows a dash when no
   assert.equal(getAutomatedTravelPlanSuffix({
     automatedTravelPlan: ['warp', 'warp', 'warp', 'warp', 'subwarp', 'warp', 'subwarp'],
     automatedTravelCycleLegs: 3, automatedTravelPlanEstimated: true,
-  }), ' | ~1w1(1w1sw1w) rt + 1sw leg');
+  }), ' | ~2w* rt + 1sw leg');
+  for (const mixedRoundtrip of [['subwarp', 'warp'], ['warp', 'subwarp']]) {
+    assert.equal(getAutomatedTravelPlanSuffix({
+      automatedTravelPlan: [...Array(8).fill('warp'), ...Array(46).fill('subwarp'),
+        ...mixedRoundtrip, ...Array(40).fill('warp')],
+      automatedTravelCycleLegs: 2,
+    }), ' | 4w24sw*20w rt');
+  }
+  assert.equal(getAutomatedTravelPlanSuffix({
+    automatedTravelPlan: [...Array(8).fill('warp'), 'warp', 'subwarp',
+      ...Array(46).fill('subwarp'), ...Array(40).fill('warp')],
+    automatedTravelCycleLegs: 2, automatedTravelPlanEstimated: true,
+  }), ' | ~5w*23sw20w rt');
+  assert.equal(getAutomatedTravelPlanSuffix({
+    automatedTravelPlan: ['warp', 'subwarp', 'subwarp', 'warp', 'warp', 'warp'],
+    automatedTravelCycleLegs: 2,
+  }), ' | 2*1w rt');
   assert.deepEqual(
     JSON.parse(JSON.stringify(getAssistStatusRowModel({ publicKey: 'fleet', label: 'Hauler', state: 'Warp [28,21] 14:32', automatedTravelPlan: ['warp', 'warp', 'subwarp'] }, []))),
     { section: 'fleet', cells: ['Hauler', 'Warp [28,21] 14:32 | 2w1sw'] },
@@ -764,6 +781,31 @@ test('Automated forecast suffix distinguishes estimates and shows a dash when no
     JSON.parse(JSON.stringify(getAssistStatusRowModel({ publicKey: 'fleet', label: 'Eagle Fleet', state: 'Warp C/D [16:00]', automatedTravelPlan: [], automatedTravelPlanPending: true }, []))),
     { section: 'fleet', cells: ['Eagle Fleet', 'Warp C/D [16:00] | -'] },
   );
+});
+
+test('a fragmented forecast shows its next roundtrip block and total with full details available', () => {
+  const { getAssistStatusRowModel } = loadFunctions([
+    'getAssistStatusRowModel', 'getAutomatedTravelPlanDisplay', 'compressAutomatedTravelPlan',
+  ]);
+  const roundtrips = ['ww', 'ss', 'www', 'ss', 'www', 's', '*', 'www', 's', 'ww', 'ss', 'www', '*', 's', '*'].join('');
+  const fleet = {
+    publicKey: 'fleet', label: 'Hauler', state: 'Warp C/D [08:45]',
+    automatedTravelPlan: [...Array.from(roundtrips).flatMap(mode =>
+      mode === '*' ? ['subwarp', 'warp'] : Array(2).fill(mode === 'w' ? 'warp' : 'subwarp')), 'warp'],
+    automatedTravelCycleLegs: 2,
+    automatedTravelPlanStockLimited: true,
+  };
+  const row = getAssistStatusRowModel(fleet);
+  assert.equal(row.cells[1], 'Warp C/D [08:45]');
+  assert.equal(row.travelForecast.suffix, ' | 2w rt → … | 28 rt + 1w leg (stock limit)');
+  assert.equal(row.travelForecast.expanded, '2w2sw3w2sw3w1sw1(1sw1w)3w1sw2w2sw3w1(1sw1w)1sw1(1sw1w) rt + 1w leg (stock limit)');
+  fleet.automatedTravelPlanEstimated = true;
+  assert.match(getAssistStatusRowModel(fleet).travelForecast.suffix, /^ \| ~2w rt/);
+  fleet.automatedTravelPlan = [...Array(12).fill('warp'), ...Array(48).fill('subwarp'), ...Array(36).fill('warp')];
+  fleet.automatedTravelPlanStockLimited = false;
+  const simple = getAssistStatusRowModel(fleet);
+  assert.equal(simple.cells[1], 'Warp C/D [08:45] | ~6w24sw18w rt');
+  assert.equal(simple.travelForecast, undefined);
 });
 
 test('visible crafting events credit recipe output per process quantity', () => {
@@ -1399,8 +1441,8 @@ test('Automated uses the first mode and displays the estimated sequence until th
   let statusUpdates = 0;
   let estimated = true;
   const fleet = { cargoHold: 'cargo', label: 'Eagle Fleet' };
-  const { resolveAutomatedTravelMode, getAutomatedTravelPlanSuffix } = loadFunctions([
-    'resolveAutomatedTravelMode', 'getAutomatedTravelPlanSuffix', 'compressAutomatedTravelPlan',
+  const { resolveAutomatedTravelMode, getAutomatedTravelPlanDisplay } = loadFunctions([
+    'resolveAutomatedTravelMode', 'getAutomatedTravelPlanDisplay', 'compressAutomatedTravelPlan',
   ], {
     solanaReadConnection: { getParsedTokenAccountsByOwner: async () => ({ value: [] }) },
     tokenProgramPK: 'token-program',
@@ -1420,11 +1462,11 @@ test('Automated uses the first mode and displays the estimated sequence until th
   assert.equal(moveType, 'subwarp');
   assert.deepEqual(Array.from(fleet.automatedTravelPlan), ['subwarp', 'warp']);
   assert.equal(fleet.automatedTravelPlanPending, false);
-  assert.equal(getAutomatedTravelPlanSuffix(fleet), ' | ~1sw1w');
+  assert.equal(getAutomatedTravelPlanDisplay(fleet).suffix, ' | ~1sw1w');
 
   estimated = false;
   await resolveAutomatedTravelMode(fleet, [], { legs: [{}] });
-  assert.equal(getAutomatedTravelPlanSuffix(fleet), ' | 1sw1w');
+  assert.equal(getAutomatedTravelPlanDisplay(fleet).suffix, ' | 1sw1w');
   assert.equal(statusUpdates, 2);
 });
 

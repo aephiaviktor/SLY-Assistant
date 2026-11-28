@@ -2,7 +2,7 @@
 // @name         SLY Assistant
 // @namespace    http://tampermonkey.net/
 // @version      0.7.35
-// @aephia-version 0.7.35-333
+// @aephia-version 0.7.35-334
 // @description  try to take over the world!
 // @author       SLY w/ Contributions by niofox, SkyLove512, anthonyra, [AEP] Valkynen, Risingson, Swift42
 // @match        https://*.based.staratlas.com/
@@ -12608,31 +12608,50 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		return runs.map(run => String(run.count) + run.suffix).join('');
 	}
 
-	function getAutomatedTravelPlanSuffix(fleet) {
-		if(fleet?.assignmentCleanupPending) return '';
-		const summary = fleet?.automatedTravelCycleLegs
+	function getAutomatedTravelPlanDisplay(fleet) {
+		if(fleet?.assignmentCleanupPending) return {suffix: ''};
+		const {summary, preview, exact} = fleet?.automatedTravelCycleLegs
 			? summarizeAutomatedRoundtrips(fleet.automatedTravelPlan, fleet.automatedTravelCycleLegs)
-			: compressAutomatedTravelPlan(fleet?.automatedTravelPlan);
-		if(summary) return ' | ' + (fleet.automatedTravelPlanEstimated ? '~' : '') + summary
-			+ (fleet.automatedTravelPlanStockLimited ? ' (stock limit)' : '');
-		return fleet && fleet.automatedTravelPlanPending ? ' | -' : '';
+			: {summary: compressAutomatedTravelPlan(fleet?.automatedTravelPlan)};
+		if(!summary) return {suffix: fleet?.automatedTravelPlanPending ? ' | -' : ''};
+		const estimate = fleet.automatedTravelPlanEstimated ? '~' : '';
+		const limit = fleet.automatedTravelPlanStockLimited ? ' (stock limit)' : '';
+		return preview
+			? {suffix: ' | ' + estimate + preview + limit, expanded: estimate + exact + limit}
+			: {suffix: ' | ' + estimate + summary + limit};
 	}
 
 	function summarizeAutomatedRoundtrips(modes, cycleLegs) {
 		const runs = [];
+		const exactRuns = [];
 		let offset = 0;
 		for(; offset + cycleLegs <= modes.length; offset += cycleLegs) {
 			const cycle = modes.slice(offset, offset + cycleLegs);
-			const pattern = cycle.every(mode => mode === cycle[0])
-				? (cycle[0] === 'warp' ? 'w' : 'sw')
-				: '(' + compressAutomatedTravelPlan(cycle) + ')';
+			const mixed = cycle.some(mode => mode !== cycle[0]);
 			const previous = runs[runs.length - 1];
-			if(previous?.pattern === pattern) previous.count++;
-			else runs.push({pattern, count: 1});
+			const modeSuffix = cycle[0] === 'warp' ? 'w' : 'sw';
+			const suffix = mixed ? (previous?.suffix ?? '') : modeSuffix;
+			if(previous?.suffix === suffix) {
+				previous.count++;
+				previous.mixed ||= mixed;
+			} else runs.push({suffix, count: 1, mixed});
+			const pattern = mixed ? '(' + compressAutomatedTravelPlan(cycle) + ')' : modeSuffix;
+			const lastExact = exactRuns[exactRuns.length - 1];
+			if(lastExact?.pattern === pattern) lastExact.count++;
+			else exactRuns.push({pattern, count: 1});
 		}
-		const full = runs.map(({count, pattern}) => count + pattern).join('') + (runs.length ? ' rt' : '');
+		const blocks = runs.map(({count, suffix, mixed}) => count + suffix + (mixed ? '*' : ''));
 		const tail = modes.slice(offset);
-		return full + (tail.length ? (full ? ' + ' : '') + compressAutomatedTravelPlan(tail) + (tail.length === 1 ? ' leg' : ' legs') : '');
+		const partial = tail.length ? compressAutomatedTravelPlan(tail) + (tail.length === 1 ? ' leg' : ' legs') : '';
+		const summary = [blocks.length ? blocks.join('') + ' rt' : '', partial].filter(Boolean).join(' + ');
+		const roundtrips = offset / cycleLegs;
+		const preview = blocks.length > 3
+			? blocks[0] + ' rt → … | ' + roundtrips + ' rt' + (partial ? ' + ' + partial : '')
+			: '';
+		const exact = preview
+			? exactRuns.map(({count, pattern}) => count + pattern).join('') + ' rt' + (partial ? ' + ' + partial : '')
+			: '';
+		return {summary, preview, exact};
 	}
 
 	function clearAutomatedTravelPlan(fleet, pending = false) {
@@ -15415,8 +15434,11 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 
 	function getAssistStatusRowModel(fleet, targets = []) {
 		if(fleet && fleet.publicKey) {
-			const automatedSuffix = typeof getAutomatedTravelPlanSuffix === 'function' ? getAutomatedTravelPlanSuffix(fleet) : '';
-			return { section: 'fleet', cells: [String(fleet.label || ''), String(fleet.state || '') + automatedSuffix] };
+			const forecast = typeof getAutomatedTravelPlanDisplay === 'function' ? getAutomatedTravelPlanDisplay(fleet) : {suffix: ''};
+			const row = { section: 'fleet', cells: [String(fleet.label || ''), String(fleet.state || '')] };
+			if(forecast.expanded) row.travelForecast = forecast;
+			else row.cells[1] += forecast.suffix;
+			return row;
 		}
 
 		const coords = fleet && fleet.craftingId && fleet.craftingCoords ? fleet.craftingCoords : fleet && fleet.coordinates;
@@ -15432,6 +15454,26 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		};
 	}
 
+	function updateAssistTravelForecast(cell, forecast) {
+		let details = cell.querySelector('details.assist-travel-forecast');
+		if(!forecast) {
+			details?.remove();
+			return;
+		}
+		if(!details) {
+			details = document.createElement('details');
+			details.className = 'assist-travel-forecast';
+			details.addEventListener('click', event => event.stopPropagation());
+			const summary = document.createElement('summary');
+			summary.title = 'Show or hide the full travel forecast';
+			details.appendChild(summary);
+			details.appendChild(document.createElement('div'));
+			cell.appendChild(details);
+		}
+		if(details.firstElementChild.textContent !== forecast.suffix) details.firstElementChild.textContent = forecast.suffix;
+		if(details.lastElementChild.textContent !== forecast.expanded) details.lastElementChild.textContent = forecast.expanded;
+	}
+
 	function appendAssistStatusSectionHeader(table, section, showInfo) {
 		const className = 'assist-' + section + '-section-header';
 		if(table.querySelector('tr.' + className)) return;
@@ -15440,7 +15482,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		if(section === 'craft') {
 			row.innerHTML = '<td>Slot</td><td>Starbase</td><td>Crew</td><td>Crafting Job (time)</td>';
 		} else {
-			row.innerHTML = '<td colspan="2">Fleet</td><td colspan="2">State' + (showInfo ? ' (<span class="tooltip">Info<div class="tooltiptext">You can click on a fleet state to stop this particular fleet (after some time "STOPPED" will be displayed).<br>Clicking on the fleet state again will reset the fleet and it will try to pick up the loop again (this also works for fleets that are in an ERROR state).<br>Automated travel forecasts show up to 48 roundtrips (rt). Parentheses show the leg order within a mixed roundtrip.</div></span>)' : '') + '</td>';
+			row.innerHTML = '<td colspan="2">Fleet</td><td colspan="2">State' + (showInfo ? ' (<span class="tooltip">Info<div class="tooltiptext">You can click on a fleet state to stop this particular fleet (after some time "STOPPED" will be displayed).<br>Clicking on the fleet state again will reset the fleet and it will try to pick up the loop again (this also works for fleets that are in an ERROR state).<br>Automated travel forecasts show up to 48 roundtrips (rt). A star marks a block with mixed roundtrips. Click an abbreviated forecast to see the full sequence.</div></span>)' : '') + '</td>';
 		}
 		table.appendChild(row);
 	}
@@ -15456,6 +15498,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			rowModel.cells.forEach((value, index) => {
 				if(statusRow.children[index] && statusRow.children[index].firstChild) setInnerHtmlIfChanged(statusRow.children[index].firstChild, value);
 			});
+			if(rowModel.section === 'fleet') updateAssistTravelForecast(statusRow.children[1], rowModel.travelForecast);
 		} else {
 			if((globalSettings.fleetsPerColumn <= 0 && fleetStatusCount == 0) || (globalSettings.fleetsPerColumn > 0 && (fleetStatusCount % globalSettings.fleetsPerColumn) == 0)) {
 				fleetStatusCurColumn++;
@@ -15487,6 +15530,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			if(rowModel.section === 'fleet') {
 				rowCells[0].setAttribute('colspan', 2);
 				rowCells[1].setAttribute('colspan', 2);
+				updateAssistTravelForecast(rowCells[1], rowModel.travelForecast);
 				rowCells[1].addEventListener('click', async() => { await resetFleetState(fleet); });
 			}
 			const lpAutomationEnabled = !!globalSettings.upgradeAutomationEnabled;
@@ -17711,7 +17755,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 		const fleet = userFleets[i];
 		const beforeScanEnd = Number(fleet.scanEnd || 0);
 		const diagnostic = {
-			schema: 'slya.movement-decision.v1', version: '0.7.35-333', timestampUtc: new Date().toISOString(),
+			schema: 'slya.movement-decision.v1', version: '0.7.35-334', timestampUtc: new Date().toISOString(),
 			attemptId: `${Date.now().toString(36)}-${String(fleet.publicKey).slice(0, 8)}-${Number(fleet.iterCnt || 0)}`,
 			instance: getSlyaInfluxInstanceTag(), faction: getUpgradeAutomationInfluxFactionTag(),
 			profile: String(userProfileAcct || ''), fleetName: String(fleet.label || ''), fleetAccount: String(fleet.publicKey || ''),
@@ -22662,6 +22706,7 @@ async function sendAndConfirmTx(txSerialized, lastValidBlockHeight, txHash, flee
 			assistCSSString += ` #settingsModal #tab_general:checked ~ menu .tab_general, #settingsModal #tab_fees:checked ~ menu .tab_fees, #settingsModal #tab_crafting:checked ~ menu .tab_crafting, #settingsModal #tab_scanning:checked ~ menu .tab_scanning, #settingsModal #tab_fleets:checked ~ menu .tab_fleets, #settingsModal #tab_advanced:checked ~ menu .tab_advanced { display: block; }`;
 			assistCSSString += ` #settingsModal #tab_general:checked ~ nav label[for="tab_general"], #settingsModal #tab_fees:checked ~ nav label[for="tab_fees"], #settingsModal #tab_crafting:checked ~ nav label[for="tab_crafting"], #settingsModal #tab_scanning:checked ~ nav label[for="tab_scanning"], #settingsModal #tab_fleets:checked ~ nav label[for="tab_fleets"], #settingsModal #tab_advanced:checked ~ nav label[for="tab_advanced"] { background: #fc0; color: #111; position: relative; border-bottom: none; }`;
 			assistCSSString += ` .tooltip { position: relative; display: inline-block; border-bottom: 1px dotted white; line-height: 105%; margin:0 2px 0 2px; } .tooltip .tooltiptext { visibility: hidden; font-weight:normal; border:1px solid #45382d; width: max-content; max-width:250px; box-shadow: 5px 5px 5px rgba(0,0,0,0.4); line-height:130%; background-color: #1f1914; color: #eee; text-align: left; border-radius: 6px; padding: 8px; position: absolute; z-index: 1; } .tooltip:hover .tooltiptext { visibility: visible; } `;
+			assistCSSString += ` #assistStatus .assist-travel-forecast { display:inline; } #assistStatus .assist-travel-forecast > summary { display:inline; cursor:pointer; text-decoration:underline dotted; } #assistStatus .assist-travel-forecast > div { overflow-wrap:anywhere; cursor:text; user-select:text; }`;
 			assistCSS.innerHTML = assistCSSString;
 
 			let assistModal = document.createElement('div');

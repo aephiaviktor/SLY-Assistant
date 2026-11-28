@@ -25,10 +25,9 @@ function extractFunction(source, name) {
   throw new Error(`Could not extract ${name}: unbalanced braces`);
 }
 
-function loadHelper(file, name = 'setInnerHtmlIfChanged') {
+function loadHelper(file, name = 'setInnerHtmlIfChanged', context = {}) {
   const source = fs.readFileSync(path.join(ROOT, file), 'utf8');
   const fnText = extractFunction(source, name);
-  const context = {};
   vm.createContext(context);
   vm.runInContext(
     `${fnText}\nthis.result = ${name};`,
@@ -36,6 +35,45 @@ function loadHelper(file, name = 'setInnerHtmlIfChanged') {
   );
   return context.result;
 }
+
+test('the forecast disclosure keeps its open state on refresh and swallows clicks on the forecast', () => {
+  const children = [];
+  const cell = {
+    querySelector: () => children[0],
+    appendChild: child => children.push(child),
+  };
+  const document = {
+    createElement(tag) {
+      if (tag !== 'details') return { textContent: '' };
+      const details = new EventTarget();
+      const content = [];
+      details.appendChild = child => content.push(child);
+      details.remove = () => children.pop();
+      Object.defineProperties(details, {
+        firstElementChild: { get: () => content[0] },
+        lastElementChild: { get: () => content[1] },
+      });
+      return details;
+    },
+  };
+  const update = loadHelper(USERSCRIPTS[0], 'updateAssistTravelForecast', { document });
+  update(cell, { suffix: ' | 2w rt → … | 28 rt', expanded: '2w3sw10w13sw rt' });
+  const [details] = children;
+  const click = new Event('click', { bubbles: true, cancelable: true });
+  details.dispatchEvent(click);
+  assert.equal(click.cancelBubble, true);
+  assert.equal(click.defaultPrevented, false);
+
+  details.open = true;
+  update(cell, { suffix: ' | 1w rt → … | 27 rt', expanded: '1w3sw10w13sw rt' });
+  assert.equal(children[0], details);
+  assert.equal(details.open, true);
+  assert.equal(details.firstElementChild.textContent, ' | 1w rt → … | 27 rt');
+  assert.equal(details.lastElementChild.textContent, '1w3sw10w13sw rt');
+
+  update(cell, undefined);
+  assert.equal(children.length, 0);
+});
 
 function makeFakeElement(initialHtml) {
   const state = { html: String(initialHtml) };

@@ -72,7 +72,7 @@ test('Automated movement reconciles cleanup and fuel fallback with the displayed
   const movement = source.slice(source.indexOf('\tasync function handleMovement('), source.indexOf('\tasync function saveScanEnd('));
   const functions = [
     'getAssignmentTransitionCleanupPlan', 'clearAutomatedTravelPlan', 'getTransportCoordKey',
-    'compressAutomatedTravelPlan', 'getAutomatedTravelPlanSuffix',
+    'compressAutomatedTravelPlan', 'getAutomatedTravelPlanDisplay',
   ].map(name => readFunctionSource(name)).join('\n');
   const cleanup = 'async ' + readFunctionSource('handleAssignmentTransitionCleanup');
   const submitted = new Error('movement submission reached');
@@ -96,8 +96,8 @@ test('Automated movement reconciles cleanup and fuel fallback with the displayed
       departure = { mode, x: Number(x), y: Number(y) };
       throw submitted;
     };
-    const { handleAssignmentTransitionCleanup, handleMovement, getAutomatedTravelPlanSuffix } = vm.runInNewContext(
-      functions + '\n' + cleanup + '\n' + movement + '\n({handleAssignmentTransitionCleanup, handleMovement, getAutomatedTravelPlanSuffix})',
+    const { handleAssignmentTransitionCleanup, handleMovement, getAutomatedTravelPlanDisplay } = vm.runInNewContext(
+      functions + '\n' + cleanup + '\n' + movement + '\n({handleAssignmentTransitionCleanup, handleMovement, getAutomatedTravelPlanDisplay})',
       {
         userFleets: [fleet],
         clearTransportLoadRetry() {},
@@ -139,7 +139,7 @@ test('Automated movement reconciles cleanup and fuel fallback with the displayed
       : handleMovement(0, 10, 0, -39);
     await assert.rejects(movementResult, error => error === submitted);
     assert.deepEqual(departure, { mode: expectedMode, x: 0, y: -39 });
-    assert.equal(getAutomatedTravelPlanSuffix(fleet), expectedSuffix);
+    assert.equal(getAutomatedTravelPlanDisplay(fleet).suffix, expectedSuffix);
     assert.equal(fleet.automatedDeparture?.mode, cleanupPending ? undefined : expectedMode);
   }
 });
